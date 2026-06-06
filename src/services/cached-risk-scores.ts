@@ -339,3 +339,23 @@ export function toCountryScore(cached: CachedCIIScore): CountryScore {
     lastUpdated: cached.lastUpdated ? new Date(cached.lastUpdated) : null,
   };
 }
+
+export function normalizeCiiCountryCode(code: string): string {
+  return code.toUpperCase();
+}
+
+export function getCachedCountryScore(code: string): CountryScore | null {
+  const normalizedCode = normalizeCiiCountryCode(code);
+  const cached = getCachedScores()?.cii.find((score) => score.code === normalizedCode);
+  return cached ? toCountryScore(cached) : null;
+}
+
+export function getCachedCountryScoreValue(code: string): number | null {
+  return getCachedCountryScore(code)?.score ?? null;
+}
+
+export function getCachedCountryScores(): CountryScore[] {
+  const cached = getCachedScores();
+  if (!cached?.cii.length) return [];
+  return cached.cii.map(toCountryScore).sort((a, b) => b.score - a.score);
+}

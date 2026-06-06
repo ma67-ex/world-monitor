@@ -4,6 +4,7 @@ import { getLatestSanctionsPressure, type SanctionsPressureResult } from './sanc
 import { getLatestRadiationWatch, type RadiationObservation } from './radiation';
 import type { CascadeResult, CascadeImpactLevel } from '@/types';
 import { calculateCII, isInLearningMode } from './country-instability';
+import { getCachedCountryScores } from './cached-risk-scores';
 import { getCountryNameByCode } from './country-geometry';
 import { t } from '@/services/i18n';
 import type { TheaterPostureSummary } from '@/services/military-surge';
@@ -101,6 +102,17 @@ const alerts: UnifiedAlert[] = [];
 const previousCIIScores = new Map<string, number>();
 const ALERT_MERGE_WINDOW_MS = 2 * 60 * 60 * 1000;
 const ALERT_MERGE_DISTANCE_KM = 200;
+
+type CIIScoreSource = 'cached' | 'local';
+let previousCIIScoreSource: CIIScoreSource | null = null;
+
+function getAuthoritativeCIIScores(): { scores: CountryScore[]; source: CIIScoreSource } {
+  const cachedScores = getCachedCountryScores();
+  if (cachedScores.length > 0) {
+    return { scores: cachedScores, source: 'cached' };
+  }
+  return { scores: calculateCII(), source: 'local' };
+}
 
 let alertIdCounter = 0;
 function generateAlertId(): string {
@@ -560,7 +572,11 @@ function getCountriesNearLocation(lat: number, lon: number): string[] {
 
 export function checkCIIChanges(): UnifiedAlert[] {
   const newAlerts: UnifiedAlert[] = [];
-  const scores = calculateCII();
+  const { scores, source } = getAuthoritativeCIIScores();
+  if (previousCIIScoreSource !== null && previousCIIScoreSource !== source) {
+    previousCIIScores.clear();
+  }
+  previousCIIScoreSource = source;
 
   // Skip alerting during learning mode - data not yet reliable
   const inLearning = isInLearningMode();
@@ -628,7 +644,7 @@ export function calculateStrategicRiskOverview(
   breakingAlertScore?: number,
   theaterStaleFactor?: number
 ): StrategicRiskOverview {
-  const ciiScores = calculateCII();
+  const { scores: ciiScores } = getAuthoritativeCIIScores();
 
   // Update the alerts array with current data
   updateAlerts(convergenceAlerts);
@@ -810,6 +826,8 @@ export function getRecentAlerts(hours: number = 24): UnifiedAlert[] {
 
 export function clearAlerts(): void {
   alerts.length = 0;
+  previousCIIScores.clear();
+  previousCIIScoreSource = null;
 }
 
 export function getAlertCount(): { critical: number; high: number; medium: number; low: number } {

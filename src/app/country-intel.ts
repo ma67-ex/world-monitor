@@ -21,8 +21,8 @@ import {
   iso3ToIso2Code,
   nameToCountryCode,
 } from '@/services/country-geometry';
-import { calculateCII, getCountryData, TIER1_COUNTRIES, hasIntelligenceSignalsLoaded, type CountryScore } from '@/services/country-instability';
-import { getCachedScores, toCountryScore } from '@/services/cached-risk-scores';
+import { calculateCII, getCountryData, TIER1_COUNTRIES, type CountryScore } from '@/services/country-instability';
+import { getCachedCountryScore, normalizeCiiCountryCode } from '@/services/cached-risk-scores';
 import { signalAggregator } from '@/services/signal-aggregator';
 import { dataFreshness } from '@/services/data-freshness';
 import { fetchCountryMarkets } from '@/services/prediction';
@@ -216,13 +216,8 @@ export class CountryIntelManager implements AppModule {
     const canonicalName = TIER1_COUNTRIES[code] || CountryIntelManager.resolveCountryName(code);
     if (canonicalName !== code) country = canonicalName;
 
-    const scores = calculateCII();
-    let score = scores.find((s) => s.code === code) ?? null;
-
-    if (!hasIntelligenceSignalsLoaded()) {
-      const cached = getCachedScores()?.cii.find((c) => c.code === code);
-      if (cached) score = toCountryScore(cached);
-    }
+    const scoreCode = normalizeCiiCountryCode(code);
+    const score = getCachedCountryScore(scoreCode) ?? calculateCII().find((s) => s.code === scoreCode) ?? null;
 
     const signals = this.getCountrySignals(code, country);
 
@@ -738,12 +733,8 @@ export class CountryIntelManager implements AppModule {
     const code = page.getCode();
     if (!code || code === '__loading__' || code === '__error__') return;
     const name = TIER1_COUNTRIES[code] ?? CountryIntelManager.resolveCountryName(code);
-    const scores = calculateCII();
-    let score = scores.find((s) => s.code === code) ?? null;
-    if (!hasIntelligenceSignalsLoaded()) {
-      const cached = getCachedScores()?.cii.find((c) => c.code === code);
-      if (cached) score = toCountryScore(cached);
-    }
+    const scoreCode = normalizeCiiCountryCode(code);
+    const score = getCachedCountryScore(scoreCode) ?? calculateCII().find((s) => s.code === scoreCode) ?? null;
     const signals = this.getCountrySignals(code, name);
     page.updateScore?.(score, signals);
   }
