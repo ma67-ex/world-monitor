@@ -17,13 +17,19 @@ import {
 import { TIER1_COUNTRIES as SERVER_TIER1_COUNTRIES } from '../server/worldmonitor/intelligence/v1/_shared.ts';
 import {
   BASELINE_RISK,
+  CII_TREND_BUCKET_LOOKUP_RADIUS,
+  CII_TREND_BUCKET_MS,
+  CII_TREND_TARGET_AGE_MS,
   EVENT_MULTIPLIER,
   computeCIIScores,
   computeStrategicRisks,
   filterRiskScoresResponse,
   geoToCountry,
   getAcledFetchWindows,
+  getCiiTrendHistoryBucket,
+  getCiiTrendPriorCandidateBuckets,
   normalizeCountryName,
+  selectCiiTrendPriorSnapshot,
 } from '../server/worldmonitor/intelligence/v1/get-risk-scores.ts';
 import {
   CII_BASELINE_RISK as SHARED_BASELINE_RISK,
@@ -60,6 +66,29 @@ function acledEvent(country: string, type: string, fatalities = 0) {
 
 function scoreFor(scores: ReturnType<typeof computeCIIScores>, code: string) {
   return scores.find((s) => s.region === code);
+}
+
+const TREND_TEST_NOW = 1_700_000_000_000;
+
+function priorCiiScore(region: string, combinedScore: number, computedAt = TREND_TEST_NOW - CII_TREND_TARGET_AGE_MS) {
+  return {
+    region,
+    staticBaseline: 0,
+    dynamicScore: 0,
+    combinedScore,
+    trend: 'TREND_DIRECTION_STABLE',
+    components: { newsActivity: 0, ciiContribution: 0, geoConvergence: 0, militaryActivity: 0 },
+    computedAt,
+    methodologyVersion: CII_FORMULA_VERSION,
+    eventMultiplier: 1,
+  } as ReturnType<typeof computeCIIScores>[number];
+}
+
+function trendSnapshot(capturedAt: number) {
+  return {
+    capturedAt,
+    ciiScores: [priorCiiScore('US', 42, capturedAt)],
+  };
 }
 
 describe('CII signal wiring', () => {
@@ -402,6 +431,124 @@ describe('CII scoring', () => {
     const scores = computeCIIScores([], emptyAux());
     const us = scoreFor(scores, 'US')!;
     assert.ok(us.combinedScore >= 2 && us.combinedScore <= 10, `US baseline score ${us.combinedScore} should be ~2-10`);
+  });
+
+  it('cold-start emits flat movement instead of baseline delta', () => {
+    const us = scoreFor(computeCIIScores([], emptyAux(), { nowMs: TREND_TEST_NOW }), 'US')!;
+    assert.notEqual(us.combinedScore - us.staticBaseline, 0, 'fixture should have a non-zero structural baseline gap');
+    assert.equal(us.dynamicScore, 0, 'cold-start movement must not reuse combinedScore - staticBaseline');
+    assert.equal(us.trend, 'TREND_DIRECTION_STABLE');
+  });
+
+  it('derives rising trend and dynamicScore from a prior CII snapshot', () => {
+    const current = scoreFor(computeCIIScores([], emptyAux(), { nowMs: TREND_TEST_NOW }), 'US')!;
+    const us = scoreFor(
+      computeCIIScores([], emptyAux(), {
+        nowMs: TREND_TEST_NOW,
+        priorScores: [priorCiiScore('US', current.combinedScore - 5)],
+      }),
+      'US',
+    )!;
+
+    assert.equal(us.dynamicScore, 5);
+    assert.equal(us.trend, 'TREND_DIRECTION_RISING');
+  });
+
+  it('derives falling trend and negative dynamicScore from a prior CII snapshot', () => {
+    const current = scoreFor(computeCIIScores([], emptyAux(), { nowMs: TREND_TEST_NOW }), 'US')!;
+    const us = scoreFor(
+      computeCIIScores([], emptyAux(), {
+        nowMs: TREND_TEST_NOW,
+        priorScores: [priorCiiScore('US', current.combinedScore + 5)],
+      }),
+      'US',
+    )!;
+
+    assert.equal(us.dynamicScore, -5);
+    assert.equal(us.trend, 'TREND_DIRECTION_FALLING');
+  });
+
+  it('keeps trend stable inside the one-point deadband while preserving the measured delta', () => {
+    const current = scoreFor(computeCIIScores([], emptyAux(), { nowMs: TREND_TEST_NOW }), 'US')!;
+    const us = scoreFor(
+      computeCIIScores([], emptyAux(), {
+        nowMs: TREND_TEST_NOW,
+        priorScores: [priorCiiScore('US', current.combinedScore - 1)],
+      }),
+      'US',
+    )!;
+
+    assert.equal(us.dynamicScore, 1);
+    assert.equal(us.trend, 'TREND_DIRECTION_STABLE');
+  });
+
+  it('rejects live-cache-age prior snapshots when deriving CII movement', () => {
+    const current = scoreFor(computeCIIScores([], emptyAux(), { nowMs: TREND_TEST_NOW }), 'US')!;
+    const us = scoreFor(
+      computeCIIScores([], emptyAux(), {
+        nowMs: TREND_TEST_NOW,
+        priorScores: [priorCiiScore('US', current.combinedScore - 10, TREND_TEST_NOW - 10 * 60 * 1000)],
+      }),
+      'US',
+    )!;
+
+    assert.equal(us.dynamicScore, 0);
+    assert.equal(us.trend, 'TREND_DIRECTION_STABLE');
+  });
+
+  it('ignores stale prior snapshots when deriving CII movement', () => {
+    const current = scoreFor(computeCIIScores([], emptyAux(), { nowMs: TREND_TEST_NOW }), 'US')!;
+    const us = scoreFor(
+      computeCIIScores([], emptyAux(), {
+        nowMs: TREND_TEST_NOW,
+        priorScores: [priorCiiScore('US', current.combinedScore - 10, TREND_TEST_NOW - 25 * 60 * 60 * 1000)],
+      }),
+      'US',
+    )!;
+
+    assert.equal(us.dynamicScore, 0);
+    assert.equal(us.trend, 'TREND_DIRECTION_STABLE');
+  });
+
+  it('targets trend history buckets around the 24-hour comparison window', () => {
+    const targetBucket = getCiiTrendHistoryBucket(TREND_TEST_NOW - CII_TREND_TARGET_AGE_MS);
+    const currentBucket = getCiiTrendHistoryBucket(TREND_TEST_NOW);
+    const buckets = getCiiTrendPriorCandidateBuckets(TREND_TEST_NOW);
+
+    assert.equal(buckets[0], targetBucket);
+    assert.equal(new Set(buckets).size, 1 + CII_TREND_BUCKET_LOOKUP_RADIUS * 2);
+    assert.equal(buckets.includes(currentBucket), false, 'trend lookup must not target the live cache bucket');
+  });
+
+  it('selects the prior snapshot closest to 24 hours and ignores outside-window snapshots', () => {
+    const recent = trendSnapshot(TREND_TEST_NOW - 10 * 60 * 1000);
+    const outside = trendSnapshot(
+      TREND_TEST_NOW - CII_TREND_TARGET_AGE_MS - (CII_TREND_BUCKET_LOOKUP_RADIUS + 1) * CII_TREND_BUCKET_MS,
+    );
+    const farther = trendSnapshot(TREND_TEST_NOW - CII_TREND_TARGET_AGE_MS - 2 * CII_TREND_BUCKET_MS);
+    const closest = trendSnapshot(TREND_TEST_NOW - CII_TREND_TARGET_AGE_MS + CII_TREND_BUCKET_MS);
+
+    assert.equal(selectCiiTrendPriorSnapshot([recent, outside], TREND_TEST_NOW), null);
+    assert.equal(selectCiiTrendPriorSnapshot([recent, farther, closest], TREND_TEST_NOW), closest);
+  });
+
+  it('handler uses dedicated trend history rather than stale fallback as the movement prior', () => {
+    const handlerPath = resolve(
+      fileURLToPath(new URL('.', import.meta.url)),
+      '..',
+      'server',
+      'worldmonitor',
+      'intelligence',
+      'v1',
+      'get-risk-scores.ts',
+    );
+    const handlerSource = readFileSync(handlerPath, 'utf8');
+    const freshGateIndex = handlerSource.indexOf("if (source === 'fresh')");
+    const trendPersistIndex = handlerSource.indexOf('await persistCiiTrendSnapshot(result)');
+
+    assert.match(handlerSource, /readCiiTrendPriorScores\(nowMs\)/);
+    assert.doesNotMatch(handlerSource, /priorRiskScores/);
+    assert.ok(trendPersistIndex > freshGateIndex, 'trend history writes must be gated to fresh upstream computations');
   });
 
   it('newsTopStories critical threat boosts newsActivity for attributed country', () => {
@@ -797,26 +944,81 @@ describe('CII scoring', () => {
     );
   });
 
-  it('public changelog documents the current CII_FORMULA_VERSION and cache impact', () => {
-    const changelogPath = resolve(
-      fileURLToPath(new URL('.', import.meta.url)),
-      '..',
-      'docs',
-      'changelog.mdx',
-    );
-    const changelog = readFileSync(changelogPath, 'utf8');
+  it('public changelogs document the current CII_FORMULA_VERSION and cache impact', () => {
+    const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+    const changelogs = [
+      ['CHANGELOG.md', readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8')],
+      ['docs/changelog.mdx', readFileSync(resolve(root, 'docs', 'changelog.mdx'), 'utf8')],
+    ] as const;
+
+    for (const [label, changelog] of changelogs) {
+      assert.match(
+        changelog,
+        new RegExp(`CII (?:methodology|formula)[^\\n]*${CII_FORMULA_VERSION}`),
+        `${label} must publish the CII ${CII_FORMULA_VERSION} entry`,
+      );
+      assert.ok(
+        changelog.includes('combinedScore') &&
+        changelog.includes(`risk:scores:sebuf:${CII_FORMULA_VERSION}`) &&
+        changelog.includes(`methodology_version`) &&
+        changelog.includes(CII_FORMULA_VERSION),
+        `${label} must describe combinedScore, cache-key, and methodology_version impact`,
+      );
+    }
+  });
+
+  it('public changelogs retain the CII v4 attribution/source semantics entry', () => {
+    const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+    const changelogs = [
+      ['CHANGELOG.md', readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8')],
+      ['docs/changelog.mdx', readFileSync(resolve(root, 'docs', 'changelog.mdx'), 'utf8')],
+    ] as const;
+
+    for (const [label, changelog] of changelogs) {
+      const normalizedChangelog = changelog.replace(/\s+/g, ' ');
+      assert.match(
+        changelog,
+        /CII (?:methodology|formula)[^\n]*`?v4`?/,
+        `${label} must retain the CII v4 changelog entry`,
+      );
+      for (const requiredText of [
+        'token exact-match',
+        '4.5_week',
+        'country-count map',
+        'combinedScore',
+        'risk:scores:sebuf:v4',
+        'methodology_version',
+      ]) {
+        assert.ok(
+          normalizedChangelog.includes(requiredText),
+          `${label} CII v4 entry must mention ${requiredText}`,
+        );
+      }
+    }
+  });
+
+  it('CII dynamicScore contract allows signed 24-hour movement deltas', () => {
+    const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+    const proto = readFileSync(resolve(root, 'proto', 'worldmonitor', 'intelligence', 'v1', 'intelligence.proto'), 'utf8');
+    const serviceOpenapi = readFileSync(resolve(root, 'docs', 'api', 'IntelligenceService.openapi.yaml'), 'utf8');
+    const unifiedOpenapi = readFileSync(resolve(root, 'docs', 'api', 'worldmonitor.openapi.yaml'), 'utf8');
+
     assert.match(
-      changelog,
-      new RegExp(`CII methodology ${CII_FORMULA_VERSION}`),
-      `docs/changelog.mdx must publish the CII methodology ${CII_FORMULA_VERSION} entry`,
+      proto,
+      /Approximate 24-hour score movement delta \(-100 to 100\)[\s\S]*double dynamic_score = 3 \[[\s\S]*double\.gte = -100,[\s\S]*double\.lte = 100/,
+      'proto CiiScore.dynamic_score must be a signed 24-hour movement delta, not a non-negative real-time score',
     );
-    assert.ok(
-      changelog.includes('combinedScore') &&
-      changelog.includes(`risk:scores:sebuf:${CII_FORMULA_VERSION}`) &&
-      changelog.includes(`methodology_version`) &&
-      changelog.includes(CII_FORMULA_VERSION),
-      'docs/changelog.mdx must describe combinedScore, cache-key, and methodology_version impact',
-    );
+    for (const [label, yaml] of [
+      ['IntelligenceService.openapi.yaml', serviceOpenapi],
+      ['worldmonitor.openapi.yaml', unifiedOpenapi],
+    ] as const) {
+      const dynamicScoreBlock = yaml.match(/dynamicScore:\n(?: {20}.+\n)+/);
+      assert.ok(dynamicScoreBlock, `${label} must expose CiiScore.dynamicScore`);
+      assert.match(dynamicScoreBlock[0], /minimum: -100/, `${label} dynamicScore minimum must allow falling deltas`);
+      assert.match(dynamicScoreBlock[0], /maximum: 100/, `${label} dynamicScore maximum must cap rising deltas`);
+      assert.match(dynamicScoreBlock[0], /Approximate 24-hour score movement delta \(-100 to 100\)/, `${label} dynamicScore description must match proto semantics`);
+      assert.doesNotMatch(dynamicScoreBlock[0], /Dynamic real-time score \(0-100\)/, `${label} must not retain stale non-negative dynamicScore prose`);
+    }
   });
 
   it('current public CII docs do not reintroduce pre-v3 stale claims', () => {
@@ -827,6 +1029,8 @@ describe('CII scoring', () => {
       'docs/algorithms.mdx',
       'docs/overview.mdx',
       'docs/features.mdx',
+      'docs/methodology/cii-risk-scores.mdx',
+      'docs/Docs_To_Review/DOCUMENTATION.md',
       'docs/COMMUNITY-PROMOTION-GUIDE.md',
     ];
     const stalePatterns = [
@@ -838,6 +1042,15 @@ describe('CII scoring', () => {
       /relay\s+CII\s+seed\s+loop\s+is\s+disabled/i,
       /GPS[-/ ]only\s+security/i,
       /GPS\s+jamming\s+only/i,
+      /dynamicScore[\s\S]{0,120}composite\s+−\s+staticBaseline/i,
+      /dynamicScore[\s\S]{0,120}composite\s+-\s+staticBaseline/i,
+      /CII\s+v3\s+stability\s+scores/i,
+      /real-time\s+CII\s+v3\s+instability\s+score/i,
+      /Computes\s+CII\s+v3\s+scores/i,
+      /Subsequent\s+changes\s+of\s+±5\s+points\s+trigger\s+trend\s+changes/i,
+      /score\s+increased\s+by\s+at\s+least\s+5\s+points/i,
+      /change\s+is\s+within\s+5\s+points/i,
+      /score\s+decreased\s+by\s+at\s+least\s+5\s+points/i,
     ];
 
     const violations: string[] = [];
@@ -874,19 +1087,67 @@ describe('CII scoring', () => {
     );
   });
 
-  it('risk-score Redis payload keys are bumped with the CII formula version', () => {
+  it('risk-score Redis payload keys are derived from the CII formula version', () => {
     const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
     const source = readFileSync(
       resolve(root, 'server', 'worldmonitor', 'intelligence', 'v1', 'get-risk-scores.ts'),
       'utf8',
     );
-    assert.ok(
-      source.includes(`risk:scores:sebuf:${CII_FORMULA_VERSION}`),
-      `live CII cache key must include CII_FORMULA_VERSION ${CII_FORMULA_VERSION}`,
+    assert.match(
+      source,
+      /RISK_CACHE_KEY\s*=\s*`risk:scores:sebuf:\$\{CII_FORMULA_VERSION\}`/,
+      `live CII cache key must derive from CII_FORMULA_VERSION ${CII_FORMULA_VERSION}`,
     );
-    assert.ok(
-      source.includes(`risk:scores:sebuf:stale:${CII_FORMULA_VERSION}`),
-      `stale CII cache key must include CII_FORMULA_VERSION ${CII_FORMULA_VERSION}`,
+    assert.match(
+      source,
+      /RISK_STALE_CACHE_KEY\s*=\s*`risk:scores:sebuf:stale:\$\{CII_FORMULA_VERSION\}`/,
+      `stale CII cache key must derive from CII_FORMULA_VERSION ${CII_FORMULA_VERSION}`,
+    );
+    assert.match(
+      source,
+      /RISK_TREND_HISTORY_CACHE_KEY_PREFIX\s*=\s*`risk:scores:sebuf:trend-history:\$\{CII_FORMULA_VERSION\}`/,
+      `trend-history CII cache key must derive from CII_FORMULA_VERSION ${CII_FORMULA_VERSION}`,
+    );
+  });
+
+  it('downstream CII risk-score consumers use the current cache key family', () => {
+    const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+    const expectedLiveKey = `risk:scores:sebuf:${CII_FORMULA_VERSION}`;
+    const expectedStaleKey = `risk:scores:sebuf:stale:${CII_FORMULA_VERSION}`;
+    const keyPattern = /risk:scores:sebuf(?::stale)?:v\d+/g;
+    const consumers: Array<{ relPath: string; expectedKeys: string[] }> = [
+      { relPath: 'api/bootstrap.js', expectedKeys: [expectedStaleKey] },
+      { relPath: 'api/health.js', expectedKeys: [expectedStaleKey, expectedLiveKey] },
+      { relPath: 'api/mcp/registry/cache-tools.ts', expectedKeys: [expectedStaleKey] },
+      { relPath: 'server/_shared/cache-keys.ts', expectedKeys: [expectedStaleKey] },
+      { relPath: 'server/worldmonitor/intelligence/v1/brief-story-context.ts', expectedKeys: [expectedStaleKey] },
+      { relPath: 'server/worldmonitor/intelligence/v1/chat-analyst-context.ts', expectedKeys: [expectedStaleKey] },
+      { relPath: 'server/worldmonitor/intelligence/v1/get-country-risk.ts', expectedKeys: [expectedStaleKey] },
+      { relPath: 'scripts/seed-cross-source-signals.mjs', expectedKeys: [expectedStaleKey] },
+      { relPath: 'scripts/seed-forecasts.mjs', expectedKeys: [expectedStaleKey] },
+      { relPath: 'scripts/regional-snapshot/balance-vector.mjs', expectedKeys: [expectedStaleKey] },
+      { relPath: 'scripts/regional-snapshot/evidence-collector.mjs', expectedKeys: [expectedStaleKey] },
+      { relPath: 'scripts/regional-snapshot/freshness.mjs', expectedKeys: [expectedStaleKey] },
+      { relPath: 'scripts/regional-snapshot/trigger-evaluator.mjs', expectedKeys: [expectedStaleKey] },
+      { relPath: 'tests/mcp-bootstrap-parity.test.mjs', expectedKeys: [expectedLiveKey, expectedStaleKey] },
+      { relPath: 'tests/regional-snapshot.test.mjs', expectedKeys: [expectedStaleKey] },
+    ];
+
+    const violations: string[] = [];
+    for (const { relPath, expectedKeys } of consumers) {
+      const source = readFileSync(resolve(root, relPath), 'utf8');
+      for (const expectedKey of expectedKeys) {
+        if (!source.includes(expectedKey)) violations.push(`${relPath}: missing ${expectedKey}`);
+      }
+      for (const match of source.matchAll(keyPattern)) {
+        if (!expectedKeys.includes(match[0])) violations.push(`${relPath}: stale ${match[0]}`);
+      }
+    }
+
+    assert.equal(
+      violations.length,
+      0,
+      `CII risk-score cache consumers must track ${CII_FORMULA_VERSION}:\n  ${violations.join('\n  ')}`,
     );
   });
 

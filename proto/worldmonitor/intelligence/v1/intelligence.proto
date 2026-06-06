@@ -15,9 +15,10 @@ message CiiScore {
     (buf.validate.field).double.gte = 0,
     (buf.validate.field).double.lte = 100
   ];
-  // Dynamic real-time score (0-100).
+  // Approximate 24-hour score movement delta (-100 to 100). Positive means rising,
+  // negative means falling, and 0 means stable or no valid prior snapshot.
   double dynamic_score = 3 [
-    (buf.validate.field).double.gte = 0,
+    (buf.validate.field).double.gte = -100,
     (buf.validate.field).double.lte = 100
   ];
   // Combined weighted score (0-100).
@@ -31,9 +32,9 @@ message CiiScore {
   CiiComponents components = 6;
   // Last computation time, as Unix epoch milliseconds.
   int64 computed_at = 7 [(sebuf.http.int64_encoding) = INT64_ENCODING_NUMBER];
-  // Methodology version string for this score (e.g. "v1").
-  // Bumped whenever the editorial weights in CII_FORMULA_VERSION change so
-  // API clients can detect score drift. See docs/methodology/cii-risk-scores.mdx.
+  // Methodology version string for this score (e.g. "v5").
+  // Bumped whenever CII_FORMULA_VERSION changes so API clients can detect
+  // score or movement-semantics drift. See docs/methodology/cii-risk-scores.mdx.
   string methodology_version = 8;
   // Editorial per-country event multiplier applied to live signals before
   // they roll into the composite score. Published for transparency — issue
