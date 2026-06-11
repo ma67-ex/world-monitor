@@ -1,9 +1,10 @@
 import type { AppContext, AppModule } from '@/app/app-context';
+import { applyAgentBusAction } from '@/app/agent-bus-applier';
 import { normalizeExclusiveChoropleths } from '@/components/resilience-choropleth-utils';
 import { replayPendingCalls, clearAllPendingCalls } from '@/app/pending-panel-data';
 import { getAlertsNearLocation } from '@/services/geo-convergence';
 import { effectivePubDateMs } from '@/services/feed-date';
-import type { ClusteredEvent } from '@/types';
+import type { ClusteredEvent, MapLayers } from '@/types';
 import type { RelatedAsset } from '@/types';
 import type { TheaterPostureSummary } from '@/services/military-surge';
 import {
@@ -99,6 +100,8 @@ import {
   ALL_PANELS,
   VARIANT_DEFAULTS,
   isPanelInVariantDefaults,
+  getEffectivePanelConfig,
+  isPanelEntitled,
 } from '@/config';
 import { resolveNewsCategories, enabledNewsCategoryKeys } from '@/config/feed-resolution';
 import { BETA_MODE } from '@/config/beta';
@@ -179,6 +182,7 @@ export interface PanelLayoutManagerCallbacks {
   loadAllData: () => Promise<void>;
   updateMonitorResults: () => void;
   loadSecurityAdvisories?: () => Promise<void>;
+  applyMapLayerChange?: (layer: keyof MapLayers, enabled: boolean, source: 'programmatic') => void;
 }
 
 export class PanelLayoutManager implements AppModule {
@@ -1198,7 +1202,16 @@ export class PanelLayoutManager implements AppModule {
     // reactively by updatePanelGating() via auth state subscription (all in WEB_PREMIUM_PANELS).
 
     this.lazyPanel('chat-analyst', () =>
-      import('@/components/ChatAnalystPanel').then(m => new m.ChatAnalystPanel()),
+      import('@/components/ChatAnalystPanel').then(m => {
+        const panel = new m.ChatAnalystPanel();
+        panel.setDashboardActionHandler((action) => applyAgentBusAction(this.ctx, action, {
+          getPanelConfig: (panelId) => getEffectivePanelConfig(panelId, SITE_VARIANT),
+          isPanelAllowed: (panelId, config) => isPanelEntitled(panelId, config, hasPremiumAccess(getAuthState())),
+          hasPremiumAccess: () => hasPremiumAccess(getAuthState()),
+          applyLayerChange: this.callbacks.applyMapLayerChange,
+        }));
+        return panel;
+      }),
     );
 
     this.lazyPanel('forecast', () =>
