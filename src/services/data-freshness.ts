@@ -5,11 +5,13 @@
  */
 
 import { getCSSColor } from '@/utils/theme-colors';
+import { isHealthMappedSource } from '@/services/health-freshness-map';
 import type { DataSourceId } from '@/types';
 
 export type { DataSourceId } from '@/types';
 
 export type FreshnessStatus = 'fresh' | 'stale' | 'very_stale' | 'no_data' | 'disabled' | 'error';
+type FreshnessEvidence = 'session' | 'seed-health';
 
 export interface DataSourceState {
   id: DataSourceId;
@@ -23,6 +25,7 @@ export interface DataSourceState {
   requiredForRisk: boolean;
   maxStaleMin?: number;
   healthStatus?: string;
+  freshnessEvidence: FreshnessEvidence | null;
 }
 
 export interface DataFreshnessSummary {
@@ -35,6 +38,24 @@ export interface DataFreshnessSummary {
   coveragePercent: number;
   oldestUpdate: Date | null;
   newestUpdate: Date | null;
+}
+
+export interface PanelFreshnessSource {
+  id: DataSourceId;
+  name: string;
+  status: FreshnessStatus;
+  lastUpdate: Date | null;
+  itemCount: number;
+  healthStatus?: string;
+  lastError: string | null;
+}
+
+export interface PanelFreshnessSummary {
+  panelId: string;
+  status: FreshnessStatus;
+  lastUpdate: Date | null;
+  labelUpdate: Date | null;
+  sources: PanelFreshnessSource[];
 }
 
 export interface SeedHealthUpdate {
@@ -97,6 +118,41 @@ const SOURCE_METADATA: Record<DataSourceId, { name: string; requiredForRisk: boo
   treasury_revenue: { name: 'Treasury Customs Revenue', requiredForRisk: false, panelId: 'trade-policy' },
 };
 
+const PANEL_FRESHNESS_SOURCES: Record<string, readonly DataSourceId[]> = {
+  'strategic-risk': CORE_SOURCES,
+  cii: CORE_SOURCES,
+  'live-news': ['rss'],
+  intel: ['gdelt', 'pizzint'],
+  'gdelt-intel': ['gdelt'],
+  protests: ['acled', 'acled_conflict', 'gdelt_doc', 'ucdp', 'hapi'],
+  'ucdp-events': ['ucdp_events'],
+  polymarket: ['polymarket', 'predictions'],
+  economic: ['economic', 'oil', 'spending', 'bis', 'bls'],
+  'trade-policy': ['wto_trade', 'treasury_revenue'],
+  'supply-chain': ['supply_chain'],
+  'security-advisories': ['security_advisories'],
+  'sanctions-pressure': ['sanctions_pressure'],
+  'radiation-watch': ['radiation'],
+  displacement: ['unhcr'],
+  climate: ['climate'],
+  'population-exposure': ['worldpop'],
+  giving: ['giving'],
+  'internet-disruptions': ['outages'],
+  outages: ['outages'],
+  military: ['opensky', 'wingbits'],
+  shipping: ['ais'],
+  natural: ['usgs'],
+};
+
+const STATUS_SEVERITY: Record<FreshnessStatus, number> = {
+  fresh: 0,
+  disabled: 1,
+  stale: 2,
+  very_stale: 3,
+  no_data: 4,
+  error: 5,
+};
+
 class DataFreshnessTracker {
   private sources: Map<DataSourceId, DataSourceState> = new Map();
   private listeners: Set<() => void> = new Set();
@@ -113,6 +169,7 @@ class DataFreshnessTracker {
         enabled: true, // Assume enabled by default
         status: 'no_data',
         requiredForRisk: meta.requiredForRisk,
+        freshnessEvidence: null,
       });
     }
   }
@@ -123,9 +180,16 @@ class DataFreshnessTracker {
   recordUpdate(sourceId: DataSourceId, itemCount: number = 1): void {
     const source = this.sources.get(sourceId);
     if (source) {
+      if (isHealthMappedSource(sourceId) && source.freshnessEvidence === 'seed-health') {
+        source.itemCount += itemCount;
+        source.status = source.enabled ? this.calculateStatus(source) : 'disabled';
+        this.notifyListeners();
+        return;
+      }
       source.lastUpdate = new Date();
       source.itemCount += itemCount;
       source.lastError = null;
+      source.freshnessEvidence = 'session';
       source.status = this.calculateStatus(source);
       this.notifyListeners();
     }
@@ -137,6 +201,11 @@ class DataFreshnessTracker {
   recordError(sourceId: DataSourceId, error: string): void {
     const source = this.sources.get(sourceId);
     if (source) {
+      if (isHealthMappedSource(sourceId) && source.freshnessEvidence === 'seed-health') {
+        source.status = source.enabled ? this.calculateStatus(source) : 'disabled';
+        this.notifyListeners();
+        return;
+      }
       source.lastError = error;
       source.status = 'error';
       this.notifyListeners();
@@ -179,6 +248,7 @@ class DataFreshnessTracker {
         ? (maxContentAgeMin ?? maxStaleMin)
         : maxStaleMin;
       source.healthStatus = update.status;
+      source.freshnessEvidence = 'seed-health';
       source.lastError = this.healthStatusIsError(update.status) ? update.status : null;
       source.lastUpdate = this.healthStatusHasNoData(update.status)
         ? null
@@ -299,6 +369,80 @@ class DataFreshnessTracker {
   }
 
   /**
+   * Get freshness sources that contribute to a panel header badge.
+   */
+  getSourcesForPanel(panelId: string): PanelFreshnessSource[] {
+    const sourceIds = this.getSourceIdsForPanel(panelId);
+    if (sourceIds.length === 0 || sourceIds.some(sourceId => !isHealthMappedSource(sourceId))) {
+      return [];
+    }
+
+    const sources = sourceIds.map(sourceId => this.getSource(sourceId));
+    if (sources.some(source => !source || source.freshnessEvidence !== 'seed-health')) {
+      return [];
+    }
+
+    return sources
+      .filter((source): source is DataSourceState => Boolean(source))
+      .map(source => ({
+        id: source.id,
+        name: source.name,
+        status: source.status,
+        lastUpdate: source.lastUpdate,
+        itemCount: source.itemCount,
+        healthStatus: source.healthStatus,
+        lastError: source.lastError,
+      }));
+  }
+
+  /**
+   * Aggregate a panel's mapped sources to the worst current status.
+   */
+  getPanelFreshness(panelId: string): PanelFreshnessSummary | null {
+    const sources = this.getSourcesForPanel(panelId);
+    if (sources.length === 0) return null;
+
+    const activeSources = sources.filter(source => source.status !== 'disabled');
+    const sourcesForStatus = activeSources.length > 0 ? activeSources : sources;
+    const worstStatus = sourcesForStatus.reduce<FreshnessStatus>((worst, source) => (
+      STATUS_SEVERITY[source.status] > STATUS_SEVERITY[worst] ? source.status : worst
+    ), 'fresh');
+
+    const updates = sources
+      .map(source => source.lastUpdate)
+      .filter((date): date is Date => date instanceof Date);
+    const newestUpdate = updates.length > 0
+      ? new Date(Math.max(...updates.map(date => date.getTime())))
+      : null;
+    const worstStatusUpdates = sourcesForStatus
+      .filter(source => source.status === worstStatus)
+      .map(source => source.lastUpdate)
+      .filter((date): date is Date => date instanceof Date);
+    const labelUpdate = worstStatusUpdates.length > 0
+      ? new Date(Math.min(...worstStatusUpdates.map(date => date.getTime())))
+      : newestUpdate;
+
+    return {
+      panelId,
+      status: worstStatus,
+      lastUpdate: newestUpdate,
+      labelUpdate,
+      sources,
+    };
+  }
+
+  private getSourceIdsForPanel(panelId: string): DataSourceId[] {
+    const explicitSources = PANEL_FRESHNESS_SOURCES[panelId];
+    const sourceIds = new Set<DataSourceId>(explicitSources ?? []);
+    for (const sourceId of Object.entries(SOURCE_METADATA)
+      .filter(([, meta]) => meta.panelId === panelId)
+      .map(([sourceId]) => sourceId as DataSourceId)) {
+      sourceIds.add(sourceId);
+    }
+    return [...sourceIds];
+  }
+
+  /**
    * Subscribe to changes
    */
   subscribe(listener: () => void): () => void {
@@ -348,14 +492,19 @@ class DataFreshnessTracker {
    */
   getTimeSince(sourceId: DataSourceId): string {
     const source = this.sources.get(sourceId);
-    if (!source?.lastUpdate) return 'never';
+    return this.formatTimeSince(source?.lastUpdate ?? null);
+  }
 
-    const ms = Date.now() - source.lastUpdate.getTime();
+  private formatTimeSince(date: Date | null): string {
+    if (!date) return 'never';
+
+    const ms = Math.max(0, Date.now() - date.getTime());
     if (ms < 60000) return 'just now';
     if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`;
     if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`;
     return `${Math.floor(ms / 86400000)}d ago`;
   }
+
 }
 
 // Singleton instance
