@@ -2638,6 +2638,7 @@ export class PanelLayoutManager implements AppModule {
         dragStarted = true;
         
         // Initialize drag visualization
+        document.body.classList.add('panel-drag-active');
         el.classList.add('dragging-source');
         originalParent = el.parentElement as HTMLElement;
         originalIndex = Array.from(originalParent.children).indexOf(el);
@@ -2647,6 +2648,7 @@ export class PanelLayoutManager implements AppModule {
         onKeyDown = (e: KeyboardEvent) => {
           if (e.key === 'Escape') {
             // Cancel drag and restore original position
+            document.body.classList.remove('panel-drag-active');
             el.classList.remove('dragging-source');
             if (ghostEl) {
               ghostEl.style.opacity = '0';
@@ -2710,7 +2712,7 @@ export class PanelLayoutManager implements AppModule {
         const dropPos = findDropPosition(lastX, lastY);
         const moved = dropPos ? commitDrop(dropPos, lastX, lastY) : false;
         
-        // Clean up drag visualization
+        // Clean up drag visualization (panel-drag-active is cleared unconditionally below)
         el.classList.remove('dragging-source');
         if (ghostEl) {
           ghostEl.style.opacity = '0';
@@ -2740,6 +2742,7 @@ export class PanelLayoutManager implements AppModule {
         }
       }
       dragStarted = false;
+      document.body.classList.remove('panel-drag-active');
       originalRect = null;
       if (onKeyDown) {
         document.removeEventListener('keydown', onKeyDown);
@@ -2767,6 +2770,7 @@ export class PanelLayoutManager implements AppModule {
       if (dropIndicator) dropIndicator.remove();
       isDragging = false;
       dragStarted = false;
+      document.body.classList.remove('panel-drag-active');
       originalRect = null;
       el.classList.remove('dragging-source');
     });
