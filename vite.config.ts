@@ -1162,6 +1162,19 @@ export default defineConfig(({ mode }) => {
                 return 'clerk';
               }
             }
+            // Large static config DATA TABLE (~62KB) with only lazy consumers
+            // (search/map/globe/tech-hub services). Isolating it keeps it off the
+            // eager entry now that the @/config barrel no longer re-exports its
+            // values and data-loader lazy-loads the tech-activity chain. Pure
+            // data (type-only imports) → no unmatched-static-dep circular risk. (#4404)
+            if (id.endsWith('/src/config/tech-geo.ts')) {
+              return 'tech-geo-data';
+            }
+            // airports table (~14KB) — only consumer is the lazy AviationCommandBar
+            // (imports directly); kept off the eager @/config barrel above. (#4404)
+            if (id.endsWith('/src/config/airports.ts')) {
+              return 'airports-data';
+            }
             // Co-locate the deck.gl renderer with the deck vendor chunk so
             // onlyExplicitManualChunks cannot split deck's transitive deps
             // across the DeckGLMap boundary (which formed a circular chunk →
