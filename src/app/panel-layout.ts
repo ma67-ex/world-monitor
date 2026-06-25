@@ -1,5 +1,4 @@
 import type { AppContext, AppModule } from '@/app/app-context';
-import { applyAgentBusAction } from '@/app/agent-bus-applier';
 import { normalizeExclusiveChoropleths } from '@/components/resilience-choropleth-utils';
 import { replayPendingCalls, clearAllPendingCalls } from '@/app/pending-panel-data';
 import {
@@ -1633,14 +1632,24 @@ export class PanelLayoutManager implements AppModule {
     // reactively by updatePanelGating() via auth state subscription (all in WEB_PREMIUM_PANELS).
 
     this.lazyPanel('chat-analyst', () =>
+      // agent-bus-applier (and its zod-backed shared/agent-bus-actions schemas, ~69KB)
+      // is only reachable through this lazy panel's action handler. Start loading it
+      // here so it stays off the eager main entry, but do not make plain chat depend
+      // on the optional dashboard-control chunk being available.
       import('@/components/ChatAnalystPanel').then(m => {
         const panel = new m.ChatAnalystPanel();
-        panel.setDashboardActionHandler((action) => applyAgentBusAction(this.ctx, action, {
-          getPanelConfig: (panelId) => getEffectivePanelConfig(panelId, SITE_VARIANT),
-          isPanelAllowed: (panelId, config) => isPanelEntitled(panelId, config, hasPremiumAccess(getAuthState())),
-          hasPremiumAccess: () => hasPremiumAccess(getAuthState()),
-          applyLayerChange: this.callbacks.applyMapLayerChange,
-        }));
+        void import('@/app/agent-bus-applier')
+          .then(({ applyAgentBusAction }) => {
+            panel.setDashboardActionHandler((action) => applyAgentBusAction(this.ctx, action, {
+              getPanelConfig: (panelId) => getEffectivePanelConfig(panelId, SITE_VARIANT),
+              isPanelAllowed: (panelId, config) => isPanelEntitled(panelId, config, hasPremiumAccess(getAuthState())),
+              hasPremiumAccess: () => hasPremiumAccess(getAuthState()),
+              applyLayerChange: this.callbacks.applyMapLayerChange,
+            }));
+          })
+          .catch((err) => {
+            console.error('[panel] failed to lazy-load "chat-analyst" dashboard action handler', err);
+          });
         return panel;
       }),
     );
