@@ -444,11 +444,7 @@ describe('welcome landing page routing', () => {
     // the redirect is decided from the live __session JWT alone.
     assert.ok(!welcomeApp.includes("import('./services/clerk')"));
     assert.ok(!welcomeApp.includes("import('./services/checkout')"));
-    assert.ok(welcomeApp.includes('hasLiveSessionJwt(document.cookie)'));
-    assert.ok(welcomeApp.includes("import { DASHBOARD_PATH } from './routes';"));
-    assert.ok(welcomeApp.includes('function dashboardRedirectTarget(): string'));
-    assert.ok(welcomeApp.includes('`${DASHBOARD_PATH}${window.location.search}${window.location.hash}`'));
-    assert.ok(welcomeApp.includes('window.location.replace(dashboardRedirectTarget());'));
+    assert.ok(welcomeApp.includes('maybeRedirectWelcomeVisitor(document.cookie, window.location)'));
   });
 });
 
