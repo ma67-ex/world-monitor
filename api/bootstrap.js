@@ -227,6 +227,19 @@ export function isPublicWeatherBootstrapRequest(req) {
   return requested.length === 1 && requested[0] === 'weatherAlerts';
 }
 
+const BOOTSTRAP_CREDENTIAL_COOKIES = new Set(['wm-session', 'wm-pro-key', 'wm-widget-key']);
+
+function hasBootstrapCredentialCookie(req) {
+  const raw = req.headers.get('Cookie') || req.headers.get('cookie') || '';
+  if (!raw) return false;
+
+  for (const part of raw.split(';')) {
+    const name = part.trim().split('=', 1)[0];
+    if (BOOTSTRAP_CREDENTIAL_COOKIES.has(name)) return true;
+  }
+  return false;
+}
+
 const NEG_SENTINEL = '__WM_NEG__';
 
 async function getCachedJsonBatch(keys) {
@@ -268,7 +281,7 @@ function authFailure(body, status, cors, extraHeaders = {}) {
 
 async function validateBootstrapAuth(req, cors) {
   const headerKey = getHeaderApiKey(req);
-  if (!headerKey && isPublicWeatherBootstrapRequest(req)) {
+  if (!headerKey && !hasBootstrapCredentialCookie(req) && isPublicWeatherBootstrapRequest(req)) {
     return { ok: true, kind: 'public-weather' };
   }
 
@@ -341,8 +354,7 @@ async function validateBootstrapAuth(req, cors) {
 }
 
 function successCacheHeaders(tier, authKind, cors) {
-  const isKeyAuth = authKind === 'enterprise' || authKind === 'user';
-  if (isKeyAuth) {
+  if (authKind !== 'public-weather') {
     return {
       ...cors,
       'Cache-Control': 'no-store',
@@ -388,11 +400,9 @@ export default async function handler(req) {
   try {
     cached = await getCachedJsonBatch(keys);
   } catch {
-    // Read auth.kind directly (not the output of successCacheHeaders) so a
-    // key-authenticated empty fallback always stays no-store and can never be
-    // shared-cached by a CDN to another caller.
-    const isKeyAuth = auth.kind === 'enterprise' || auth.kind === 'user';
-    const cacheControl = isKeyAuth ? 'no-store' : 'no-cache';
+    // Only the anonymous weather bootstrap may avoid no-store here; every
+    // other successful bootstrap response can carry session/key scoped data.
+    const cacheControl = auth.kind === 'public-weather' ? 'no-cache' : 'no-store';
     return jsonResponse({ data: {}, missing: names }, 200, { ...cors, 'Cache-Control': cacheControl });
   }
 
