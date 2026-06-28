@@ -28,9 +28,20 @@ type StoredSseEvent = {
 };
 
 const SSE_CONTENT_TYPE = 'text/event-stream; charset=utf-8';
+// no-store forbids storage outright; no-cache is vacuous alongside it (RFC 9111
+// §5.2) so it is omitted. no-transform is load-bearing for SSE framing. This also
+// matches the sibling no-store work in api/mcp/rpc.ts (#4502).
+const MCP_CACHE_CONTROL = 'no-store, no-transform';
 const MAX_SSE_SESSIONS = 500;
 const MAX_SSE_STREAMS_PER_SESSION = 25;
 const mcpSseStreamsBySession = new Map<string, Map<string, StoredSseEvent[]>>();
+
+function getMcpCorsHeaders(methods = 'POST, GET, OPTIONS'): Record<string, string> {
+  return {
+    ...getPublicCorsHeaders(methods),
+    'Cache-Control': MCP_CACHE_CONTROL,
+  };
+}
 
 function clientAcceptsSse(req: Request): boolean {
   const accept = req.headers.get('accept') ?? '';
@@ -122,7 +133,7 @@ function replayEventsAfter(sessionId: string, lastEventId: string): StoredSseEve
 function sseHeadersFrom(headers: Headers): Headers {
   const out = new Headers(headers);
   out.set('Content-Type', SSE_CONTENT_TYPE);
-  out.set('Cache-Control', 'no-cache, no-transform');
+  out.set('Cache-Control', MCP_CACHE_CONTROL);
   return out;
 }
 
@@ -187,7 +198,7 @@ function handleSseReplay(req: Request, corsHeaders: Record<string, string>): Res
 
   return new Response(createSseStream(events), {
     status: 200,
-    headers: { 'Content-Type': SSE_CONTENT_TYPE, 'Cache-Control': 'no-cache, no-transform', ...corsHeaders },
+    headers: { 'Content-Type': SSE_CONTENT_TYPE, ...corsHeaders },
   });
 }
 
@@ -200,7 +211,7 @@ export async function mcpHandler(
   ctx?: { waitUntil: (p: Promise<unknown>) => void },
 ): Promise<Response> {
   // MCP is a public API endpoint secured by API key — allow all origins (claude.ai, Claude Desktop, custom agents)
-  const corsHeaders = getPublicCorsHeaders('POST, GET, OPTIONS');
+  const corsHeaders = getMcpCorsHeaders();
 
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders });
