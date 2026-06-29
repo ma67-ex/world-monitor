@@ -289,6 +289,43 @@ function deferredPanelFootprintRegistryEntries() {
   return entries;
 }
 
+
+function deferredDynamicPanelFootprintRegistryEntries() {
+  const decl = panelLayoutSrc.indexOf('DEFERRED_DYNAMIC_PANEL_FOOTPRINTS');
+  assert.notEqual(decl, -1, 'DEFERRED_DYNAMIC_PANEL_FOOTPRINTS registry not found');
+  const open = panelLayoutSrc.indexOf('{', panelLayoutSrc.indexOf('= {', decl));
+  const close = findMatchingBrace(panelLayoutSrc, open);
+  assert.ok(open !== -1 && close !== -1, 'DEFERRED_DYNAMIC_PANEL_FOOTPRINTS body not found');
+  const body = panelLayoutSrc.slice(open + 1, close);
+  const entries = new Map();
+  const entryRe = /(?:['"]([^'"]+)['"]|([a-zA-Z0-9_-]+))\s*:\s*\{/g;
+  let match;
+  while ((match = entryRe.exec(body))) {
+    const key = match[1] || match[2];
+    const entryOpen = body.indexOf('{', match.index);
+    const entryClose = findMatchingBrace(body, entryOpen);
+    assert.ok(entryClose !== -1, 'unclosed dynamic deferred footprint entry for ' + key);
+    entries.set(key, body.slice(entryOpen + 1, entryClose));
+    entryRe.lastIndex = entryClose + 1;
+  }
+  return entries;
+}
+
+function dynamicConstructorRowSpan(file, className) {
+  const src = readFileSync(resolve(__dirname, '../src/components', file), 'utf-8');
+  for (const body of superObjectBodies(src)) {
+    const classNameRaw = body.match(/className:\s*([^,\n}]+)/);
+    if (!classNameRaw) continue;
+    const classNameValue = staticStringLiteralValue(classNameRaw[1]);
+    if (!classNameValue?.split(/\s+/).includes(className)) continue;
+    const rowSpanRaw = body.match(/defaultRowSpan:\s*([^,\n}]+)/);
+    if (!rowSpanRaw) return undefined;
+    const value = rowSpanRaw[1].trim();
+    return /^\d+$/.test(value) ? Number(value) : undefined;
+  }
+  return undefined;
+}
+
 describe('panel-config guardrails', () => {
   it('every variant config includes "map"', () => {
     for (const v of VARIANT_FILES) {
@@ -422,6 +459,14 @@ describe('panel-config guardrails', () => {
       [],
       'Deferred shell natural footprint registry mismatch:\n' + mismatches.join('\n'),
     );
+  });
+
+  it('reserves deferred shells for dynamic custom and MCP panel footprints', () => {
+    const dynamicEntries = deferredDynamicPanelFootprintRegistryEntries();
+    assert.match(dynamicEntries.get('cw-') ?? '', /rowSpan:\s*2/, 'cw- dynamic shell row span missing');
+    assert.match(dynamicEntries.get('mcp-') ?? '', /rowSpan:\s*2/, 'mcp- dynamic shell row span missing');
+    assert.equal(dynamicConstructorRowSpan('CustomWidgetPanel.ts', 'custom-widget-panel'), 2);
+    assert.equal(dynamicConstructorRowSpan('McpDataPanel.ts', 'mcp-data-panel'), 2);
   });
 
   it('runs dynamic custom and MCP panels through the mounted-panel hydration path', () => {

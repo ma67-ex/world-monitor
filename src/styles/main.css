@@ -2359,6 +2359,23 @@ body.panel-resize-active iframe {
   contain-intrinsic-size: var(--dashboard-panel-row-min, 260px);
 }
 
+.panel-deferred-shell.panel-wide,
+.panel-deferred-shell.span-2 {
+  contain-intrinsic-size: var(--dashboard-first-grid-reservation, 400px);
+}
+
+.panel-deferred-shell.span-3 {
+  contain-intrinsic-size: 600px;
+}
+
+.panel-deferred-shell.span-4 {
+  contain-intrinsic-size: 800px;
+}
+
+.panel-deferred-shell.panel-collapsed .panel-deferred-content {
+  display: none;
+}
+
 .panel-deferred-content {
   display: flex;
   flex-direction: column;
@@ -13121,6 +13138,28 @@ a.prediction-link:hover {
     width: 100% !important;
     min-height: 250px;
     max-height: min(70vh, 500px);
+  }
+
+  /*
+   * On mobile the grid is a single-column flexbox, so grid-row/column spans and
+   * .panel-wide are inert — every real panel renders within the 250-500px band
+   * above. Override the desktop span-based shell reservations (404/600/800px) so
+   * the deferred placeholder reserves the same floor the real mobile panel uses,
+   * otherwise tall/wide shells would shrink on mount and reintroduce CLS.
+   */
+  .panel-deferred-shell,
+  .panel-deferred-shell.panel-wide,
+  .panel-deferred-shell.span-2,
+  .panel-deferred-shell.span-3,
+  .panel-deferred-shell.span-4 {
+    contain-intrinsic-size: 250px;
+  }
+
+  .panel-deferred-shell.panel-collapsed,
+  .panel-deferred-shell.panel-collapsed.span-2,
+  .panel-deferred-shell.panel-collapsed.span-3,
+  .panel-deferred-shell.panel-collapsed.span-4 {
+    contain-intrinsic-size: auto;
   }
 
   .panel-content {

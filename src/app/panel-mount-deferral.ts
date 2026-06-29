@@ -9,8 +9,8 @@ import {
 
 export const INITIAL_PANEL_MOUNT_BUDGET_DESKTOP = 8;
 // Mobile mounts fewer panels eagerly; the rest get IntersectionObserver shells (700px
-// lookahead) and mount before they scroll into view. Lowered 4→3 to trim boot DOM /
-// main-thread work on mobile (#4460 / #4443 U4); the typically 1–2 above-the-fold panels
+// lookahead) and mount before they scroll into view. Lowered 4->3 to trim boot DOM /
+// main-thread work on mobile (#4460 / #4443 U4); the typically 1-2 above-the-fold panels
 // still mount eagerly, so no added skeleton flash.
 export const INITIAL_PANEL_MOUNT_BUDGET_MOBILE = 3;
 
@@ -20,17 +20,24 @@ export interface PanelMountDeferralInput {
   isMobile: boolean;
 }
 
+export type DeferredPanelFootprintSource = 'natural' | 'saved';
+
 export interface DeferredPanelShellFootprint {
   className?: string;
   rowSpan?: number;
+  rowSpanSource?: DeferredPanelFootprintSource;
   colSpan?: number;
+  colSpanSource?: DeferredPanelFootprintSource;
+  collapsed?: boolean;
 }
 
 export interface DeferredPanelShellFootprintInput {
   panelId: string;
-  naturalFootprints?: Readonly<Record<string, DeferredPanelShellFootprint>>;
-  savedRowSpans?: Readonly<Record<string, number>>;
-  savedColSpans?: Readonly<Record<string, number>>;
+  naturalFootprints?: Readonly<Record<string, DeferredPanelShellFootprint | undefined>>;
+  dynamicFootprints?: Readonly<Record<string, DeferredPanelShellFootprint | undefined>>;
+  savedRowSpans?: Readonly<Record<string, number | undefined>>;
+  savedColSpans?: Readonly<Record<string, number | undefined>>;
+  savedCollapsed?: Readonly<Record<string, boolean | undefined>>;
 }
 
 const CONTROL_SELECTOR = [
@@ -59,6 +66,24 @@ function addClassTokens(element: HTMLElement, className: string | undefined): vo
   }
 }
 
+function hasClassToken(className: string | undefined, token: string): boolean {
+  return className?.split(/\s+/).includes(token) === true;
+}
+
+function getNaturalFootprint({
+  panelId,
+  naturalFootprints,
+  dynamicFootprints,
+}: Pick<DeferredPanelShellFootprintInput, 'panelId' | 'naturalFootprints' | 'dynamicFootprints'>): DeferredPanelShellFootprint {
+  const exact = naturalFootprints?.[panelId];
+  if (exact) return exact;
+  if (!dynamicFootprints) return {};
+  for (const [prefix, footprint] of Object.entries(dynamicFootprints)) {
+    if (panelId.startsWith(prefix) && footprint) return footprint;
+  }
+  return {};
+}
+
 export function getInitialPanelMountBudget(isMobile: boolean): number {
   return isMobile ? INITIAL_PANEL_MOUNT_BUDGET_MOBILE : INITIAL_PANEL_MOUNT_BUDGET_DESKTOP;
 }
@@ -73,16 +98,43 @@ export function shouldDeferInitialPanelMount({
 
 export function getDeferredPanelShellFootprint({
   panelId,
-  naturalFootprints = {},
-  savedRowSpans = {},
-  savedColSpans = {},
+  naturalFootprints,
+  dynamicFootprints,
+  savedRowSpans,
+  savedColSpans,
+  savedCollapsed,
 }: DeferredPanelShellFootprintInput): DeferredPanelShellFootprint {
-  const natural = naturalFootprints[panelId] ?? {};
-  return {
+  const natural = getNaturalFootprint({ panelId, naturalFootprints, dynamicFootprints });
+  const naturalRowSpan = clampSpan(natural.rowSpan, MAX_PANEL_ROW_SPAN);
+  const savedRowSpan = clampSpan(savedRowSpans?.[panelId], MAX_PANEL_ROW_SPAN);
+  const naturalColSpan = clampSpan(natural.colSpan, MAX_PANEL_COL_SPAN);
+  const savedColSpan = clampSpan(savedColSpans?.[panelId], MAX_PANEL_COL_SPAN);
+  const defaultColSpan = hasClassToken(natural.className, 'panel-wide') ? 2 : 1;
+
+  const footprint: DeferredPanelShellFootprint = {
     className: natural.className,
-    rowSpan: clampSpan(savedRowSpans[panelId], MAX_PANEL_ROW_SPAN) ?? clampSpan(natural.rowSpan, MAX_PANEL_ROW_SPAN),
-    colSpan: clampSpan(savedColSpans[panelId], MAX_PANEL_COL_SPAN) ?? clampSpan(natural.colSpan, MAX_PANEL_COL_SPAN),
+    collapsed: savedCollapsed?.[panelId] === true,
   };
+
+  if (savedRowSpan !== undefined) {
+    footprint.rowSpan = savedRowSpan;
+    footprint.rowSpanSource = 'saved';
+  } else if (naturalRowSpan !== undefined && naturalRowSpan > 1) {
+    footprint.rowSpan = naturalRowSpan;
+    footprint.rowSpanSource = 'natural';
+  }
+
+  if (savedColSpan !== undefined) {
+    if (savedColSpan !== defaultColSpan) {
+      footprint.colSpan = savedColSpan;
+      footprint.colSpanSource = 'saved';
+    }
+  } else if (naturalColSpan !== undefined && naturalColSpan !== defaultColSpan) {
+    footprint.colSpan = naturalColSpan;
+    footprint.colSpanSource = 'natural';
+  }
+
+  return footprint;
 }
 
 export function createDeferredPanelShell(
@@ -100,11 +152,18 @@ export function createDeferredPanelShell(
   const rowSpan = clampSpan(footprint.rowSpan, MAX_PANEL_ROW_SPAN);
   if (rowSpan !== undefined) {
     shell.classList.add(`span-${rowSpan}`);
+    if (footprint.rowSpanSource === 'saved') {
+      shell.classList.add('resized');
+    }
   }
 
   const colSpan = clampSpan(footprint.colSpan, MAX_PANEL_COL_SPAN);
   if (colSpan !== undefined) {
     shell.classList.add(`col-span-${colSpan}`);
+  }
+
+  if (footprint.collapsed) {
+    shell.classList.add('panel-collapsed');
   }
 
   const header = document.createElement('div');
@@ -139,7 +198,7 @@ export function createDeferredPanelShell(
  * the grid's column template/width is only readable once the shell is attached,
  * so when it is not yet connected we retry across up to `attempts` animation
  * frames instead of clamping against a 0-width grid (which would read a wrong
- * column count and leave an over-wide shell — a layout shift in the opposite
+ * column count and leave an over-wide shell -- a layout shift in the opposite
  * direction until the real panel mounts).
  */
 export function reconcileDeferredPanelShellColSpan(shell: HTMLElement, attempts = 3): void {

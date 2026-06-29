@@ -283,6 +283,76 @@ describe('panel mount deferral', () => {
     assert.equal(shell.classList.contains('col-span-1'), true);
   });
 
+
+  it('marks saved row-span deferred shells as resized', () => {
+    const document = installDom();
+    const shell = createDeferredPanelShell(
+      'supply-chain',
+      'Supply Chain',
+      getDeferredPanelShellFootprint({
+        panelId: 'supply-chain',
+        naturalFootprints: { 'supply-chain': { rowSpan: 2 } },
+        savedRowSpans: { 'supply-chain': 3 },
+      }),
+    );
+    document.body.appendChild(shell);
+
+    assert.equal(shell.classList.contains('span-3'), true);
+    assert.equal(shell.classList.contains('resized'), true);
+  });
+
+  it('keeps a saved col-span that equals a non-wide natural col-span', () => {
+    const footprint = getDeferredPanelShellFootprint({
+      panelId: 'wide-data',
+      naturalFootprints: { 'wide-data': { colSpan: 2 } },
+      savedColSpans: { 'wide-data': 2 },
+    });
+
+    assert.equal(footprint.colSpan, 2);
+    assert.equal(footprint.colSpanSource, 'saved');
+  });
+
+  it('suppresses a saved col-span that matches the panel-wide default of 2', () => {
+    const footprint = getDeferredPanelShellFootprint({
+      panelId: 'live-webcams',
+      naturalFootprints: { 'live-webcams': { className: 'panel-wide' } },
+      savedColSpans: { 'live-webcams': 2 },
+    });
+
+    assert.equal(footprint.className, 'panel-wide');
+    assert.equal(footprint.colSpan, undefined);
+  });
+
+  it('applies collapsed state and dynamic default footprints to deferred shells', () => {
+    const document = installDom();
+    const dynamicFootprints = {
+      'cw-': { rowSpan: 2 },
+      'mcp-': { rowSpan: 2 },
+    };
+
+    const customShell = createDeferredPanelShell(
+      'cw-example',
+      'Custom Widget',
+      getDeferredPanelShellFootprint({ panelId: 'cw-example', dynamicFootprints }),
+    );
+    const mcpShell = createDeferredPanelShell(
+      'mcp-example',
+      'MCP Data',
+      getDeferredPanelShellFootprint({
+        panelId: 'mcp-example',
+        dynamicFootprints,
+        savedCollapsed: { 'mcp-example': true },
+      }),
+    );
+    document.body.appendChild(customShell);
+    document.body.appendChild(mcpShell);
+
+    assert.equal(customShell.classList.contains('span-2'), true);
+    assert.equal(mcpShell.classList.contains('span-2'), true);
+    assert.equal(mcpShell.classList.contains('panel-collapsed'), true);
+    assert.equal(countInteractiveControls(mcpShell), 0);
+  });
+
   it('rejects out-of-range or non-integer saved spans and falls back to the natural footprint', () => {
     installDom();
     const footprint = getDeferredPanelShellFootprint({
