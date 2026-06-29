@@ -1,6 +1,7 @@
 import type { AppContext, AppModule } from '@/app/app-context';
 import { getRpcBaseUrl } from '@/services/rpc-client';
 import { enqueuePanelCall } from '@/app/pending-panel-data';
+import { markLcpDebug } from '@/utils/lcp-debug';
 import { getSignalAggregator, type SignalAggregator } from '@/app/lazy-services';
 import type { NewsItem, MapLayers, SocialUnrestEvent, MilitaryFlight } from '@/types';
 import type { MarketData } from '@/types';
@@ -566,6 +567,83 @@ export class DataLoaderManager implements AppModule {
     this.refreshCiiAndBrief(false);
   }
 
+  public refreshGeometryDependentCiiAfterCountryGeometry(): void {
+    markLcpDebug('wm:data:country-geometry-replay-start');
+    const cache = this.ctx.intelligenceCache;
+    let replayed = 0;
+
+    if (cache.protests || cache.conflicts || cache.military || cache.iranEvents) {
+      resetHotspotActivity();
+    }
+    if (cache.protests) {
+      ingestProtestsForCII(cache.protests.events);
+      replayed += 1;
+    }
+    if (cache.conflicts) {
+      ingestConflictsForCII(cache.conflicts);
+      replayed += 1;
+    }
+    if (cache.military) {
+      ingestMilitaryForCII(cache.military.flights, cache.military.vessels);
+      replayed += 1;
+    }
+    if (cache.iranEvents) {
+      const coerced = cache.iranEvents.map(e => ({ ...e, timestamp: Number(e.timestamp) || 0 }));
+      ingestStrikesForCII(coerced);
+      replayed += 1;
+    }
+    if (cache.earthquakes) {
+      ingestEarthquakesForCII(cache.earthquakes);
+      replayed += 1;
+    }
+    if (cache.flightDelays) {
+      const severe = cache.flightDelays.filter(d => d.severity === 'major' || d.severity === 'severe' || d.delayType === 'closure');
+      if (severe.length > 0) {
+        ingestAviationForCII(severe);
+        replayed += 1;
+      }
+    }
+    if (cache.outages) {
+      ingestOutagesForCII(cache.outages);
+      replayed += 1;
+    }
+    if (cache.orefAlerts) {
+      ingestOrefForCII(cache.orefAlerts.alertCount, cache.orefAlerts.historyCount24h);
+      replayed += 1;
+    }
+    if (cache.advisories) {
+      ingestAdvisoriesForCII(cache.advisories);
+      replayed += 1;
+    }
+    if (cache.sanctions) {
+      ingestSanctionsForCII(cache.sanctions.countries);
+      replayed += 1;
+    }
+    if (this.ctx.cyberThreatsCache) {
+      ingestCyberThreatsForCII(this.ctx.cyberThreatsCache);
+      replayed += 1;
+    }
+    // Coordinate-only sources (no country hint) that resolve purely via
+    // precision geometry. Without this replay their first-pass attribution —
+    // computed during the fan-out before geometry was ready — stays empty until
+    // the next scheduled refresh (#4512).
+    if (cache.gpsJamming?.length) {
+      ingestGpsJammingForCII(cache.gpsJamming);
+      replayed += 1;
+    }
+    if (cache.aisDisruptions?.length) {
+      ingestAisDisruptionsForCII(cache.aisDisruptions);
+      replayed += 1;
+    }
+    if (cache.satelliteFires?.length) {
+      ingestSatelliteFiresForCII(cache.satelliteFires);
+      replayed += 1;
+    }
+
+    markLcpDebug('wm:data:country-geometry-replay-ready', { replayed });
+    if (replayed > 0) this.refreshCiiAndBrief(false);
+  }
+
   private async tryFetchDigest(): Promise<ListFeedDigestResponse | null> {
     const now = Date.now();
 
@@ -577,6 +655,7 @@ export class DataLoaderManager implements AppModule {
     }
 
     try {
+      markLcpDebug('wm:data:feed-digest-start');
       const resp = await fetch(
         toApiUrl(`/api/news/v1/list-feed-digest?variant=${SITE_VARIANT}&lang=${getCurrentLanguage()}`),
         { cache: 'no-cache', signal: AbortSignal.timeout(this.digestRequestTimeoutMs) },
@@ -584,12 +663,14 @@ export class DataLoaderManager implements AppModule {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json() as ListFeedDigestResponse;
       const catCount = Object.keys(data.categories ?? {}).length;
+      markLcpDebug('wm:data:feed-digest-ready', { categories: catCount });
       console.info(`[News] Digest fetched: ${catCount} categories`);
       this.lastGoodDigest = data;
       this.persistDigest(data);
       this.digestBreaker = { state: 'closed', failures: 0, cooldownUntil: 0 };
       return data;
     } catch (e) {
+      markLcpDebug('wm:data:feed-digest-error');
       console.warn('[News] Digest fetch failed, using fallback:', e);
       this.digestBreaker.failures++;
       if (this.digestBreaker.failures >= 2) {
@@ -2411,6 +2492,7 @@ export class DataLoaderManager implements AppModule {
     tasks.push((async () => {
       try {
         const conflictData = await fetchConflictEvents();
+        this.ctx.intelligenceCache.conflicts = conflictData.events;
         ingestConflictsForCII(conflictData.events);
         if (conflictData.count > 0) dataFreshness.recordUpdate('acled_conflict', conflictData.count);
       } catch (error) {
@@ -2606,10 +2688,12 @@ export class DataLoaderManager implements AppModule {
         try {
           const data = await fetchGpsInterference();
           if (!data) {
+            this.ctx.intelligenceCache.gpsJamming = [];
             ingestGpsJammingForCII([]);
             this.ctx.map?.setLayerReady('gpsJamming', false);
             return;
           }
+          this.ctx.intelligenceCache.gpsJamming = data.hexes;
           ingestGpsJammingForCII(data.hexes);
           if (this.ctx.mapLayers.gpsJamming) {
             await this.ctx.map?.setGpsJamming(data.hexes);
@@ -2743,6 +2827,7 @@ export class DataLoaderManager implements AppModule {
       const aisStatus = getAisStatus();
       console.log('[Ships] Events:', { disruptions: disruptions.length, density: density.length, vessels: aisStatus.vessels });
       this.ctx.map?.setAisData(disruptions, density);
+      this.ctx.intelligenceCache.aisDisruptions = disruptions;
       await runSignalAggregator(this.ctx.statusPanel, 'AIS disruptions', (aggregator) => aggregator.ingestAisDisruptions(disruptions));
       ingestAisDisruptionsForCII(disruptions);
       this.refreshCiiAndBrief();
@@ -3449,6 +3534,7 @@ export class DataLoaderManager implements AppModule {
           acq_date: new Date(f.detectedAt).toISOString().slice(0, 10),
         }));
 
+        this.ctx.intelligenceCache.satelliteFires = satelliteFires;
         await runSignalAggregator(this.ctx.statusPanel, 'satellite fires', (aggregator) => aggregator.ingestSatelliteFires(satelliteFires));
         ingestSatelliteFiresForCII(satelliteFires);
         this.refreshCiiAndBrief();
@@ -3459,6 +3545,7 @@ export class DataLoaderManager implements AppModule {
 
         dataFreshness.recordUpdate('firms', totalCount);
       } else {
+        this.ctx.intelligenceCache.satelliteFires = [];
         ingestSatelliteFiresForCII([]);
         this.refreshCiiAndBrief();
         (this.ctx.panels['satellite-fires'] as SatelliteFiresPanel)?.update([], 0);
