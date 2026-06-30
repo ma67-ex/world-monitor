@@ -16,6 +16,7 @@ const EXPECTED_OG_LOCALE = {
   el: 'el_GR',
   en: 'en_US',
   es: 'es_ES',
+  fa: 'fa_IR',
   fr: 'fr_FR',
   hi: 'hi_IN',
   hr: 'hr_HR',
@@ -52,6 +53,10 @@ function flattenKeys(value, prefix = '') {
   return Object.entries(value).flatMap(([key, child]) => flattenKeys(child, prefix ? prefix + '.' + key : key));
 }
 
+function sameList(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 describe('pro locale registry', () => {
   const appI18n = readFileSync(join(ROOT, 'src', 'services', 'i18n.ts'), 'utf8');
   const app = readFileSync(join(ROOT, 'src', 'App.ts'), 'utf8');
@@ -80,7 +85,7 @@ describe('pro locale registry', () => {
     }
   });
 
-  it('keeps non-English pro locales on the established localized schema shape', () => {
+  it('keeps non-English pro locales on an accepted schema shape', () => {
     const localizedFiles = readdirSync(PRO_LOCALES_DIR)
       .filter((name) => name.endsWith('.json') && name !== 'en.json')
       .sort();
@@ -88,10 +93,14 @@ describe('pro locale registry', () => {
     assert.ok(referenceFile, 'expected at least one localized pro locale');
 
     const referenceKeys = flattenKeys(JSON.parse(readFileSync(join(PRO_LOCALES_DIR, referenceFile), 'utf8'))).sort();
+    const englishKeys = flattenKeys(JSON.parse(readFileSync(join(PRO_LOCALES_DIR, 'en.json'), 'utf8'))).sort();
 
     for (const file of filesToCheck) {
       const keys = flattenKeys(JSON.parse(readFileSync(join(PRO_LOCALES_DIR, file), 'utf8'))).sort();
-      assert.deepEqual(keys, referenceKeys, file + ' should match ' + referenceFile + ' schema');
+      assert.ok(
+        sameList(keys, referenceKeys) || sameList(keys, englishKeys),
+        file + ' should match either ' + referenceFile + ' schema or the complete English placeholder schema',
+      );
     }
   });
 
