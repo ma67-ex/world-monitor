@@ -2131,6 +2131,9 @@ components:
                     type: string
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
                 fsiValue:
                     type: number
                     format: double
@@ -2205,6 +2208,9 @@ components:
                     format: int32
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
         EarningsEntry:
             type: object
             properties:
@@ -2245,6 +2251,9 @@ components:
                     type: string
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
         CotInstrument:
             type: object
             properties:
@@ -2290,6 +2299,9 @@ components:
             properties:
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
                 symbol:
                     type: string
                 totalBuys:
@@ -2345,6 +2357,9 @@ components:
                         $ref: '#/components/schemas/BreadthSnapshot'
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
         BreadthSnapshot:
             type: object
             properties:
@@ -2404,6 +2419,9 @@ components:
                     type: string
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
                 session:
                     $ref: '#/components/schemas/GoldSessionRange'
                 returns:
@@ -2616,6 +2634,9 @@ components:
                         $ref: '#/components/schemas/HyperliquidAssetFlow'
                 unavailable:
                     type: boolean
+                    description: |-
+                        True when the upstream or seed-backed variant is unavailable; empty payload fields
+                         are graceful degradation, not confirmed zero data.
         HyperliquidAssetFlow:
             type: object
             properties:

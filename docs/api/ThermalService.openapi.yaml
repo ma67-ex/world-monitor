@@ -8,6 +8,10 @@ paths:
             tags:
                 - ThermalService
             summary: ListThermalEscalations
+            description: |-
+                ListThermalEscalations retrieves seeded thermal anomaly clusters. Empty
+                 clusters with empty fetched_at or data_available=false means the seed
+                 snapshot is unavailable/degraded, not that escalation is confirmed absent.
             operationId: ListThermalEscalations
             parameters:
                 - name: max_items
@@ -32,15 +36,10 @@ paths:
                                           "latitude": 40.7128
                                           "longitude": -74.006
                                       "confidence": "THERMAL_CONFIDENCE_LOW"
+                                "dataAvailable": true
                                 "fetchedAt": "2026-01-15T12:00:00Z"
                                 "observationWindowHours": 1
                                 "sourceVersion": "example"
-                                "summary":
-                                    "clusterCount": 1
-                                    "conflictAdjacentCount": 1
-                                    "elevatedCount": 1
-                                    "highRelevanceCount": 1
-                                    "persistentCount": 1
                             schema:
                                 $ref: '#/components/schemas/ListThermalEscalationsResponse'
                 "400":
@@ -100,6 +99,10 @@ components:
             properties:
                 fetchedAt:
                     type: string
+                    description: |-
+                        ISO-8601 time the seed snapshot was fetched. Empty string means the
+                         snapshot is unavailable/degraded, not that thermal escalation is confirmed
+                         absent.
                 observationWindowHours:
                     type: integer
                     format: int32
@@ -111,6 +114,11 @@ components:
                         $ref: '#/components/schemas/ThermalEscalationCluster'
                 summary:
                     $ref: '#/components/schemas/ThermalEscalationSummary'
+                dataAvailable:
+                    type: boolean
+                    description: |-
+                        True when clusters came from a seed snapshot. False means an empty payload
+                         is graceful degradation because the snapshot is unavailable.
         ThermalEscalationCluster:
             type: object
             properties:
