@@ -11,7 +11,11 @@ import { describe, it } from 'node:test';
 // regardless of whether the service's fetchers are dynamic-imported. That is the
 // exact regression #4571 removed (~150KB of service code off boot). This guard trips
 // if a deferred service is re-added to the barrel.
-const DEFERRED = ['economic', 'market', 'aviation', 'trade', 'supply-chain'];
+const DEFERRED = ['economic', 'market', 'aviation', 'trade', 'supply-chain', 'cyber', 'cable-activity', 'research'];
+// research is barrel-only (no data-loader consumer) — export*-guarded and static-import guarded,
+// but it does not need a dynamic-import assertion until data-loader actually consumes it.
+const BARREL_ONLY = new Set(['research']);
+const DATA_LOADER_DEFERRED = DEFERRED.filter((s) => !BARREL_ONLY.has(s));
 
 const src = readFileSync(new URL('../src/services/index.ts', import.meta.url), 'utf8');
 const dataLoaderSrc = readFileSync(new URL('../src/app/data-loader.ts', import.meta.url), 'utf8');
@@ -47,7 +51,7 @@ describe('data-loader keeps deferred service fetchers behind dynamic imports (#4
     });
   }
 
-  for (const svc of DEFERRED) {
+  for (const svc of DATA_LOADER_DEFERRED) {
     it(`has an explicit dynamic import for @/services/${svc}`, () => {
       const dynamicImportRe = new RegExp(`import\\(\\s*['"]@/services/${svc}['"]\\s*\\)`);
       assert.ok(
