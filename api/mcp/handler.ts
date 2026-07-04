@@ -209,6 +209,12 @@ function handleSseReplay(req: Request, corsHeaders: Record<string, string>): Res
       { status: 406, headers: withMcpNoStore({ 'Content-Type': 'application/json', ...corsHeaders }) },
     );
   }
+  // Defensive + type-narrowing guard. The sole caller (the GET branch) now
+  // answers a bare GET without `Last-Event-ID` with 405 BEFORE reaching here, so
+  // this 400 is unreachable in practice — but the check is retained because it
+  // narrows `lastEventId` from `string | null` to `string` for
+  // `replayEventsAfter` below (whose `parseEventCursor` would TypeError on null),
+  // and keeps `handleSseReplay` independently safe if a future caller is added.
   if (!lastEventId) {
     return new Response(
       JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Missing Last-Event-ID for SSE replay' } }),
@@ -280,9 +286,28 @@ export async function mcpHandler(
   const requestHost = req.headers.get('host') ?? new URL(req.url).host;
   const resourceMetadataUrl = `https://${requestHost}/.well-known/oauth-protected-resource`;
 
-  // GET is the SSE-replay path — it re-serves previously-streamed (Pro) tool
-  // result data, so it stays fully authenticated (never a discovery surface).
+  // GET has two roles on the MCP endpoint:
+  //   1. A bare GET (no `Last-Event-ID`) is a client opening the OPTIONAL
+  //      server->client SSE stream of the Streamable HTTP transport. This
+  //      stateless edge route offers no server-initiated stream, so the MCP
+  //      spec requires HTTP 405 Method Not Allowed here — and MCP SDK clients
+  //      treat 405 as the graceful "no standalone stream" signal, completing
+  //      the handshake cleanly. Answering 401/400 instead makes a strict
+  //      client's `connect()` raise `Failed to open SSE stream` and an
+  //      agent-readiness scanner (orank) report "protocol handshake failed".
+  //      This 405 precedes auth so an UNauthenticated discovery client sees the
+  //      same spec-correct signal (405 leaks nothing). RFC 9110 §15.5.6 requires
+  //      the 405 to advertise `Allow`.
+  //   2. A GET WITH `Last-Event-ID` is our authenticated SSE-replay channel —
+  //      it re-serves previously-streamed (Pro) tool-result data, so it stays
+  //      fully authenticated (never a discovery surface).
   if (req.method === 'GET') {
+    if (!req.headers.get('last-event-id')) {
+      return new Response(null, {
+        status: 405,
+        headers: withMcpNoStore({ Allow: 'POST, GET, HEAD, OPTIONS', ...corsHeaders }),
+      });
+    }
     const auth = await resolveAuthContext(req, deps, resourceMetadataUrl, corsHeaders);
     if (!auth.ok) return auth.response;
     if (auth.context.kind === 'pro') {
