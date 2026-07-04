@@ -658,6 +658,15 @@ function normalizeEventCountryCode(raw) {
   return countryNameToIso2(raw);
 }
 
+const UNATTRIBUTED_GLOBAL_EVENT_TYPES = new Set([
+  'corridor_risk',
+  'shipping_stress',
+]);
+
+function isUnattributedGlobalEvent(event) {
+  return UNATTRIBUTED_GLOBAL_EVENT_TYPES.has(event?.eventType);
+}
+
 /**
  * Score-gated dispatch decision.
  *
@@ -681,20 +690,18 @@ function normalizeEventCountryCode(raw) {
  * `payload.countryCode`, ais-relay sometimes uses `payload.country`, browser-
  * submitted rss_alert events occasionally lift `country` to the event root.
  *
- * PERMISSIVE semantics for unattributed events: when a rule has
- * countries=['US'] and an event has NO country attribution, we deliver it.
- * The publisher didn't give us enough information to filter, so the user
- * receives a global alert that may or may not be about their country.
+ * Known-global semantics for unattributed events: when a rule has
+ * countries=['US'] and a known global event has NO country attribution, do not
+ * deliver it. A populated country scope means "only alerts matching my
+ * selected countries"; delivering global Corridor Risk / Shipping Stress alerts
+ * to a Ukraine/Romania-scoped user is worse than omitting those unscoped alerts.
  *
- * RATIONALE: most publishers today (rss_alert, ais-relay generic events,
- * etc.) do not emit a country code. Strict drop-on-missing semantics would
- * deliver ZERO alerts to a user who set countries=['US'] — strictly worse
- * UX than "occasional unscoped global event slips through." A user opting
- * into country-scope expects to receive AT LEAST events from those
- * countries; permissive delivery on unattributed events meets that
- * expectation. As publishers add country attribution (planned follow-up
- * audit), scoped delivery tightens automatically. A future strict-mode
- * opt-in (e.g. rule.countriesStrict=true) is left to a follow-up UI surface.
+ * RATIONALE: the UI copy says "Restrict alerts to specific countries" and
+ * users now rely on it to narrow noisy global feeds. RSS publishers still lack
+ * reliable country attribution, so they stay permissive until attribution is
+ * available; otherwise a scoped user would lose keyword-relevant news alerts.
+ * Publishers that know a country must emit `payload.countryCode` or
+ * `payload.country` to reach scoped rules reliably.
  *
  * Strict semantics still apply when the event IS attributed but doesn't
  * match: rule.countries=['US'] + event.payload.countryCode='IR' → drop.
@@ -703,8 +710,7 @@ function normalizeEventCountryCode(raw) {
  * matching. Known malformed values emitted by current publishers (for
  * example 'USA', 'United States', 'UAE') are mapped to ISO2 and filtered
  * strictly. Unknown malformed values fall through to the "unattributed"
- * branch and are delivered permissively — the publisher emitted garbage,
- * treat it as if it emitted nothing.
+ * branch and are dropped only for known-global events.
  */
 function eventMatchesCountryScope(event, rule) {
   // Empty/absent countries on the rule → all events (no filter applied).
@@ -716,14 +722,15 @@ function eventMatchesCountryScope(event, rule) {
     ?? event?.country
     ?? null;
 
-  // Unattributed → PERMISSIVE deliver (see RATIONALE above).
+  // Unattributed -> drop only known global/noisy events; keep RSS permissive
+  // until publishers provide reliable country attribution.
   if (typeof eventCountry !== 'string' || eventCountry.trim().length === 0) {
-    return true;
+    return !isUnattributedGlobalEvent(event);
   }
 
   const normalized = normalizeEventCountryCode(eventCountry);
-  // Unknown malformed value → treat as unattributed → PERMISSIVE deliver.
-  if (normalized === null) return true;
+  // Unknown malformed value -> treat as unattributed.
+  if (normalized === null) return !isUnattributedGlobalEvent(event);
 
   return rule.countries.includes(normalized);
 }
