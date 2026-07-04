@@ -2,7 +2,6 @@
 
 const { createHash } = require('node:crypto');
 const dns = require('node:dns').promises;
-const { ConvexHttpClient } = require('convex/browser');
 const { Resend } = require('resend');
 const { decrypt } = require('./lib/crypto.cjs');
 const {
@@ -35,8 +34,22 @@ if (!UPSTASH_URL || !UPSTASH_TOKEN) { console.error('[relay] UPSTASH_REDIS_REST_
 if (!CONVEX_URL) { console.error('[relay] CONVEX_URL not set'); process.exit(1); }
 if (!RELAY_SECRET) { console.error('[relay] RELAY_SHARED_SECRET not set'); process.exit(1); }
 
-const convex = new ConvexHttpClient(CONVEX_URL);
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+
+// Fetch all enabled alertRules via the shared-secret /relay/enabled-rules
+// action. The underlying `alertRules.getByEnabled` is an internalQuery
+// (GHSA-r649-4cqj-w93h) — unreachable via ConvexHttpClient — so we go through
+// the HTTP action, mirroring the other /relay/* service calls. Throws on
+// non-2xx so callers keep their existing try/catch (fail-closed: deliver
+// nothing rather than fan out on a stale/partial rule set).
+async function fetchEnabledRules(enabled = true) {
+  const res = await fetch(`${CONVEX_SITE_URL}/relay/enabled-rules?enabled=${enabled}`, {
+    headers: { Authorization: `Bearer ${RELAY_SECRET}`, 'User-Agent': 'worldmonitor-relay/1.0' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`enabled-rules HTTP ${res.status}`);
+  return await res.json();
+}
 
 // ── Upstash REST helpers ──────────────────────────────────────────────────────
 
@@ -276,7 +289,7 @@ async function drainBatchOnWake() {
   if (!QUIET_HOURS_BATCH_ENABLED) return;
   let allRules;
   try {
-    allRules = await convex.query('alertRules:getByEnabled', { enabled: true });
+    allRules = await fetchEnabledRules(true);
   } catch (err) {
     console.warn('[relay] drainBatchOnWake: failed to fetch rules:', err.message);
     return;
@@ -296,11 +309,12 @@ async function processFlushQuietHeld(event) {
   const { userId, variant = 'full' } = event;
   if (!userId) return;
   console.log(`[relay] flush_quiet_held for ${userId} (${variant})`);
-  // Use the same public query the relay already calls in processEvent.
-  // internalQuery functions are unreachable via ConvexHttpClient.
+  // Fetch enabled rules via the shared-secret /relay/enabled-rules action —
+  // getByEnabled is an internalQuery (GHSA-r649-4cqj-w93h), unreachable via
+  // ConvexHttpClient.
   let allowedChannels = null;
   try {
-    const allRules = await convex.query('alertRules:getByEnabled', { enabled: true });
+    const allRules = await fetchEnabledRules(true);
     const rule = Array.isArray(allRules)
       ? allRules.find(r => r.userId === userId && (r.variant ?? 'full') === variant)
       : null;
@@ -997,7 +1011,7 @@ async function processEvent(event) {
 
   let enabledRules;
   try {
-    enabledRules = await convex.query('alertRules:getByEnabled', { enabled: true });
+    enabledRules = await fetchEnabledRules(true);
   } catch (err) {
     console.error('[relay] Failed to fetch alert rules:', err.message);
     return;
