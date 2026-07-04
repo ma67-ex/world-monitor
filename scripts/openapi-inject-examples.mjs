@@ -115,6 +115,12 @@ const BASELINE_TYPE_EXAMPLE_ID = (() => {
 // enum, needs an override) and BLS (enum-resolved upstream) — disambiguate by
 // operation.
 function overrideStringExample(key, context = {}) {
+  if (key === 'jmespath') return 'keys(@)';
+  if (key.includes('hs2')) return '27';
+  if (key === 'provider') {
+    const where = (String(context.operationId ?? '') + ' ' + String(context.path ?? '')).toLowerCase();
+    if (where.includes('summarizearticle') || where.includes('summarize-article')) return 'openrouter';
+  }
   if (key.includes('chokepointid')) return CHOKEPOINT_EXAMPLE_ID;
   if (key.includes('scenarioid')) return SCENARIO_EXAMPLE_ID;
   if (key.includes('icao24')) return ICAO24_EXAMPLE;
@@ -227,7 +233,6 @@ function stringExample(name, schema = {}, context = {}) {
   if (key.includes('category')) return constrainedString('cs.AI', schema);
   if (key.includes('feedtype')) return constrainedString('top', schema);
   if (key.includes('period')) return constrainedString('daily', schema);
-  if (key.includes('hs2')) return constrainedString('27', schema);
   if (key.includes('cargotype')) return constrainedString('container', schema);
   if (key.includes('commoditytype')) return constrainedString('oil', schema);
   if (key.includes('facilitytype')) return constrainedString('ugs', schema);
