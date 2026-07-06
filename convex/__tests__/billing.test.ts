@@ -1,11 +1,27 @@
 import { convexTest } from "convex-test";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import { PRODUCT_CATALOG } from "../config/productCatalog";
-import { PENDING_PAYMENT_BLOCK_WINDOW_MS } from "../payments/billing";
+import {
+  PENDING_PAYMENT_BLOCK_WINDOW_MS,
+  STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS,
+} from "../payments/billing";
 import { getFeaturesForPlan } from "../lib/entitlements";
 import { signAnonClaimToken } from "../lib/identitySigning";
+
+// Mock the Dodo REST SDK so the reconciliation action's `payments.retrieve`
+// is controllable per-test (no real network). billing.ts only news up
+// DodoPayments inside getDodoClient(), so a class stub is sufficient. No
+// other test in this file exercises the real SDK.
+const { dodoRetrieveMock } = vi.hoisted(() => ({ dodoRetrieveMock: vi.fn() }));
+vi.mock("dodopayments", () => ({
+  DodoPayments: class {
+    payments = { retrieve: dodoRetrieveMock };
+    customers = { customerPortal: { create: vi.fn() } };
+  },
+}));
 
 const modules = import.meta.glob("../**/*.ts");
 
@@ -20,11 +36,14 @@ type PlanKey = keyof typeof PRODUCT_CATALOG;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  dodoRetrieveMock.mockReset();
   vi.useRealTimers();
   delete process.env.DODO_IDENTITY_SIGNING_SECRET;
   delete process.env.DODO_ANON_CLAIM_TOKEN_TTL_MS;
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  delete process.env.DODO_API_KEY;
+  delete process.env.RESEND_API_KEY;
 });
 
 async function seedSubscription(
@@ -888,6 +907,711 @@ describe("payments pending-payment dedup guard", () => {
     );
 
     expect(result).toMatchObject({ planKey: "pro_annual" });
+  });
+});
+
+describe("payments stuck-pending reconciliation", () => {
+  test("finds stale unresolved pending payments but skips recent, terminal, and already-marked rows", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "stale_candidate",
+      dodoPaymentId: "pay_reconcile_candidate",
+    });
+    await seedPaymentEvent(t, {
+      status: "processing",
+      planKey: "pro_monthly",
+      occurredAt: NOW - 5 * MIN_MS,
+      suffix: "recent_pending",
+      dodoPaymentId: "pay_reconcile_recent",
+    });
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - 2 * MIN_MS,
+      suffix: "terminal_pending",
+      dodoPaymentId: "pay_reconcile_terminal",
+    });
+    await seedPaymentEvent(t, {
+      status: "failed",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "terminal_failed",
+      dodoPaymentId: "pay_reconcile_terminal",
+    });
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - 3 * MIN_MS,
+      suffix: "marked_pending",
+      dodoPaymentId: "pay_reconcile_marked",
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("paymentReconciliationAttempts", {
+        dodoPaymentId: "pay_reconcile_marked",
+        userId: TEST_USER_ID,
+        planKey: "pro_monthly",
+        action: "ops_notified",
+        observedStatus: "requires_customer_action",
+        pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - 3 * MIN_MS,
+        reconciledAt: NOW - MIN_MS,
+      });
+    });
+
+    const candidates = await t.query(
+      internal.payments.billing.listStuckPendingPaymentCandidates,
+      { thresholdMs: STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS, batchSize: 10 },
+    );
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      dodoPaymentId: "pay_reconcile_candidate",
+      planKey: "pro_monthly",
+      pendingStatus: "requires_customer_action",
+    });
+  });
+
+  test("candidate selection is bounded by batch size", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    for (let i = 0; i < 3; i++) {
+      await seedPaymentEvent(t, {
+        status: "processing",
+        planKey: "pro_monthly",
+        occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - (i + 1) * MIN_MS,
+        suffix: `batch_${i}`,
+        dodoPaymentId: `pay_reconcile_batch_${i}`,
+      });
+    }
+
+    const candidates = await t.query(
+      internal.payments.billing.listStuckPendingPaymentCandidates,
+      { thresholdMs: STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS, batchSize: 2 },
+    );
+
+    expect(candidates).toHaveLength(2);
+  });
+
+  test("scans newest-first so freshly-stuck rows win a limited batch (F5)", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    // Three stale pending payments, increasing age (i=0 newest, i=2 oldest).
+    for (let i = 0; i < 3; i++) {
+      await seedPaymentEvent(t, {
+        status: "requires_customer_action",
+        planKey: "pro_monthly",
+        occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - (i + 1) * MIN_MS,
+        suffix: `scan_order_${i}`,
+        dodoPaymentId: `pay_scan_order_${i}`,
+      });
+    }
+
+    const candidates = await t.query(
+      internal.payments.billing.listStuckPendingPaymentCandidates,
+      { thresholdMs: STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS, batchSize: 2 },
+    );
+
+    // Descending scan yields the NEWEST two (0, 1), not the oldest two — the
+    // regression fix so newly-stuck rows don't fall off the end of the window.
+    expect(candidates.map((c) => c.dodoPaymentId)).toEqual([
+      "pay_scan_order_0",
+      "pay_scan_order_1",
+    ]);
+  });
+
+  test("claims a dropped-webhook terminal payment once, backfilling the terminal row", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "terminal_record",
+      dodoPaymentId: "pay_reconcile_terminal_record",
+    });
+
+    const payload = {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_reconcile_terminal_record",
+      dodoSubscriptionId: "sub_reconcile_terminal_record",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "succeeded",
+      rawPayload: { status: "succeeded", payment_id: "pay_reconcile_terminal_record" },
+    };
+    const first = await t.mutation(
+      internal.payments.billing.claimStuckPaymentReconciliation,
+      payload,
+    );
+    const second = await t.mutation(
+      internal.payments.billing.claimStuckPaymentReconciliation,
+      payload,
+    );
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentEvents")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_terminal_record"))
+        .collect(),
+    );
+    const markers = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_terminal_record"))
+        .collect(),
+    );
+
+    expect(first).toEqual({ action: "terminal_reconciled" });
+    expect(second).toEqual({ action: "already_marked" });
+    expect(rows.map((row) => row.status).sort()).toEqual(["requires_customer_action", "succeeded"]);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({ action: "terminal_reconciled", observedStatus: "succeeded" });
+  });
+
+  test("terminal SUCCEEDED with no subscription row pages ops (dropped subscription.active guard)", async () => {
+    vi.setSystemTime(NOW);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "succeeded_nosub",
+      dodoPaymentId: "pay_succeeded_nosub",
+    });
+
+    const result = await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_succeeded_nosub",
+      dodoSubscriptionId: "sub_never_activated",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "succeeded",
+      rawPayload: {},
+    });
+
+    // Case is still closed (marker written) but ops is paged via console.error.
+    expect(result).toEqual({ action: "terminal_reconciled" });
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("no subscription row"),
+    );
+  });
+
+  test("terminal SUCCEEDED with a matching subscription row does NOT page ops", async () => {
+    vi.setSystemTime(NOW);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "succeeded_withsub",
+      dodoPaymentId: "pay_succeeded_withsub",
+    });
+    await seedSubscription(t, {
+      planKey: "pro_monthly",
+      dodoProductId: PRODUCT_CATALOG.pro_monthly.dodoProductId!,
+      status: "active",
+      currentPeriodEnd: NOW + 30 * DAY_MS,
+      suffix: "reconcile_covered",
+    });
+    // seedSubscription names the row sub_billing_<suffix>; point the payment at it.
+    const result = await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_succeeded_withsub",
+      dodoSubscriptionId: "sub_billing_reconcile_covered",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "succeeded",
+      rawPayload: {},
+    });
+
+    expect(result).toEqual({ action: "terminal_reconciled" });
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("no subscription row"),
+    );
+  });
+
+  test("claim returns already_terminal (no marker) when a terminal row already exists (race)", async () => {
+    // A webhook delivered the terminal charge between candidate listing and the
+    // claim. The claim must NOT insert a duplicate terminal row or a marker.
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "race_pending",
+      dodoPaymentId: "pay_reconcile_race",
+    });
+    await seedPaymentEvent(t, {
+      status: "succeeded",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS + MIN_MS,
+      suffix: "race_terminal",
+      dodoPaymentId: "pay_reconcile_race",
+    });
+
+    const result = await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_reconcile_race",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "requires_customer_action",
+      rawPayload: {},
+    });
+
+    expect(result).toEqual({ action: "already_terminal" });
+    const markers = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_race"))
+        .collect(),
+    );
+    expect(markers).toHaveLength(0);
+  });
+
+  test("claim writes a provisional ops marker for a recognised pending status", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "processing",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "ops_marker",
+      dodoPaymentId: "pay_reconcile_ops_marker",
+    });
+
+    const payload = {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_reconcile_ops_marker",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "requires_customer_action",
+      rawPayload: { status: "requires_customer_action", payment_id: "pay_reconcile_ops_marker" },
+    };
+    const first = await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, payload);
+    const second = await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, payload);
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentEvents")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_ops_marker"))
+        .collect(),
+    );
+    const markers = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_ops_marker"))
+        .collect(),
+    );
+
+    expect(first).toEqual({ action: "pending_claimed" });
+    expect(second).toEqual({ action: "already_marked" });
+    expect(rows).toHaveLength(1); // no synthetic paymentEvents row for a non-terminal status
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({
+      action: "ops_notified",
+      observedStatus: "requires_customer_action",
+    });
+  });
+
+  test("claim writes a marker recording the RAW status for an UNRECOGNISED non-terminal status (F1)", async () => {
+    // `requires_payment_method` is the typical abandoned-3DS end-state. The old
+    // fall-through returned `unknown_status` with NO marker, so the cron
+    // re-polled it daily for 14 days and starved batch slots. It must now be
+    // claimed with the raw status preserved.
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "processing",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "unknown_status",
+      dodoPaymentId: "pay_reconcile_unknown",
+    });
+
+    const result = await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_reconcile_unknown",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "requires_payment_method",
+      rawPayload: { status: "requires_payment_method", payment_id: "pay_reconcile_unknown" },
+    });
+
+    expect(result).toEqual({ action: "pending_claimed" });
+    const markers = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_unknown"))
+        .collect(),
+    );
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({
+      action: "ops_notified",
+      observedStatus: "requires_payment_method",
+    });
+  });
+
+  test("finalize(notified) upgrades a claimed marker to customer_notified, and never downgrades", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "finalize_customer",
+      dodoPaymentId: "pay_reconcile_finalize_customer",
+    });
+    await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_reconcile_finalize_customer",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "requires_customer_action",
+      rawPayload: {},
+    });
+
+    const upgrade = await t.mutation(internal.payments.billing.finalizeStuckPaymentReconciliation, {
+      dodoPaymentId: "pay_reconcile_finalize_customer",
+      notified: true,
+    });
+    expect(upgrade).toEqual({ action: "customer_notified" });
+
+    // A later ops finalize (notified:false) must be a no-op — never downgrade
+    // a customer who was already emailed.
+    const noDowngrade = await t.mutation(internal.payments.billing.finalizeStuckPaymentReconciliation, {
+      dodoPaymentId: "pay_reconcile_finalize_customer",
+      notified: false,
+    });
+    expect(noDowngrade).toEqual({ action: "customer_notified" });
+
+    const markers = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_finalize_customer"))
+        .collect(),
+    );
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({ action: "customer_notified" });
+  });
+
+  test("finalize(ops) keeps the marker ops_notified", async () => {
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "processing",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "finalize_ops",
+      dodoPaymentId: "pay_reconcile_finalize_ops",
+    });
+    await t.mutation(internal.payments.billing.claimStuckPaymentReconciliation, {
+      userId: TEST_USER_ID,
+      dodoPaymentId: "pay_reconcile_finalize_ops",
+      planKey: "pro_monthly",
+      amount: 3999,
+      currency: "USD",
+      pendingOccurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      observedStatus: "processing",
+      rawPayload: {},
+    });
+
+    const result = await t.mutation(internal.payments.billing.finalizeStuckPaymentReconciliation, {
+      dodoPaymentId: "pay_reconcile_finalize_ops",
+      notified: false,
+    });
+    expect(result).toEqual({ action: "ops_notified" });
+
+    const markers = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_reconcile_finalize_ops"))
+        .collect(),
+    );
+    expect(markers[0]).toMatchObject({ action: "ops_notified" });
+  });
+
+  test("action claims the marker BEFORE sending the customer email (F3 idempotency)", async () => {
+    vi.setSystemTime(NOW);
+    process.env.DODO_API_KEY = "test_dodo_key";
+    process.env.RESEND_API_KEY = "test_resend_key";
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "action_order",
+      dodoPaymentId: "pay_action_order",
+    });
+
+    dodoRetrieveMock.mockResolvedValue({
+      status: "requires_customer_action",
+      payment_id: "pay_action_order",
+      customer: { email: "buyer@example.com" },
+      payment_link: "https://checkout.dodopayments.com/session/x",
+    });
+
+    let markerExistedAtEmailTime = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      if (String(input).includes("api.resend.com")) {
+        const marker = await t.run(async (ctx) =>
+          ctx.db
+            .query("paymentReconciliationAttempts")
+            .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_action_order"))
+            .first(),
+        );
+        markerExistedAtEmailTime = marker !== null;
+        return new Response(JSON.stringify({ id: "email_1" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+
+    const summary = await t.action(internal.payments.billing.reconcileStuckPendingPayments, {});
+
+    // The marker must already exist when the email is sent — that ordering is
+    // what makes a post-send failure NON-re-emailing on the next run.
+    expect(markerExistedAtEmailTime).toBe(true);
+    expect(summary).toMatchObject({ candidates: 1, customerNotified: 1 });
+
+    const marker = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_action_order"))
+        .first(),
+    );
+    expect(marker?.action).toBe("customer_notified");
+  });
+
+  test("action marks a payment whose Dodo status is NULL and never emails it (F1)", async () => {
+    vi.setSystemTime(NOW);
+    process.env.DODO_API_KEY = "test_dodo_key";
+    process.env.RESEND_API_KEY = "test_resend_key";
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "null_status",
+      dodoPaymentId: "pay_null_status",
+    });
+
+    // Dodo returns a payment object with no `status` field at all.
+    dodoRetrieveMock.mockResolvedValue({
+      payment_id: "pay_null_status",
+      status: null,
+      customer: { email: "buyer@example.com" },
+      payment_link: "https://checkout.dodopayments.com/session/x",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { status: 200 }),
+    );
+
+    const summary = await t.action(internal.payments.billing.reconcileStuckPendingPayments, {});
+
+    // A marker is written (no 14-day re-poll), status recorded as the sentinel,
+    // and NO customer email is sent for an unrecognised status.
+    expect(summary).toMatchObject({ candidates: 1, unknownStatus: 1, customerNotified: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const marker = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_null_status"))
+        .first(),
+    );
+    expect(marker).toMatchObject({ action: "ops_notified", observedStatus: "unknown" });
+  });
+
+  test("action marks a non-null UNRECOGNISED status without emailing (F1)", async () => {
+    // Distinct from the null-status case: `requires_payment_method` is non-null,
+    // so it exercises the SECOND operand of the email gate
+    // (isPendingPaymentStatus). If that check regressed, this status would take
+    // the email path — the null test alone would not catch it.
+    vi.setSystemTime(NOW);
+    process.env.DODO_API_KEY = "test_dodo_key";
+    process.env.RESEND_API_KEY = "test_resend_key";
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "unrecognised_status",
+      dodoPaymentId: "pay_unrecognised",
+    });
+
+    dodoRetrieveMock.mockResolvedValue({
+      payment_id: "pay_unrecognised",
+      status: "requires_payment_method",
+      customer: { email: "buyer@example.com" },
+      payment_link: "https://checkout.dodopayments.com/session/x",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { status: 200 }),
+    );
+
+    const summary = await t.action(internal.payments.billing.reconcileStuckPendingPayments, {});
+
+    expect(summary).toMatchObject({ candidates: 1, unknownStatus: 1, customerNotified: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const marker = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_unrecognised"))
+        .first(),
+    );
+    expect(marker).toMatchObject({ action: "ops_notified", observedStatus: "requires_payment_method" });
+  });
+
+  test("action emails a stuck payment at most once across repeated daily runs (F3)", async () => {
+    // The core idempotency guarantee stated end-to-end: two identical daily
+    // runs over the same still-pending payment send exactly ONE email — the
+    // marker claimed on run 1 removes the row from run 2's candidate set.
+    vi.setSystemTime(NOW);
+    process.env.DODO_API_KEY = "test_dodo_key";
+    process.env.RESEND_API_KEY = "test_resend_key";
+    const t = convexTest(schema, modules);
+
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "twice",
+      dodoPaymentId: "pay_twice",
+    });
+
+    dodoRetrieveMock.mockResolvedValue({
+      status: "requires_customer_action",
+      payment_id: "pay_twice",
+      customer: { email: "buyer@example.com" },
+      payment_link: "https://checkout.dodopayments.com/session/x",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_1" }), { status: 200 }),
+    );
+
+    const first = await t.action(internal.payments.billing.reconcileStuckPendingPayments, {});
+    const second = await t.action(internal.payments.billing.reconcileStuckPendingPayments, {});
+
+    expect(first).toMatchObject({ candidates: 1, customerNotified: 1 });
+    expect(second).toMatchObject({ candidates: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("action isolates a Resend failure to one candidate and still processes the rest (F6/F7)", async () => {
+    // Fake timers so the failed candidate's fire-and-forget Sentry report
+    // (a scheduled throwing mutation) is drained inside the test rather than
+    // firing after teardown as an unhandled rejection.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    process.env.DODO_API_KEY = "test_dodo_key";
+    process.env.RESEND_API_KEY = "test_resend_key";
+    const t = convexTest(schema, modules);
+
+    // Two stale pending payments; pay_iso_a is newer so it is scanned first.
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - MIN_MS,
+      suffix: "iso_a",
+      dodoPaymentId: "pay_iso_a",
+    });
+    await seedPaymentEvent(t, {
+      status: "requires_customer_action",
+      planKey: "pro_monthly",
+      occurredAt: NOW - STUCK_PAYMENT_RECONCILIATION_THRESHOLD_MS - 2 * MIN_MS,
+      suffix: "iso_b",
+      dodoPaymentId: "pay_iso_b",
+    });
+
+    dodoRetrieveMock.mockImplementation(async (id: string) => ({
+      status: "requires_customer_action",
+      payment_id: id,
+      customer: { email: "buyer@example.com" },
+      payment_link: "https://checkout.dodopayments.com/session/x",
+    }));
+
+    // First Resend call throws (hung socket); the second succeeds. Proves the
+    // batch is not aborted by one candidate's email failure.
+    let resendCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      if (String(input).includes("api.resend.com")) {
+        resendCalls++;
+        if (resendCalls === 1) throw new Error("socket hang up");
+        return new Response(JSON.stringify({ id: "email_ok" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+
+    const summary = await t.action(internal.payments.billing.reconcileStuckPendingPayments, {});
+    // Drain the scheduled email-failure report (throws internally, captured by
+    // Convex auto-Sentry in prod) so it doesn't leak past the test.
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect(summary).toMatchObject({ candidates: 2, emailFailed: 1, customerNotified: 1 });
+
+    // The failed-email candidate still has its claim marker (ops_notified), so
+    // the next run skips it — no re-email. The other was notified.
+    const markerA = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_iso_a"))
+        .first(),
+    );
+    const markerB = await t.run(async (ctx) =>
+      ctx.db
+        .query("paymentReconciliationAttempts")
+        .withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_iso_b"))
+        .first(),
+    );
+    expect(markerA?.action).toBe("ops_notified");
+    expect(markerB?.action).toBe("customer_notified");
+  });
+
+  test("registers the reconciliation cron on a 6-hourly cadence", () => {
+    const source = readFileSync("convex/crons.ts", "utf8");
+
+    expect(source).toContain("payments-stuck-pending-reconciliation");
+    expect(source).toContain("internal.payments.billing.reconcileStuckPendingPayments");
+    // 6-hourly, not daily: keeps a payment's age at first scan under the 24h
+    // customer-email freshness gate (daily cadence silently dropped ~25% of
+    // stuck payments to ops-only). Anchored so a revert to crons.daily reds.
+    expect(source).toMatch(
+      /crons\.interval\(\s*"payments-stuck-pending-reconciliation",\s*\{\s*hours:\s*6\s*\}/,
+    );
   });
 });
 

@@ -35,6 +35,20 @@ crons.daily(
   {},
 );
 
+// Every 6h, not daily: a payment becomes a reconciliation candidate at ~6h
+// pending, so on a daily cadence its age at first scan is uniformly 6h-30h and
+// anything landing in (24h, 30h] misses the 24h customer-email freshness gate
+// (STUCK_PAYMENT_CUSTOMER_EMAIL_MAX_AGE_MS) — ~25% of ordinary stuck payments
+// silently dropped to ops-only. At 6h cadence first-scan age stays <=~12h, so
+// every stuck payment gets its recovery email. Safe to run 4x/day: the action
+// is fully idempotent and marker-gated (already-handled payments are skipped).
+crons.interval(
+  "payments-stuck-pending-reconciliation",
+  { hours: 6 },
+  internal.payments.billing.reconcileStuckPendingPayments,
+  {},
+);
+
 // Idempotent daily seed of the `followedCountriesShards` lock table
 // (Codex round-4 P0 v2). Skips existing shards; inserts any missing
 // shard ids in `[0, SHARD_COUNT)`. Defends against a deploy-time seed
