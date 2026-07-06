@@ -25,7 +25,7 @@ const catalogSrc = read('convex/config/productCatalog.ts');
 
 // planKey → priceCents for every publicly-priced subscription plan,
 // including the annual API plan the original docs omitted entirely.
-const PLAN_KEYS = ['pro_monthly', 'pro_annual', 'api_starter', 'api_starter_annual'];
+const PLAN_KEYS = ['pro_monthly', 'pro_annual', 'api_starter', 'api_starter_annual', 'api_business'];
 const priceCentsFor = (planKey) => {
   const blockStart = catalogSrc.indexOf(`${planKey}: {`);
   assert.notEqual(blockStart, -1, `productCatalog.ts must contain a "${planKey}" entry`);
@@ -48,10 +48,16 @@ const proseRegexFor = (cents) => {
     .map((ch, i) => (i > 0 && i % 3 === 0 ? `${ch},?` : ch))
     .reverse()
     .join('');
-  return new RegExp(`\\$${intWithOptionalCommas}${frac ? `\\.${frac}` : '(?![.\\d])'}`);
+  // `$` optional: pricing.md/mdx write "$39.99", api-commerce.mdx's example
+  // JSON writes bare `39.99` — both count as carrying the current price.
+  return new RegExp(`\\$?${intWithOptionalCommas}${frac ? `\\.${frac}` : '(?![.\\d])'}`);
 };
 
-const DOCS = ['public/pricing.md', 'docs/pricing.mdx'];
+// api-commerce.mdx is included because its example /api/product-catalog
+// response embeds real prices — it shipped $20/$180 Pro for months before
+// anyone noticed (caught twice: the 2026-07-05 docs audit and the #4946
+// review). Every doc here must carry every current price.
+const DOCS = ['public/pricing.md', 'docs/pricing.mdx', 'docs/api-commerce.mdx'];
 
 for (const doc of DOCS) {
   const content = read(doc);
@@ -82,6 +88,7 @@ test('pricing.md machine-readable JSON block matches productCatalog.ts numerical
     ['Pro', 'price_usd_yearly', 'pro_annual'],
     ['API', 'price_usd_monthly', 'api_starter'],
     ['API', 'price_usd_yearly', 'api_starter_annual'],
+    ['API Business', 'price_usd_monthly', 'api_business'],
   ];
   for (const [plan, field, planKey] of EXPECT) {
     assert.ok(planByName[plan], `JSON summary must have a "${plan}" plan`);
