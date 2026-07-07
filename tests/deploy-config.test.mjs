@@ -16,7 +16,7 @@ const middlewareSource = readFileSync(resolve(__dirname, '../middleware.ts'), 'u
 const dockerfileSource = readFileSync(resolve(__dirname, '../Dockerfile'), 'utf-8');
 const dockerNginxSource = readFileSync(resolve(__dirname, '../docker/nginx.conf'), 'utf-8');
 const frontendDockerfileSource = readFileSync(resolve(__dirname, '../docker/Dockerfile'), 'utf-8');
-const SPA_HTML_CACHE_SOURCE = '/((?!api|mcp|a2a|ask|oauth|assets|blog|docs|embed|embed\\.html|favico|map-styles|data|textures|pro|sw\\.js|workbox-[a-f0-9]+\\.js|manifest\\.webmanifest|offline\\.html|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|openapi\\.yaml|openapi\\.json|auth\\.md|pricing\\.md|support\\.md|agents\\.md|agent\\.txt|\\.well-known|wm-widget-sandbox\\.html|mcp-grant\\.html|mcp-grant).*)';
+const SPA_HTML_CACHE_SOURCE = '/((?!api|mcp|a2a|ask|oauth|assets|blog|docs|embed|embed\\.html|favico|map-styles|data|textures|pro|sw\\.js|workbox-[a-f0-9]+\\.js|manifest\\.webmanifest|offline\\.html|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|openapi\\.yaml|openapi\\.json|auth\\.md|pricing\\.md|support\\.md|ai-search\\.md|agents\\.md|agent\\.txt|\\.well-known|wm-widget-sandbox\\.html|mcp-grant\\.html|mcp-grant).*)';
 const GLOBAL_SECURITY_HEADER_SOURCE = '/((?!docs|embed|embed\\.html).*)';
 const APP_ROOT_HOST_PATTERN = '^(?:(?:www|tech|finance|commodity|happy|energy)\\.)?worldmonitor\\.app$';
 const GLOBAL_CSP_INLINE_SCRIPT_HTML_FILES = [
@@ -347,8 +347,10 @@ describe('welcome landing page routing', () => {
   });
 
   it('rewrites /dashboard to the existing SPA shell', () => {
-    const rewrite = vercelConfig.rewrites.find((r) => r.source === '/dashboard');
-    assert.ok(rewrite, 'expected a rewrite for /dashboard');
+    // Host-conditioned variant rules (#4996) sit in front; the fallback for
+    // every other host is the un-conditioned rule.
+    const rewrite = vercelConfig.rewrites.find((r) => r.source === '/dashboard' && !r.has);
+    assert.ok(rewrite, 'expected an un-conditioned rewrite for /dashboard');
     assert.equal(rewrite.destination, DASHBOARD_HTML_DESTINATION);
   });
 
@@ -1660,8 +1662,11 @@ describe('agent readiness: auth.md walkthrough', () => {
   // (#4952), so they get the same three-way pinning as auth.md:
   // explicit markdown Content-Type + CORS, catch-all exclusion (deleting or
   // renaming the static file must 404, not silently serve the dashboard HTML
-  // misleading-200 the journey runs flagged), and this guard.
-  for (const mdPath of ['/pricing.md', '/support.md', '/agents.md']) {
+  // misleading-200 the journey runs flagged), and this guard. /ai-search.md
+  // joined the set with its canonical Link header (#4999): it is
+  // sitemap-listed, and without the catch-all exclusion the SPA cache-header
+  // catch-all (later in the headers array) overrides its max-age rule.
+  for (const mdPath of ['/pricing.md', '/support.md', '/agents.md', '/ai-search.md']) {
     it(`serves ${mdPath} as markdown and keeps it off the SPA catch-all`, () => {
       assert.equal(getHeaderValueForSource(mdPath, 'Content-Type'), 'text/markdown; charset=utf-8');
       assert.equal(getHeaderValueForSource(mdPath, 'Access-Control-Allow-Origin'), '*');
@@ -2124,5 +2129,107 @@ describe('agent readiness: registry branding + ARD catalog', () => {
         aiCatalog.entries.some((e) => e.url.endsWith('/.well-known/agent-skills/index.json')),
       'agent-skills entry must exist iff the skills index is published'
     );
+  });
+});
+
+describe('variant subdomain dashboard SEO (#4996)', () => {
+  // No hardcoded variant list: every set is extracted from its real source
+  // and compared BIDIRECTIONALLY, so adding a variant to any one surface
+  // (middleware host map, generator, vercel.json rewrites) without the
+  // others fails here instead of shipping a subdomain with full-brand meta.
+  const dashboardRewrites = vercelConfig.rewrites.filter((r) => r.source === '/dashboard');
+
+  const rewriteVariants = dashboardRewrites
+    .filter((r) => r.has)
+    .map((r) => {
+      const host = (r.has ?? []).find((h) => h.type === 'host')?.value ?? '';
+      return host.replace('.worldmonitor.app', '');
+    })
+    .sort();
+
+  const middlewareVariants = [...middlewareSource.matchAll(/'([a-z]+)\.worldmonitor\.app': '([a-z]+)'/g)]
+    .map((m) => m[2])
+    .sort();
+
+  const variantHtmlSource = readFileSync(resolve(__dirname, '../src/config/variant-dashboard-html.ts'), 'utf-8');
+  const generatorArrayMatch = variantHtmlSource.match(/WEB_DASHBOARD_VARIANTS = \[([^\]]+)\]/);
+  const generatorVariants = (generatorArrayMatch?.[1] ?? '')
+    .split(',')
+    .map((s) => s.trim().replace(/['"]/g, ''))
+    .filter(Boolean)
+    .sort();
+
+  it('extracted all three variant sets (extraction regressions fail loudly)', () => {
+    assert.ok(rewriteVariants.length > 0, 'no host-conditioned /dashboard rewrites found in vercel.json');
+    assert.ok(middlewareVariants.length > 0, 'VARIANT_HOST_MAP extraction from middleware.ts found nothing');
+    assert.ok(generatorVariants.length > 0, 'WEB_DASHBOARD_VARIANTS extraction from variant-dashboard-html.ts found nothing');
+  });
+
+  it('vercel.json rewrites, middleware host map, and the generator cover the SAME variant set (bidirectional)', () => {
+    assert.deepEqual(rewriteVariants, middlewareVariants, 'vercel.json /dashboard host rewrites vs middleware VARIANT_HOST_MAP diverged');
+    assert.deepEqual(rewriteVariants, generatorVariants, 'vercel.json /dashboard host rewrites vs WEB_DASHBOARD_VARIANTS diverged');
+  });
+
+  it('each variant host rewrite targets its generated variant file', () => {
+    for (const rule of dashboardRewrites.filter((r) => r.has)) {
+      const host = (rule.has ?? []).find((h) => h.type === 'host')?.value ?? '';
+      const variant = host.replace('.worldmonitor.app', '');
+      assert.match(host, /^[a-z]+\.worldmonitor\.app$/, `unexpected host condition shape: ${host}`);
+      assert.strictEqual(
+        rule.destination,
+        `/dashboard-${variant}.html`,
+        `${host} rewrite must target the build-generated variant file`
+      );
+    }
+  });
+
+  it('keeps the host-specific rules BEFORE the generic /dashboard rewrite (order is match priority)', () => {
+    const genericIndex = dashboardRewrites.findIndex((r) => !r.has);
+    assert.ok(genericIndex >= 0, 'generic /dashboard -> /dashboard.html rewrite must exist');
+    assert.strictEqual(
+      genericIndex,
+      dashboardRewrites.length - 1,
+      'the un-conditioned /dashboard rewrite must come last so host rules win'
+    );
+    assert.strictEqual(dashboardRewrites.length, rewriteVariants.length + 1, 'exactly one un-conditioned /dashboard rewrite expected');
+  });
+
+  it('vite build emits the variant dashboard files the rewrites point at (web full build only)', () => {
+    assert.match(
+      viteConfigSource,
+      /!isDesktopBuild && activeVariant === 'full' && variantDashboardHtmlPlugin\(\)/,
+      'variantDashboardHtmlPlugin must be registered for web full builds'
+    );
+  });
+});
+
+describe('markdown canonical Link headers (#4999)', () => {
+  // The sitemap-listed markdown pages are intentionally raw text/markdown for
+  // agents, so they cannot carry a <link rel="canonical">. RFC 6596 allows the
+  // HTTP Link header form; without it these are the only indexable URLs with
+  // no canonical signal at all.
+  const MD_PAGES = ['/pricing.md', '/support.md', '/ai-search.md'];
+
+  for (const page of MD_PAGES) {
+    it(`${page} declares a self-referencing canonical Link header`, () => {
+      assert.strictEqual(
+        getHeaderValueForSource(page, 'Link'),
+        `<https://www.worldmonitor.app${page}>; rel="canonical"`,
+        `${page} must self-canonicalize on the www host via the Link header`
+      );
+      assert.strictEqual(
+        getHeaderValueForSource(page, 'Content-Type'),
+        'text/markdown; charset=utf-8'
+      );
+    });
+  }
+
+  it('every sitemap-listed .md URL has the canonical Link header rule', () => {
+    const sitemap = readFileSync(resolve(__dirname, '../public/sitemap.xml'), 'utf-8');
+    const mdUrls = [...sitemap.matchAll(/<loc>https:\/\/www\.worldmonitor\.app(\/[^<]+\.md)<\/loc>/g)].map((m) => m[1]);
+    assert.ok(mdUrls.length > 0, 'expected .md entries in sitemap.xml');
+    for (const path of mdUrls) {
+      assert.ok(MD_PAGES.includes(path), `${path} is in sitemap.xml but has no canonical Link header rule — add it to vercel.json and this test`);
+    }
   });
 });
