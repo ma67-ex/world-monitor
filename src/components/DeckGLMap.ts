@@ -7189,6 +7189,27 @@ export class DeckGLMap {
     return { x: point.x, y: point.y };
   }
 
+  // Pan to a chokepoint/waterway and open its popup (chokepoint deep-link target).
+  // Unlike the trigger* methods below, this pans first so the waterway lands at
+  // the container centre — which is where the popup is anchored.
+  //
+  // MapContainer can replay a queued chokepoint deep-link during the deferred
+  // renderer window — after `new DeckGLMap()` but before initMapLibre() has
+  // constructed maplibreMap, when setCenter() silently no-ops. Defer the whole
+  // pan+popup until the renderer is ready instead of dropping the pan.
+  public openChokepoint(id: string): void {
+    const waterway = STRATEGIC_WATERWAYS.find(w => w.id === id || w.chokepointId === id);
+    if (!waterway) return;
+    const reveal = () => {
+      if (this.destroyed || !this.maplibreMap) return;
+      this.setCenter(waterway.lat, waterway.lon, 5);
+      const { x, y } = this.getContainerCenter();
+      this.popup.show({ type: 'waterway', data: waterway, x, y });
+    };
+    if (this.maplibreMap) reveal();
+    else void this.whenReady().then(reveal).catch(() => {});
+  }
+
   // Trigger click methods - show popup at item location without moving the map
   public triggerHotspotClick(id: string): void {
     const hotspot = this.hotspots.find(h => h.id === id);
