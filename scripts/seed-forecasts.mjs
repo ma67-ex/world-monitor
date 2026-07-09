@@ -141,6 +141,21 @@ function createSimulationWorkerId() {
   return `sim-worker-${process.pid}-${Date.now()}-${randomSuffix}`;
 }
 
+function toNonNegativeInteger(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+}
+
+function getSimulationCompletionStatus({ eligibleTheaterCount = 0, theaterCount = 0, failedTheaterCount = 0 } = {}) {
+  const eligibleCount = toNonNegativeInteger(eligibleTheaterCount);
+  const completedCount = toNonNegativeInteger(theaterCount);
+  const failedCount = toNonNegativeInteger(failedTheaterCount);
+  if (eligibleCount <= 0) return 'no_eligible_theaters';
+  if (completedCount <= 0) return 'all_theaters_failed';
+  if (failedCount > 0) return 'partial';
+  return 'completed';
+}
+
 // stateKind values that legitimately drive maritime energy/freight supply_chain forecasts.
 // Defined at module scope — not per-call — to avoid re-allocating the Set on every invocation.
 const MARITIME_BUCKET_STATE_KINDS = new Set([
@@ -239,24 +254,6 @@ const CHOKEPOINT_MARKET_REGIONS = {
   'Lombok Strait': 'Southeast Asia',
   'Cape of Good Hope': 'Southern Africa',
 };
-
-const THEATER_GEO_GROUPS = {
-  'Middle East': 'MENA_Gulf',       // Strait of Hormuz, Persian Gulf, Arabian Sea, Iran
-  'Persian Gulf': 'MENA_Gulf',
-  'Red Sea': 'MENA_RedSea',         // Red Sea, Bab el-Mandeb, Suez Canal
-  'South China Sea': 'AsiaPacific',
-  'Western Pacific': 'AsiaPacific',
-  'Southeast Asia': 'AsiaPacific',
-  'Black Sea': 'EastEurope',
-  'Northern Europe': 'NorthernEurope',
-  'Mediterranean': 'Mediterranean',
-  'Central America': 'LatinAmerica',
-  'Southern Africa': 'SouthernAfrica',
-};
-
-function getTheaterGeoGroup(marketRegion) {
-  return THEATER_GEO_GROUPS[marketRegion] || marketRegion || 'unknown';
-}
 
 const MARKET_INPUT_KEYS = {
   stocks: 'market:stocks-bootstrap:v1',
@@ -4837,6 +4834,8 @@ function summarizeImpactPathScore(path = null) {
         channelSource:         d.channelSource,
         invalidatorHit:        Boolean(d.invalidatorHit),
         stabilizerHit:         Boolean(d.stabilizerHit),
+        timingMarkerCount:     Number(d.timingMarkerCount || 0),
+        timingMarkerBonus:     Number(d.timingMarkerBonus || 0),
       };
     }
   }
@@ -11619,6 +11618,11 @@ function matchesChannel(simPath, channel) {
 const NEGATION_TERMS = ['ceasefire', 'reopen', 'reopened', 'resolv', 'diplomatic solution', 'withdrawal', 'de-escalat', 'deescalat', 'restored', 'stabiliz', 'lifted', 'normaliz', 'agreement'];
 const SIMULATION_MERGE_ACCEPT_THRESHOLD = 0.50;
 const SIMULATION_ELIGIBILITY_RANK_THRESHOLD = 0.40;
+const SIMULATION_TIMING_MARKER_BONUS = 0.02;
+const SIMULATION_MAX_POSITIVE_ADJUSTMENT = 0.14;
+const SIMULATION_MAX_NEGATIVE_ADJUSTMENT = 0.27;
+const SIMULATION_RESCORING_PROMOTION_FLOOR = +(SIMULATION_MERGE_ACCEPT_THRESHOLD - SIMULATION_MAX_POSITIVE_ADJUSTMENT).toFixed(2);
+const SIMULATION_RESCORING_DEMOTION_THRESHOLD = +(SIMULATION_MERGE_ACCEPT_THRESHOLD + SIMULATION_MAX_NEGATIVE_ADJUSTMENT).toFixed(2);
 
 /**
  * @param {string} invalidator
@@ -11676,6 +11680,15 @@ function negatesDisruption(stabilizer, candidatePacket) {
   return subjectKeywords.some((kw) => text.includes(kw));
 }
 
+function countUsableTimingMarkers(timingMarkers) {
+  if (!Array.isArray(timingMarkers)) return 0;
+  return timingMarkers.filter((marker) => {
+    const event = String(marker?.event || '').trim();
+    const timing = String(marker?.timing || '').trim();
+    return event.length > 0 && /^T\+\d+h$/i.test(timing);
+  }).length;
+}
+
 /**
  * @param {ExpandedPath} expandedPath
  * @param {TheaterResult} simTheaterResult
@@ -11684,7 +11697,7 @@ function negatesDisruption(stabilizer, candidatePacket) {
  */
 function computeSimulationAdjustment(expandedPath, simTheaterResult, candidatePacket) {
   let adjustment = 0;
-  const details = { bucketChannelMatch: false, actorOverlapCount: 0, roleOverlapCount: 0, keyActorsOverlapCount: 0, invalidatorHit: false, stabilizerHit: false, resolvedChannel: '', channelSource: 'none', candidateActorCount: 0, actorSource: 'none', simPathConfidence: 1.0 };
+  const details = { bucketChannelMatch: false, actorOverlapCount: 0, roleOverlapCount: 0, keyActorsOverlapCount: 0, invalidatorHit: false, stabilizerHit: false, resolvedChannel: '', channelSource: 'none', candidateActorCount: 0, actorSource: 'none', simPathConfidence: 1.0, timingMarkerCount: 0, timingMarkerBonus: 0 };
 
   const { topPaths = [], invalidators = [], stabilizers = [] } = simTheaterResult || {};
   const pathBucket = expandedPath?.direct?.targetBucket
@@ -11741,6 +11754,12 @@ function computeSimulationAdjustment(expandedPath, simTheaterResult, candidatePa
     adjustment += +parseFloat((0.08 * simConf).toFixed(3));
     details.bucketChannelMatch = true;
     details.simPathConfidence = simConf;
+    const timingMarkerCount = countUsableTimingMarkers(bucketChannelMatch.timingMarkers);
+    details.timingMarkerCount = timingMarkerCount;
+    if (timingMarkerCount >= 2 && simConf > 0) {
+      details.timingMarkerBonus = +parseFloat((SIMULATION_TIMING_MARKER_BONUS * simConf).toFixed(3));
+      adjustment += details.timingMarkerBonus;
+    }
     // Role overlap: candidate stateSummary.actors vs sim keyActorRoles (role-category vocabulary).
     // Drives +0.04 bonus when actorSource=stateSummary. keyActorRoles absent → overlap=0 (graceful).
     if (actorSrc === 'stateSummary') {
@@ -12644,8 +12663,13 @@ async function writeDeepForecastSnapshot(snapshot, _context = {}) {
 // Simulation Package Export — theater-agnostic eligibility
 // ---------------------------------------------------------------------------
 
-function isSimulationEligible(candidate) {
+function getSimulationRankingScore(candidate) {
   const score = parseFloat(candidate.rankingScore || 0);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function isSimulationEligible(candidate) {
+  const score = getSimulationRankingScore(candidate);
   if (score < SIMULATION_ELIGIBILITY_RANK_THRESHOLD) return false;
   // Accept both full-candidate shape (marketBucketIds / marketContext.topBucketId)
   // and theater-object shape (topBucketId only) — both appear in call sites.
@@ -13057,19 +13081,14 @@ function buildSimulationStructuralWorld(selectedTheaters, { stateUnits, worldSig
 }
 
 function buildSimulationPackageFromDeepSnapshot(snapshot, priorWorldState = null) {
-  const candidates = (snapshot.impactExpansionCandidates || []).filter(isSimulationEligible);
+  const candidates = (snapshot.impactExpansionCandidates || [])
+    .filter(isSimulationEligible)
+    .sort((a, b) => (
+      getSimulationRankingScore(b) - getSimulationRankingScore(a)
+      || String(a.candidateStateId || '').localeCompare(String(b.candidateStateId || ''))
+    ));
   if (candidates.length === 0) return null;
-  const usedGroups = new Set();
-  const top = [];
-  for (const c of candidates) {
-    const marketRegion = CHOKEPOINT_MARKET_REGIONS[c.routeFacilityKey] || c.dominantRegion || '';
-    const group = getTheaterGeoGroup(marketRegion);
-    if (!usedGroups.has(group)) {
-      usedGroups.add(group);
-      top.push(c);
-      if (top.length === 3) break;
-    }
-  }
+  const top = candidates.slice(0, 3);
   if (top.length === 0) return null;
 
   const selectedTheaters = top.map((c, i) => ({
@@ -17205,18 +17224,34 @@ Return ONLY a JSON object with no markdown fences:
 }`;
 }
 
+const SIMULATION_REQUIRED_PATH_IDS = ['escalation', 'containment', 'market_cascade'];
+
+function hasUsableSimulationPathContent(path, round) {
+  const label = sanitizeForPrompt(path?.label || '').trim();
+  const summary = sanitizeForPrompt(path?.summary || '').trim();
+  if (!label || !summary) return false;
+  if (round === 2 && !(typeof path.confidence === 'number' && Number.isFinite(path.confidence))) return false;
+  return true;
+}
+
 /**
  * @param {string} text - raw LLM response text (JSON or JSON-with-prefix)
  * @param {1 | 2} round - simulation round number
- * @returns {{ paths: object[] | null, stabilizers?: string[], invalidators?: string[], globalObservations?: string, confidenceNotes?: string, dominantReactions?: string[], note?: string }}
+ * @returns {{ paths: object[] | null, parseStatus?: string, stabilizers?: string[], invalidators?: string[], globalObservations?: string, confidenceNotes?: string, dominantReactions?: string[], note?: string }}
  */
 function tryParseSimulationRoundPayload(text, round) {
   try {
     const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed?.paths)) return { paths: null };
-    const expectedIds = new Set(['escalation', 'containment', 'market_cascade']);
-    const paths = parsed.paths.filter((p) => p && expectedIds.has(p.pathId));
-    if (paths.length === 0) return { paths: null };
+    if (!Array.isArray(parsed?.paths)) return { paths: null, parseStatus: 'invalid_payload' };
+    const expectedIds = new Set(SIMULATION_REQUIRED_PATH_IDS);
+    const byPathId = new Map();
+    for (const path of parsed.paths) {
+      if (!path || !expectedIds.has(path.pathId) || byPathId.has(path.pathId)) continue;
+      byPathId.set(path.pathId, path);
+    }
+    const paths = SIMULATION_REQUIRED_PATH_IDS.map((pathId) => byPathId.get(pathId));
+    if (paths.some((path) => !path)) return { paths: null, parseStatus: 'invalid_payload' };
+    if (paths.some((path) => !hasUsableSimulationPathContent(path, round))) return { paths: null, parseStatus: 'invalid_payload' };
     if (round === 2) {
       return {
         paths: paths.map((p) => ({
@@ -17237,7 +17272,7 @@ function tryParseSimulationRoundPayload(text, round) {
       note: String(parsed.note || '').slice(0, 200),
     };
   } catch {
-    return { paths: null };
+    return { paths: null, parseStatus: 'invalid_json' };
   }
 }
 
@@ -17251,19 +17286,28 @@ function extractSimulationRoundPayload(text, round) {
   const fencedBlocks = [...cleaned.matchAll(/```([\s\S]*?)```/g)].map((m) => m[1].trim());
   candidates.push(...fencedBlocks);
   candidates.push(cleaned);
+  let sawInvalidPayload = false;
 
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
     if (!trimmed) continue;
     const direct = tryParseSimulationRoundPayload(trimmed, round);
     if (direct.paths) return { ...direct, diagnostics: { stage: 'direct', preview: sanitizeForPrompt(trimmed).slice(0, 160) } };
+    sawInvalidPayload ||= direct.parseStatus === 'invalid_payload';
     const firstObject = extractFirstJsonObject(trimmed);
     if (firstObject) {
       const parsed = tryParseSimulationRoundPayload(firstObject, round);
       if (parsed.paths) return { ...parsed, diagnostics: { stage: 'extracted', preview: sanitizeForPrompt(firstObject).slice(0, 160) } };
+      sawInvalidPayload ||= parsed.parseStatus === 'invalid_payload';
     }
   }
-  return { paths: null, diagnostics: { stage: 'no_json', preview: sanitizeForPrompt(cleaned).slice(0, 160) } };
+  return {
+    paths: null,
+    diagnostics: {
+      stage: sawInvalidPayload ? 'invalid_payload' : 'no_json',
+      preview: sanitizeForPrompt(cleaned).slice(0, 160),
+    },
+  };
 }
 
 async function runTheaterSimulation(theater, pkg) {
@@ -17285,9 +17329,10 @@ async function runTheaterSimulation(theater, pkg) {
     userPrompt2,
     { ...getForecastLlmCallOptions('simulation_round_2'), stage: 'simulation_round_2', maxTokens: SIMULATION_ROUND2_MAX_TOKENS, temperature: 0 },
   );
-  if (!r2Raw) return { round1: r1, round2: null, failed: false };
+  if (!r2Raw) return { round1: r1, round2: null, failed: true, reason: 'round2_llm_failed' };
   const r2 = extractSimulationRoundPayload(r2Raw.text, 2);
-  return { round1: r1, round2: r2.paths ? r2 : null, failed: false };
+  if (!r2.paths) return { round1: r1, round2: null, failed: true, reason: 'round2_parse_failed', diagnostics: r2.diagnostics };
+  return { round1: r1, round2: r2, failed: false };
 }
 
 function buildSimulationOutcomeKey(runId, generatedAt) {
@@ -17839,6 +17884,21 @@ async function applySimulationDecorationsToForecasts(predictions) {
   }
 }
 
+function hasSimulationRescoreOpportunity(evalData) {
+  if (evalData?.status === 'completed_no_material_change') return true;
+  const hasDemotionRisk = (evalData?.selectedPaths || []).some(
+    (p) => p.type === 'expanded' && p.acceptanceScore < SIMULATION_RESCORING_DEMOTION_THRESHOLD,
+  );
+  const hasPromotionOpportunity = (evalData?.rejectedPaths || []).some(
+    (p) => (
+      p.type === 'expanded'
+      && p.acceptanceScore >= SIMULATION_RESCORING_PROMOTION_FLOOR
+      && p.acceptanceScore < SIMULATION_MERGE_ACCEPT_THRESHOLD
+    ),
+  );
+  return hasDemotionRisk || hasPromotionOpportunity;
+}
+
 /**
  * Re-apply simulation merge against the just-completed simulation for a run whose deep forecast
  * had already finished with stale (or no) simulation data. Reads forecast-eval.json + snapshot
@@ -17876,17 +17936,10 @@ async function applyPostSimulationRescore(runId, freshOutcome, storageConfig) {
     // Only re-score if there is actionable opportunity:
     // - 'completed_no_material_change': always proceed — any simulation evidence could promote a rejected path
     // - 'completed': proceed if (a) a selected expanded path risks demotion, or (b) a rejected expanded
-    //   path could be promoted. Thresholds are derived from the max adjustments in computeSimulationAdjustment:
-    //     max positive: +0.08 (bucketChannelMatch) + 0.04 (actor overlap >= 2) = +0.12
-    //     max negative: -0.15 (stabilizer) — larger than invalidator -0.12
-    //   Demotion risk threshold: 0.50 + 0.15 = 0.65. Promotion window: [0.50 - 0.12, 0.50) = [0.38, 0.50).
-    const hasDemotionRisk = (evalData.selectedPaths || []).some(
-      (p) => p.type === 'expanded' && p.acceptanceScore < 0.65,
-    );
-    const hasPromotionOpportunity = (evalData.rejectedPaths || []).some(
-      (p) => p.type === 'expanded' && p.acceptanceScore >= 0.38 && p.acceptanceScore < SIMULATION_MERGE_ACCEPT_THRESHOLD,
-    );
-    if (evalData.status !== 'completed_no_material_change' && !hasDemotionRisk && !hasPromotionOpportunity) {
+    //   path could be promoted. The guard uses the derived simulation-adjustment constants:
+    //   SIMULATION_MAX_NEGATIVE_ADJUSTMENT for demotion risk and
+    //   SIMULATION_RESCORING_PROMOTION_FLOOR for the rejected-path promotion window.
+    if (!hasSimulationRescoreOpportunity(evalData)) {
       return { skipped: true, reason: 'no_actionable_paths' };
     }
 
@@ -17986,6 +18039,15 @@ async function writeSimulationOutcome(pkg, outcome, { storageConfig } = {}) {
   });
   const { url, token } = getRedisCredentials();
   const theaterResults = Array.isArray(outcome.theaterResults) ? outcome.theaterResults : [];
+  const failedTheaters = Array.isArray(outcome.failedTheaters) ? outcome.failedTheaters : [];
+  const failedTheaterCount = toNonNegativeInteger(outcome.failedTheaterCount ?? failedTheaters.length);
+  const eligibleTheaterCount = toNonNegativeInteger(outcome.eligibleTheaterCount ?? (theaterResults.length + failedTheaterCount));
+  const completionStatus = getSimulationCompletionStatus({
+    eligibleTheaterCount,
+    theaterCount: theaterResults.length,
+    failedTheaterCount,
+  });
+  const allTheatersFailed = completionStatus === 'all_theaters_failed';
   const emptyCandidateStateIdCount = theaterResults.filter((tr) => !String(tr?.candidateStateId || '').trim()).length;
   if (emptyCandidateStateIdCount > 0) {
     console.warn(`  [Simulation] Outcome ${runId} has ${emptyCandidateStateIdCount}/${theaterResults.length} theaterResults with empty candidateStateId`);
@@ -18014,6 +18076,10 @@ async function writeSimulationOutcome(pkg, outcome, { storageConfig } = {}) {
     outcomeKey,
     schemaVersion: SIMULATION_OUTCOME_SCHEMA_VERSION,
     theaterCount: theaterResults.length,
+    eligibleTheaterCount,
+    failedTheaterCount,
+    allTheatersFailed,
+    completionStatus,
     emptyCandidateStateIdCount,
     generatedAt: generatedAt || Date.now(),
     uiTheaters,
@@ -18267,15 +18333,17 @@ async function processNextSimulationTask(options = {}) {
         console.log(`  [Simulation] Running theater: ${theater.theaterId}`);
         const result = await runTheaterSimulation(theater, pkgData);
         if (result.failed) {
-          console.warn(`  [Simulation] Theater ${theater.theaterId} failed: ${result.reason}`);
-          failedTheaters.push({ theaterId: theater.theaterId, reason: result.reason });
+          const diagnostics = result.diagnostics || null;
+          const stageSuffix = diagnostics?.stage ? ` stage=${diagnostics.stage}` : '';
+          console.warn(`  [Simulation] Theater ${theater.theaterId} failed: ${result.reason}${stageSuffix}`);
+          failedTheaters.push({ theaterId: theater.theaterId, reason: result.reason, diagnostics });
           continue;
         }
 
         const r2Paths = result.round2?.paths || [];
         const r1Paths = result.round1?.paths || [];
         const allowedRoles = Array.isArray(theater.actorRoles) ? theater.actorRoles : [];
-        const mergedPaths = (r2Paths.length ? r2Paths : r1Paths).map((p) => {
+        const mergedPaths = r2Paths.map((p) => {
           const r1Path = r1Paths.find((r) => r.pathId === p.pathId);
           return {
             pathId: p.pathId,
@@ -18306,6 +18374,15 @@ async function processNextSimulationTask(options = {}) {
         });
       }
 
+      const eligibleTheaterCount = eligibleTheaters.length;
+      const failedTheaterCount = failedTheaters.length;
+      const completionStatus = getSimulationCompletionStatus({
+        eligibleTheaterCount,
+        theaterCount: theaterResults.length,
+        failedTheaterCount,
+      });
+      const allTheatersFailed = completionStatus === 'all_theaters_failed';
+
       const outcome = {
         runId,
         schemaVersion: SIMULATION_OUTCOME_SCHEMA_VERSION,
@@ -18317,6 +18394,10 @@ async function processNextSimulationTask(options = {}) {
         _meta: packageRotated ? { packageRotated: true } : {},
         theaterResults,
         failedTheaters,
+        eligibleTheaterCount,
+        failedTheaterCount,
+        allTheatersFailed,
+        completionStatus,
         globalObservations: eligibleTheaters.length === 0
           ? 'No maritime chokepoint/energy theaters in package'
           : theaterResults.length === 0 ? 'All theaters failed simulation' : '',
@@ -18334,7 +18415,16 @@ async function processNextSimulationTask(options = {}) {
       const rescoreResult = await applyPostSimulationRescore(runId, outcome, storageConfig)
         .catch((err) => { console.warn(`  [SimulationRescore] Error for ${runId}: ${err.message}`); return null; });
       if (rescoreResult && !rescoreResult.skipped) console.log(`  [SimulationRescore] ${runId}: ${JSON.stringify(rescoreResult)}`);
-      return { status: 'completed', runId, theaterCount: theaterResults.length, outcomeKey: writeResult?.outcomeKey };
+      return {
+        status: allTheatersFailed ? 'all_theaters_failed' : 'completed',
+        runId,
+        theaterCount: theaterResults.length,
+        eligibleTheaterCount,
+        failedTheaterCount,
+        allTheatersFailed,
+        completionStatus,
+        outcomeKey: writeResult?.outcomeKey,
+      };
     } catch (err) {
       console.warn(`  [Simulation] Task failed for ${runId}: ${err.message}`);
       await completeSimulationTask(runId, workerId);
@@ -18506,6 +18596,7 @@ export {
   writeDeepForecastSnapshot,
   isSimulationEligible,
   SIMULATION_ELIGIBILITY_RANK_THRESHOLD,
+  SIMULATION_RESCORING_DEMOTION_THRESHOLD,
   inferEntityClassFromName,
   buildSimulationRequirementText,
   buildSimulationPackageConstraints,
@@ -18523,6 +18614,7 @@ export {
   buildSimulationOutcomeKey,
   writeSimulationOutcome,
   computeSimulationLockTtlSeconds,
+  getSimulationCompletionStatus,
   createSimulationWorkerId,
   buildSimulationRound1SystemPrompt,
   buildSimulationRound2SystemPrompt,
@@ -18535,6 +18627,7 @@ export {
   runSimulationWorker,
   fetchSimulationOutcomeForMerge,
   applyPostSimulationRescore,
+  hasSimulationRescoreOpportunity,
   writeSimulationDecorations,
   applySimulationDecorationsToForecasts,
   patchPublishedForecastsWithSimDecorations,
