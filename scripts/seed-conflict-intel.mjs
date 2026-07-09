@@ -17,6 +17,8 @@
  */
 
 import { loadEnvFile, CHROME_UA, runSeed, writeExtraKeyWithMeta, sleep, loadSharedConfig } from './_seed-utils.mjs';
+import { fetchGdeltJson } from './_gdelt-fetch.mjs';
+import { buildGdeltConflictUrl, mapGdeltArticlesToEvents, GDELT_COUNTRY_NAMES } from './_conflict-gdelt.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -38,6 +40,7 @@ const CONFLICT_COUNTRIES = [
   'AF', 'SY', 'UA', 'SD', 'SS', 'SO', 'CD', 'MM', 'YE', 'ET',
   'IQ', 'PS', 'LY', 'ML', 'BF', 'NE', 'NG', 'CM', 'MZ', 'HT',
 ];
+export const GDELT_MIN_SUCCESSFUL_COUNTRIES = Math.ceil(CONFLICT_COUNTRIES.length * 0.8);
 
 const ISO2_TO_ISO3 = loadSharedConfig('iso2-to-iso3.json');
 
@@ -117,6 +120,10 @@ function normalizeAcledConflictEvents(rawEvents) {
       id: `acled-${e.event_id_cnty}`,
       eventType: e.event_type || '',
       country: e.country || '',
+      // event_date ('YYYY-MM-DD') is the field the EMA engine reads
+      // (_ema-threat-engine.mjs `Date.parse(ev.event_date)`); without it ACLED
+      // events parsed as NaN and were never counted by the escalation EMA.
+      event_date: e.event_date || '',
       location: { latitude: parseFloat(e.latitude || '0'), longitude: parseFloat(e.longitude || '0') },
       occurredAt: new Date(e.event_date || '').getTime(),
       fatalities: parseInt(e.fatalities || '', 10) || 0,
@@ -174,6 +181,72 @@ async function fetchAcledEvents({
     : undefined;
   console.log(`  ${label}: ${events.length} events (${startDate} to ${endDate}${paginated ? `, ${pagesFetched} page(s)` : ''})`);
   return { events, pagination };
+}
+
+// ─── GDELT conflict-events fallback (used when ACLED has no credentials) ───
+// ACLED requires a registered account. When its credentials are absent, keep a
+// near-real-time conflict signal by proxying GDELT DOC 2.0 coverage volume: per
+// priority country, count recent conflict-tagged articles and emit them as synthetic
+// events in the SAME {country, event_date} shape the EMA engine reads
+// (_ema-threat-engine.mjs). Article volume is a coarser proxy than ACLED event counts,
+// but it is keyless, near-real-time, and directionally valid for the per-country
+// escalation EMA. URL/query + article→event mapping live in the import-safe,
+// unit-tested _conflict-gdelt.mjs; this fn owns the throttle-aware fetch via
+// fetchGdeltJson's proxy path (GDELT is per-IP 429-throttled).
+export async function fetchGdeltCountryEvents(cc) {
+  if (!GDELT_COUNTRY_NAMES[cc]) {
+    return { country: cc, ok: false, events: [], error: 'unknown country code' };
+  }
+  let data;
+  try {
+    // Runs 20× per cycle — keep each call cheap so the whole sweep fits the run window.
+    data = await fetchGdeltJson(buildGdeltConflictUrl(cc), { label: `conflict:${cc}`, maxRetries: 1, proxyMaxAttempts: 2 });
+  } catch (e) {
+    console.warn(`  GDELT ${cc}: ${e.message}`);
+    return { country: cc, ok: false, events: [], error: e.message || String(e) };
+  }
+  return { country: cc, ok: true, events: mapGdeltArticlesToEvents(data?.articles, cc) };
+}
+
+export async function fetchGdeltConflictEvents({
+  fetchCountryEvents = fetchGdeltCountryEvents,
+  pace = sleep,
+} = {}) {
+  const events = [];
+  const failedCountries = [];
+  let successfulCountries = 0;
+  const CONCURRENCY = 4; // bound the run window (20 countries × proxy retries)
+  for (let i = 0; i < CONFLICT_COUNTRIES.length; i += CONCURRENCY) {
+    const batch = CONFLICT_COUNTRIES.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(batch.map(cc => fetchCountryEvents(cc)));
+    for (const result of results) {
+      if (result?.ok) {
+        successfulCountries += 1;
+        events.push(...(Array.isArray(result.events) ? result.events : []));
+      } else {
+        failedCountries.push({ country: result?.country || 'unknown', error: result?.error || 'unknown failure' });
+      }
+    }
+    if (i + CONCURRENCY < CONFLICT_COUNTRIES.length) await pace(500); // inter-batch only; no trailing wait
+  }
+  if (successfulCountries < GDELT_MIN_SUCCESSFUL_COUNTRIES) {
+    const sample = failedCountries.slice(0, 6).map(({ country, error }) => `${country}:${error}`).join(', ');
+    throw new Error(
+      `GDELT conflict-events coverage below floor: ${successfulCountries}/${CONFLICT_COUNTRIES.length} countries succeeded ` +
+      `(min ${GDELT_MIN_SUCCESSFUL_COUNTRIES})${sample ? `; failures: ${sample}` : ''}`,
+    );
+  }
+  console.log(`  GDELT conflict-events (ACLED fallback): ${events.length} events across ${successfulCountries}/${CONFLICT_COUNTRIES.length} successful country fetches`);
+  return {
+    events,
+    pagination: {
+      countriesTotal: CONFLICT_COUNTRIES.length,
+      countriesSucceeded: successfulCountries,
+      countriesFailed: failedCountries.length,
+      minSuccessfulCountries: GDELT_MIN_SUCCESSFUL_COUNTRIES,
+    },
+    source: 'gdelt',
+  };
 }
 
 // ─── Humanitarian Summary (HAPI) ───
@@ -358,7 +431,17 @@ async function fetchAll() {
     // when ACLED credentials ARE present but the display fetch failed (#5106).
     const missingCredentials = acled.status === 'fulfilled';
     if (missingCredentials) {
-      console.log('  ACLED: no credentials configured — publishing auxiliary feeds only, primary feed left empty');
+      // No ACLED credentials → fall back to the GDELT article-volume proxy so the
+      // conflict escalation EMA keeps a near-real-time signal (#5099). This runs only
+      // on the no-creds path: a credentialed-but-failed fetch still throws below, and a
+      // credentialed-but-empty ACLED result is trusted (returns `ac`) rather than
+      // overwritten by GDELT volume.
+      const gdeltEvents = await fetchGdeltConflictEvents().catch((e) => {
+        console.warn(`  GDELT conflict-events fallback failed: ${e.message}`);
+        return null;
+      });
+      if (gdeltEvents?.events?.length) return gdeltEvents;
+      console.log('  ACLED: no credentials + GDELT fallback empty — publishing auxiliary feeds only, primary feed left empty');
       return { events: [], pagination: undefined };
     }
     const reason = acled.reason?.message || acled.reason;
@@ -380,14 +463,16 @@ export function declareRecords(data) {
   return Array.isArray(data?.events) ? data.events.length : 0;
 }
 
-runSeed('conflict', 'acled-intel', ACLED_CACHE_KEY, fetchAll, {
-  validateFn: validate,
-  ttlSeconds: ACLED_TTL,
-  sourceVersion: 'acled-hapi-pizzint',
-  declareRecords,
-  schemaVersion: 1,
-  maxStaleMin: 38,
-}).catch((err) => {
-  const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : ''; console.error('FATAL:', (err.message || err) + _cause);
-  process.exit(1);
-});
+if (process.argv[1]?.endsWith('seed-conflict-intel.mjs')) {
+  runSeed('conflict', 'acled-intel', ACLED_CACHE_KEY, fetchAll, {
+    validateFn: validate,
+    ttlSeconds: ACLED_TTL,
+    sourceVersion: 'acled-hapi-pizzint',
+    declareRecords,
+    schemaVersion: 1,
+    maxStaleMin: 38,
+  }).catch((err) => {
+    const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : ''; console.error('FATAL:', (err.message || err) + _cause);
+    process.exit(1);
+  });
+}
