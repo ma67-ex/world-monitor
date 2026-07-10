@@ -141,12 +141,15 @@ describe('parseWhyMattersV2 — analyst output validator', () => {
     "Iran's closure of the Strait of Hormuz on April 21 halts roughly 20% of global seaborne oil. " +
     'The disruption forces an immediate repricing of sovereign risk across Gulf energy exporters.';
 
-  it('accepts a valid 2-sentence, ~40–70 word output', () => {
+  it('accepts a valid 1–2 sentence output', () => {
     const out = parseWhyMattersV2(VALID_MULTI);
     assert.equal(out, VALID_MULTI);
   });
 
-  it('accepts a valid 3-sentence output with optional WATCH arc', () => {
+  it('parser tolerates a longer 3-sentence output (lenient by design; the prompt asks for 1–2)', () => {
+    // The parser only gates 100–500 chars + shape, not sentence count, so an
+    // occasional over-length generation is passed through rather than nuked
+    // to the stub. Conciseness is enforced by the prompt contract, not here.
     const three =
       "Iran's closure of the Strait of Hormuz on April 21 halts roughly 20% of global seaborne oil. " +
       'The disruption forces an immediate repricing of sovereign risk across Gulf energy exporters. ' +
@@ -190,6 +193,26 @@ describe('parseWhyMattersV2 — analyst output validator', () => {
     ]) {
       assert.equal(parseWhyMattersV2(leak), null, `should reject label leak: "${leak.slice(0, 40)}..."`);
     }
+  });
+
+  it('rejects raw forecast-probability disclosures but preserves ordinary sourced percentages', () => {
+    const forecastLeak =
+      "WorldMonitor's internal forecast assigns an 84% probability to a Strait of Hormuz disruption, which would intensify regional shipping risk. " +
+      'That projection is not a reader-facing fact and must fall through to the next generation layer.';
+    const likelyLeak =
+      'A disruption is 84% likely according to the forecast, creating an immediate risk of higher insurance costs across Gulf shipping routes. ' +
+      'The analyst should not present that internal probability as a published fact.';
+    const provenance = {
+      publicStory: {
+        headline: 'Insurers reassess Gulf shipping routes',
+        description: 'Carriers are reviewing transit plans after new regional threats.',
+        source: 'Reuters',
+      },
+      privateForecasts: 'WorldMonitor disruption model: Strait closure remains 84% likely.',
+    };
+    assert.equal(parseWhyMattersV2(forecastLeak, provenance), null);
+    assert.equal(parseWhyMattersV2(likelyLeak, provenance), null);
+    assert.equal(parseWhyMattersV2(VALID_MULTI), VALID_MULTI, 'ordinary story percentages must remain valid');
   });
 
   it('rejects markdown leakage (bullets, headers, numbered lists)', () => {
@@ -321,7 +344,7 @@ describe('generateWhyMatters — analyst priority', () => {
   });
 
   it('preserves multi-sentence v2 analyst output verbatim (P1 regression guard)', async () => {
-    // The endpoint now returns 2–3 sentences validated by parseWhyMattersV2.
+    // The endpoint now returns 1–2 sentences validated by parseWhyMattersV2.
     // The cron MUST NOT reparse with the v1 single-sentence parser, which
     // would silently truncate the 2nd + 3rd sentences. Caught in PR #3269
     // review; fixed by trusting the endpoint's own validation and only
@@ -492,7 +515,7 @@ describe('buildAnalystWhyMattersPrompt — shape and budget', () => {
     assert.ok(typeof builder === 'function');
   });
 
-  it('uses the analyst v2 system prompt (multi-sentence, grounded) + date-grounding line', async () => {
+  it('uses the analyst v2 system prompt (multi-sentence, grounded, varied) + date-grounding line', async () => {
     const { WHY_MATTERS_ANALYST_SYSTEM_V2, briefDateLine } = await import('../shared/brief-llm-core.js');
     const { system } = builder(
       story(),
@@ -509,10 +532,17 @@ describe('buildAnalystWhyMattersPrompt — shape and budget', () => {
     );
     // F6: system prompt is the static v2 const + an injected date line.
     assert.equal(system, `${WHY_MATTERS_ANALYST_SYSTEM_V2}\n${briefDateLine('2026-05-14')}`);
-    // Contract must still mention the 40–70 word target + grounding rule.
-    assert.match(system, /40–70 words/);
+    // Contract must mention the tightened 25–40 word target + concision +
+    // grounding rule.
+    assert.match(system, /25–40 words/);
+    assert.match(system, /1–2 sentences/);
+    assert.match(system, /be concise/i);
+    assert.doesNotMatch(system, /40–70 words/);
     assert.match(system, /named person \/ country \/ organization \/ number \/ percentage \/ date \/ city/);
     assert.match(system, /^Today is 2026-05-14\./m);
+    assert.match(system, /vary sentence structure/i);
+    assert.doesNotMatch(system, /STRUCTURE:/);
+    assert.doesNotMatch(system, /SITUATION —/);
   });
 
   it('includes story fields with the multi-sentence footer', () => {
@@ -530,7 +560,7 @@ describe('buildAnalystWhyMattersPrompt — shape and budget', () => {
     assert.match(user, /Severity: critical/);
     assert.match(user, /Category: Geopolitical Risk/);
     assert.match(user, /Country: IR/);
-    assert.match(user, /Write 2–3 sentences \(40–70 words\)/);
+    assert.match(user, /Write 1–2 sentences \(25–40 words\)/);
     assert.match(user, /grounded in at least ONE specific/);
   });
 
@@ -795,6 +825,118 @@ describe('sectionsForCategory — structural relevance gating', () => {
     assert.match(user, /DO NOT force/i, 'guardrail phrase "DO NOT force" must be in footer');
     assert.match(user, /off-topic market metric|VIX|forecast probability/i);
     assert.match(user, /named actor, place, date, or figure/);
+    assert.match(user, /only when materially connected/i);
+    assert.match(user, /most stories should not mention the global context/i);
+    assert.match(user, /do not quote raw forecast probabilities/i);
+  });
+
+  it('buildAnalystWhyMattersPrompt — production-shaped local stories do not receive global narrative or forecasts', async (t) => {
+    const stories = [
+      {
+        name: 'Srebrenica historical memory',
+        headline: 'Three survivors of the 1995 Srebrenica genocide preserve the memory of those killed',
+        description: 'Their testimony keeps historical memory alive three decades after the massacre.',
+        threatLevel: 'critical',
+        category: 'Conflict',
+        country: 'BA',
+      },
+      {
+        name: 'mass-casualty smuggling prosecution',
+        headline: 'Two Guatemalan nationals extradited to the U.S. admit roles in a 2021 mass casualty smuggling event',
+        description: 'The defendants entered guilty pleas in federal court.',
+        threatLevel: 'critical',
+        category: 'Conflict',
+        country: 'US',
+      },
+      {
+        name: 'civil-rights court ruling',
+        headline: 'Federal judge orders release of $5.8 million to E. Jean Carroll',
+        description: 'The plaintiff won access to funds after a federal civil-rights ruling.',
+        threatLevel: 'medium',
+        category: 'General',
+        country: 'US',
+      },
+    ];
+
+    for (const story of stories) {
+      await t.test(story.name, () => {
+        const { user, policyLabel } = builder(
+          {
+            headline: story.headline,
+            description: story.description,
+            source: 'AP',
+            threatLevel: story.threatLevel,
+            category: story.category,
+            country: story.country,
+          },
+          {
+            worldBrief: 'US-Iran ceasefire talks remain fragile around the Strait of Hormuz.',
+            countryBrief: 'Local institutions are handling the reported event.',
+            riskScores: 'Domestic stability risk is moderate.',
+            forecasts: 'WorldMonitor forecast: Hormuz traffic disruption remains 84% likely.',
+            marketData: 'Oil trades at $87.',
+            macroSignals: 'FX stress remains elevated.',
+            degraded: false,
+          },
+        );
+        assert.equal(policyLabel, 'local', `${story.name} should match the local policy`);
+        assert.doesNotMatch(user, /US-Iran ceasefire/);
+        assert.doesNotMatch(user, /84% likely/);
+        assert.match(user, /Local institutions are handling/);
+      });
+    }
+  });
+
+  it('buildAnalystWhyMattersPrompt — genuine geopolitical Conflict story retains global narrative and forecasts', () => {
+    const { user, policyLabel } = builder(
+      {
+        headline: 'Mass casualty missile strikes escalate active conflict across the Gulf',
+        description: 'Military forces exchanged strikes overnight as regional tensions rose.',
+        source: 'Reuters',
+        threatLevel: 'critical',
+        category: 'Conflict',
+        country: 'IR',
+      },
+      {
+        worldBrief: 'US-Iran ceasefire talks remain fragile around the Strait of Hormuz.',
+        countryBrief: 'Iranian forces remain on high alert.',
+        riskScores: 'Regional stability risk is severe.',
+        forecasts: 'WorldMonitor forecast: Hormuz traffic disruption remains elevated.',
+        marketData: 'Oil trades at $87.',
+        macroSignals: 'FX stress remains elevated.',
+        degraded: false,
+      },
+    );
+
+    assert.equal(policyLabel, 'geopolitical');
+    assert.match(user, /US-Iran ceasefire/);
+    assert.match(user, /Hormuz traffic disruption remains elevated/);
+  });
+
+  it('buildAnalystWhyMattersPrompt — specific market category outranks a court keyword', () => {
+    const { user, policyLabel } = builder(
+      {
+        headline: 'Court blocks major oil pipeline permit',
+        description: 'The ruling delays a planned expansion of regional crude capacity.',
+        source: 'Reuters',
+        threatLevel: 'medium',
+        category: 'Energy',
+        country: 'US',
+      },
+      {
+        worldBrief: 'Global energy supply remains tight.',
+        countryBrief: 'The permit dispute is proceeding through federal court.',
+        riskScores: 'Domestic stability risk is low.',
+        forecasts: 'Pipeline capacity is expected to remain constrained.',
+        marketData: 'Oil trades at $87.',
+        macroSignals: 'Refining margins remain elevated.',
+        degraded: false,
+      },
+    );
+
+    assert.equal(policyLabel, 'market');
+    assert.match(user, /Pipeline capacity is expected to remain constrained/);
+    assert.match(user, /Oil trades at \$87/);
   });
 });
 
