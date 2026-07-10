@@ -18,8 +18,13 @@ import { createHash } from 'node:crypto';
 
 import {
   WHY_MATTERS_SYSTEM,
+  WHY_MATTERS_V1_MAX_CHARS,
+  WHY_MATTERS_V1_MIN_CHARS,
+  WHY_MATTERS_V2_MAX_CHARS,
+  WHY_MATTERS_V2_MIN_CHARS,
   briefDateLine,
   buildWhyMattersUserPrompt,
+  hasTerminalPunctuation,
   hashBriefStory,
   parseWhyMatters,
 } from '../shared/brief-llm-core.js';
@@ -46,6 +51,48 @@ const FIXTURE = {
   category: 'Geopolitical Risk',
   country: 'IR',
 };
+
+describe('hasTerminalPunctuation — shared wire/cache completion gate', () => {
+  it('accepts sentence punctuation with optional closing quotes', () => {
+    assert.equal(hasTerminalPunctuation('Complete sentence.'), true);
+    assert.equal(hasTerminalPunctuation('Complete question?\u201D'), true);
+    assert.equal(hasTerminalPunctuation('Complete exclamation!"'), true);
+  });
+
+  it('rejects fragments even when they end in a closing quote', () => {
+    assert.equal(hasTerminalPunctuation('With the ceasefire collapsed, the'), false);
+    assert.equal(hasTerminalPunctuation('With the ceasefire collapsed, the\u201D'), false);
+    assert.equal(hasTerminalPunctuation(null), false);
+  });
+
+  it('rejects ASCII and Unicode ellipses with optional closing quotes', () => {
+    assert.equal(hasTerminalPunctuation('The negotiations remain unresolved...'), false);
+    assert.equal(hasTerminalPunctuation('The negotiations remain unresolved...\u201D'), false);
+    assert.equal(hasTerminalPunctuation('The negotiations remain unresolved\u2026'), false);
+    assert.equal(hasTerminalPunctuation('The negotiations remain unresolved\u2026"'), false);
+  });
+});
+
+describe('whyMatters character bounds — shared parser contracts', () => {
+  it('wires the exported v1 bounds into parseWhyMatters', () => {
+    assert.equal(WHY_MATTERS_V1_MIN_CHARS, 30);
+    assert.equal(WHY_MATTERS_V1_MAX_CHARS, 400);
+    assert.equal(parseWhyMatters(`${'x'.repeat(WHY_MATTERS_V1_MIN_CHARS - 1)}.`)?.length, WHY_MATTERS_V1_MIN_CHARS);
+    assert.equal(parseWhyMatters(`${'x'.repeat(WHY_MATTERS_V1_MIN_CHARS - 2)}.`), null);
+    assert.equal(parseWhyMatters(`${'x'.repeat(WHY_MATTERS_V1_MAX_CHARS - 1)}.`)?.length, WHY_MATTERS_V1_MAX_CHARS);
+    assert.equal(parseWhyMatters(`${'x'.repeat(WHY_MATTERS_V1_MAX_CHARS)}.`), null);
+  });
+
+  it('wires the exported v2 bounds into parseWhyMattersV2', async () => {
+    const { parseWhyMattersV2 } = await import('../shared/brief-llm-core.js');
+    assert.equal(WHY_MATTERS_V2_MIN_CHARS, 100);
+    assert.equal(WHY_MATTERS_V2_MAX_CHARS, 500);
+    assert.equal(parseWhyMattersV2(`${'x'.repeat(WHY_MATTERS_V2_MIN_CHARS - 1)}.`)?.length, WHY_MATTERS_V2_MIN_CHARS);
+    assert.equal(parseWhyMattersV2(`${'x'.repeat(WHY_MATTERS_V2_MIN_CHARS - 2)}.`), null);
+    assert.equal(parseWhyMattersV2(`${'x'.repeat(WHY_MATTERS_V2_MAX_CHARS - 1)}.`)?.length, WHY_MATTERS_V2_MAX_CHARS);
+    assert.equal(parseWhyMattersV2(`${'x'.repeat(WHY_MATTERS_V2_MAX_CHARS)}.`), null);
+  });
+});
 
 describe('hashBriefStory — Web Crypto parity with legacy node:crypto', () => {
   it('returns the exact hash the pre-extract implementation emitted', async () => {
@@ -178,10 +225,10 @@ describe('parseWhyMatters — pure sentence validator', () => {
     assert.equal(parseWhyMatters('x'.repeat(401)), null);
   });
 
-  it('strips smart-quotes and takes the first sentence', () => {
-    const input = '"Closure would spike oil markets and force a naval response." Secondary clause.';
+  it('strips surrounding quotes while preserving complete prose', () => {
+    const input = '"Closure would spike oil markets and force a naval response. Secondary clause."';
     const out = parseWhyMatters(input);
-    assert.equal(out, 'Closure would spike oil markets and force a naval response.');
+    assert.equal(out, 'Closure would spike oil markets and force a naval response. Secondary clause.');
   });
 
   it('rejects the stub echo', () => {
@@ -192,6 +239,26 @@ describe('parseWhyMatters — pure sentence validator', () => {
   it('preserves a valid one-sentence output verbatim', () => {
     const s = 'Closure of the Strait of Hormuz would spike global oil prices and force a US naval response.';
     assert.equal(parseWhyMatters(s), s);
+  });
+
+  it('does not split a valid sentence inside a dotted abbreviation', () => {
+    const s = 'The ruling would reshape alliance planning as U.S. officials prepare for the 2027 vote.';
+    assert.equal(parseWhyMatters(s), s);
+    const capitalized = 'The ruling could alter European coordination with the U.S. Navy as regional tensions rise.';
+    assert.equal(parseWhyMatters(capitalized), capitalized);
+    const hyphenated = 'The sanctions would constrain trade while forcing the U.S.-led coalition to respond.';
+    assert.equal(parseWhyMatters(hyphenated), hyphenated);
+  });
+
+  it('preserves complete multi-sentence output instead of guessing after an abbreviation', () => {
+    const input = 'The decision would immediately change policy across the U.S. Markets repriced risk across Europe.';
+    assert.equal(parseWhyMatters(input), input);
+  });
+
+  it('rejects a max-token clip with no terminal punctuation', () => {
+    const clipped =
+      'Marine Le Pen\u2019s conviction on appeal leaves her legally eligible for the 2027 presidential election, creating a high-stakes';
+    assert.equal(parseWhyMatters(clipped), null);
   });
 });
 
@@ -255,6 +322,14 @@ describe('parseWhyMattersV2 — multi-sentence, analyst-path only', () => {
       },
       privateForecasts: 'WorldMonitor political-instability forecast: 84% probability.',
     }), sourced);
+  });
+
+  it('rejects a clipped final sentence even when an earlier sentence is complete', async () => {
+    const { parseWhyMattersV2 } = await import('../shared/brief-llm-core.js');
+    const clipped =
+      'Marine Le Pen\u2019s conviction on appeal leaves her legally eligible for the 2027 presidential election. ' +
+      'The ruling reshapes the campaign while leaving debate over democratic norms and';
+    assert.equal(parseWhyMattersV2(clipped), null);
   });
 
   it('rejects <100 chars (too terse for the analyst contract)', async () => {

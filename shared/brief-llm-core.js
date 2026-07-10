@@ -25,6 +25,11 @@ export const WHY_MATTERS_SYSTEM =
   '("This matters because…"), no questions, no calls to action, no markdown, ' +
   'no quotes. One sentence only.';
 
+export const WHY_MATTERS_V1_MIN_CHARS = 30;
+export const WHY_MATTERS_V1_MAX_CHARS = 400;
+export const WHY_MATTERS_V2_MIN_CHARS = 100;
+export const WHY_MATTERS_V2_MAX_CHARS = 500;
+
 /**
  * Date-grounding line appended to every brief LLM system prompt.
  *
@@ -80,7 +85,23 @@ export function buildWhyMattersUserPrompt(story, todayIso) {
 }
 
 /**
- * Parse + validate the LLM response into a single editorial sentence.
+ * Whether a whyMatters candidate ends as a complete sentence. Accept closing
+ * quote marks after terminal punctuation so cached and wire-format values are
+ * safe to validate before parser-specific normalization.
+ *
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+export function hasTerminalPunctuation(text) {
+  if (typeof text !== 'string') return false;
+  const s = text.trim();
+  const prose = s.replace(/["'\u2019\u201D]+$/, '');
+  if (/(?:\.\.\.|\u2026)$/.test(prose)) return false;
+  return /[.!?]$/.test(prose);
+}
+
+/**
+ * Parse + validate the LLM response into complete editorial prose.
  * Returns null when the output is obviously wrong (empty, boilerplate
  * preamble that survived stripReasoningPreamble, too short / too long).
  *
@@ -92,11 +113,13 @@ export function parseWhyMatters(text) {
   let s = text.trim();
   if (!s) return null;
   s = s.replace(/^[\u201C"']+/, '').replace(/[\u201D"']+$/, '').trim();
-  const match = s.match(/^[^.!?]+[.!?]/);
-  const sentence = match ? match[0].trim() : s;
-  if (sentence.length < 30 || sentence.length > 400) return null;
-  if (/^story flagged by your sensitivity/i.test(sentence)) return null;
-  return sentence;
+  // Dotted abbreviations make sentence splitting intrinsically ambiguous
+  // (`U.S. Navy` vs `U.S. Markets rallied`). The prompt owns sentence count;
+  // provider finish_reason plus this punctuation gate own completeness.
+  if (!hasTerminalPunctuation(s)) return null;
+  if (s.length < WHY_MATTERS_V1_MIN_CHARS || s.length > WHY_MATTERS_V1_MAX_CHARS) return null;
+  if (/^story flagged by your sensitivity/i.test(s)) return null;
+  return s;
 }
 
 /**
@@ -225,7 +248,8 @@ export function parseWhyMattersV2(text, provenance) {
   if (!s) return null;
   // Drop surrounding quotes if the model insisted.
   s = s.replace(/^[\u201C"']+/, '').replace(/[\u201D"']+$/, '').trim();
-  if (s.length < 100 || s.length > 500) return null;
+  if (s.length < WHY_MATTERS_V2_MIN_CHARS || s.length > WHY_MATTERS_V2_MAX_CHARS) return null;
+  if (!hasTerminalPunctuation(s)) return null;
   // Reject the stub echo (same as v1).
   if (/^story flagged by your sensitivity/i.test(s)) return null;
   // Reject common preamble the system prompt explicitly banned.
