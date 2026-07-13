@@ -755,11 +755,21 @@ export function resolveProxyForConnect() {
   return resolveProxyStringConnect();
 }
 
+// Scrub `scheme://user:pass@host` credentials out of anything we surface. Proxy auth
+// strings are the only place seeders carry inline credentials, and they end up embedded
+// in curl argv — see the execFileSync catch in curlFetch below.
+export function redactProxyCredentials(text) {
+  return String(text ?? '').replace(/(\w+:\/\/)[^/\s:@]+:[^/\s@]+@/g, '$1***:***@');
+}
+
 // curl-based fetch; throws on non-2xx. Returns response body as string.
 // NOTE: requires curl binary — available in Dockerfile.relay (apk add curl) and Railway.
 // Prefer httpsProxyFetchJson (pure Node.js) when possible; use curlFetch when curl-specific
 // features are needed (e.g. --compressed, -L redirect following with proxy).
-export function curlFetch(url, proxyAuth, headers = {}) {
+//
+// `exec` is an injection seam for tests ONLY — the credential scrubbing below lives in a
+// catch around execFileSync, and there is no other way to drive that branch deterministically.
+export function curlFetch(url, proxyAuth, headers = {}, { exec = execFileSync } = {}) {
   const args = ['-sS', '--compressed', '--max-time', '15', '-L'];
   if (proxyAuth) {
     const proxyUrl = /^https?:\/\//i.test(proxyAuth) ? proxyAuth : `http://${proxyAuth}`;
@@ -768,7 +778,30 @@ export function curlFetch(url, proxyAuth, headers = {}) {
   for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
   args.push('-w', '\n%{http_code}');
   args.push(url);
-  const raw = execFileSync('curl', args, { encoding: 'utf8', timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'] });
+  let raw;
+  try {
+    raw = exec('curl', args, { encoding: 'utf8', timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (err) {
+    // SECURITY: when curl itself exits non-zero (SSL_ERROR_SYSCALL, "CONNECT tunnel
+    // failed", DNS), execFileSync builds an Error whose message is the ENTIRE argv —
+    // including `-x http://user:pass@proxy-host`. Seeders log that message, so the proxy
+    // credentials were being written verbatim into Railway logs on every curl-level
+    // failure (observed continuously during the 2026-07-13 GDELT 429 storm). Re-throw
+    // with curl's own stderr, which names the failure without echoing the command.
+    //
+    // Dropping `.status` is load-bearing, not incidental: execFileSync sets it to curl's
+    // EXIT CODE (35, 56, 7…). _gdelt-fetch.mjs discriminates "upstream returned non-2xx"
+    // from "network/curl failure" purely on `typeof status === 'number'`, so leaking the
+    // exit code through made it read curl exit 35 as an HTTP status, find it absent from
+    // RETRYABLE_STATUSES, and refuse to retry the proxy — defeating the Decodo per-attempt
+    // IP rotation on exactly the TLS tears it exists to survive. Only a genuine HTTP
+    // status may carry `.status`.
+    const stderr = redactProxyCredentials(err?.stderr || '').trim().split('\n').filter(Boolean).pop();
+    throw Object.assign(
+      new Error(`curl failed: ${stderr || redactProxyCredentials(err?.message) || 'unknown error'}`),
+      { curlFailed: true },
+    );
+  }
   const nl = raw.lastIndexOf('\n');
   const status = parseInt(raw.slice(nl + 1).trim(), 10);
   if (status < 200 || status >= 300) throw Object.assign(new Error(`HTTP ${status}`), { status });
@@ -1518,14 +1551,47 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     }
 
     // Contract RETRY on empty (no zeroIsValid) — skip publish and preserve the
-    // last-good keys. Exit 0 only when Redis confirms every key was actually
-    // extended; otherwise the data is already gone (or preservation could not
-    // be verified), so a green process would hide a live outage indefinitely.
+    // last-good keys. Exit 0 when Redis confirms every key was actually extended;
+    // otherwise the data is already gone (or preservation could not be verified), so a
+    // green process would hide a live outage indefinitely — EXCEPT when the seeder
+    // declared `sourceUnavailable`, which also exits 0 (see #5256 below: with no source
+    // configured, no retry can ever restore the data, so exiting 1 crash-loops forever
+    // and /api/health already carries the alarm).
     if (contractState === 'RETRY') {
       const durationMs = Date.now() - startMs;
       const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
       if (extraKeys) keys.push(...extraKeys.map(ek => ek.key));
       const preserved = await extendExistingTtl(keys, ttlSeconds || 600);
+
+      // #5256: the RETRY-FAILED exit below assumes A LATER TICK CAN RESTORE THE DATA. When
+      // the seeder reports it had no usable source at all (primary unconfigured AND every
+      // fallback down), no tick ever can — seed-conflict-intel crash-looped every ~15min
+      // forever, firing "Deploy Crashed!" each time while /api/health already reported the
+      // domain EMPTY/crit. The crash added nothing over health; it only trained us to ignore
+      // the crash channel. Stay green, publish NOTHING (an empty envelope would overwrite
+      // last-good the moment the source blips), and leave the data alarm to /api/health.
+      //
+      // This is deliberately NOT `zeroIsValid`: a seeder must opt in per-run, on the exact
+      // code path where it knows it has no source. A zero-yield run that does not declare
+      // sourceUnavailable is still a dead feed and still exits 1 — #5258 stands.
+      //
+      // Checked BEFORE `preserved`, not inside `!preserved`: the outcome is exit 0 either
+      // way, but an operator must see the REAL reason on every tick. Falling through to the
+      // generic "TTL extended, bundle will retry next cycle" message while last-good is
+      // still alive would hide the no-source condition for however many cycles the keys
+      // survive, and only surface it once they expire.
+      if (data?.sourceUnavailable) {
+        console.warn(
+          `  NO SOURCE: declareRecords returned 0 and no usable upstream was available — published nothing, `
+          + (preserved
+            ? `last-good TTL extended (data still served, but it is no longer being refreshed).`
+            : `and last-good has already expired — /api/health reports ${domain}:${resource} EMPTY.`),
+        );
+        console.log(`\n=== Done (${Math.round(durationMs)}ms, NO SOURCE) ===`);
+        await releaseLock(`${domain}:${resource}`, runId);
+        await exitAfterTelemetryFlush(0);
+      }
+
       if (!preserved) {
         console.error(`  FAILURE: declareRecords returned 0 and last-good preservation failed — one or more keys are missing or could not be extended`);
         console.log(`\n=== Done (${Math.round(durationMs)}ms, RETRY FAILED) ===`);
