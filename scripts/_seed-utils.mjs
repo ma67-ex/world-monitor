@@ -1396,6 +1396,9 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     ttlSeconds,
     lockTtlMs = 120_000,
     extraKeys,
+    // Keys written outside runSeed's normal extra-key phase that still need
+    // last-good TTL protection when the primary fetch fails or is skipped.
+    preserveKeys = [],
     afterPublish,
     publishTransform,
     declareRecords,        // new — contract opt-in. When present, runSeed enters
@@ -1435,6 +1438,12 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
   }
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const startMs = Date.now();
+  const preservationKeys = () => [...new Set([
+    canonicalKey,
+    `seed-meta:${domain}:${resource}`,
+    ...(extraKeys || []).map((ek) => ek.key),
+    ...preserveKeys,
+  ].filter((key) => typeof key === 'string' && key.length > 0))];
 
   console.log(`=== ${domain}:${resource} Seed ===`);
   console.log(`  Run ID:  ${runId}`);
@@ -1480,11 +1489,9 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     try {
       if (currentPhase === 'fetch') {
         const ttl = ttlSeconds || 600;
-        const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
-        if (extraKeys) keys.push(...extraKeys.map((ek) => ek.key));
         await Promise.allSettled([
           releaseLock(`${domain}:${resource}`, runId),
-          extendExistingTtl(keys, ttl),
+          extendExistingTtl(preservationKeys(), ttl),
         ]);
       } else {
         await releaseLock(`${domain}:${resource}`, runId);
@@ -1530,9 +1537,7 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     console.error(`  FETCH FAILED: ${err.message || err}${cause}`);
 
     const ttl = ttlSeconds || 600;
-    const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
-    if (extraKeys) keys.push(...extraKeys.map(ek => ek.key));
-    await extendExistingTtl(keys, ttl);
+    await extendExistingTtl(preservationKeys(), ttl);
 
     console.log(`\n=== Failed gracefully (${Math.round(durationMs)}ms) ===`);
     await exitAfterTelemetryFlush(GRACEFUL_FETCH_FAILURE_EXIT_CODE);
@@ -1623,9 +1628,7 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     // and /api/health already carries the alarm).
     if (contractState === 'RETRY') {
       const durationMs = Date.now() - startMs;
-      const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
-      if (extraKeys) keys.push(...extraKeys.map(ek => ek.key));
-      const preserved = await extendExistingTtl(keys, ttlSeconds || 600);
+      const preserved = await extendExistingTtl(preservationKeys(), ttlSeconds || 600);
 
       // #5256: the RETRY-FAILED exit below assumes A LATER TICK CAN RESTORE THE DATA. When
       // the seeder reports it had no usable source at all (primary unconfigured AND every
@@ -1671,9 +1674,7 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     const publishResult = await atomicPublish(canonicalKey, publishData, validateFn, ttlSeconds, { envelopeMeta });
     if (publishResult.skipped) {
       const durationMs = Date.now() - startMs;
-      const keys = [canonicalKey, `seed-meta:${domain}:${resource}`];
-      if (extraKeys) keys.push(...extraKeys.map(ek => ek.key));
-      await extendExistingTtl(keys, ttlSeconds || 600);
+      await extendExistingTtl(preservationKeys(), ttlSeconds || 600);
       const strictFailure = Boolean(opts.emptyDataIsFailure);
       if (strictFailure) {
         // Strict-floor seeders (e.g. IMF-External, floor=180 countries) treat
