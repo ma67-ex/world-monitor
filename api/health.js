@@ -775,12 +775,12 @@ function keyHasData(redisKey, len) {
 
 function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   if (!seedCfg) {
-    return { seedAge: null, seedStale: null, seedError: false, metaReadFailed: false, metaCount: null, contentAge: null };
+    return { seedAge: null, seedStale: null, seedError: false, sourceUnavailable: false, metaReadFailed: false, metaCount: null, contentAge: null };
   }
   // Per-command Redis errors on the GET seed-meta half of the pipeline must
   // not silently fall through to STALE_SEED — promote to REDIS_PARTIAL.
   if (keyMetaErrors.get(seedCfg.key)) {
-    return { seedAge: null, seedStale: null, seedError: false, metaReadFailed: true, metaCount: null, contentAge: null };
+    return { seedAge: null, seedStale: null, seedError: false, sourceUnavailable: false, metaReadFailed: true, metaCount: null, contentAge: null };
   }
   // Unwrap through the envelope helper. Legacy seed-meta is a bare
   // `{ fetchedAt, recordCount, sourceVersion, status? }` object with no `_seed`
@@ -789,7 +789,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   // the dependency so behavior stays byte-identical in PR 1.
   const meta = unwrapEnvelope(parseRedisValue(keyMetaValues.get(seedCfg.key))).data;
   if (meta?.status === 'error') {
-    return { seedAge: null, seedStale: true, seedError: true, metaReadFailed: false, metaCount: null, contentAge: null };
+    return { seedAge: null, seedStale: true, seedError: true, sourceUnavailable: false, metaReadFailed: false, metaCount: null, contentAge: null };
   }
   let seedAge = null;
   let seedStale = true;
@@ -798,10 +798,18 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
     seedStale = seedAge > seedCfg.maxStaleMin;
   }
   const metaCount = meta?.count ?? meta?.recordCount ?? null;
+  // `unavailable` is the one sourceState that means "this deployment never opted
+  // into the adapter" (the producer had no credential to try with), as opposed to
+  // "the adapter was tried and is broken" (`stale`/`error`). Grading the two the
+  // same makes an optional, deliberately-unconfigured source an eternal warn that
+  // no amount of operator work can clear — so it is classified separately below.
+  const sourceUnavailable = meta?.sourceState === 'unavailable';
   // Source-specific producers can preserve usable last-good records while a
   // current upstream attempt is degraded. Surface that state immediately as a
   // warning without discarding the retained record count from health output.
-  const sourceDegraded = typeof meta?.sourceState === 'string' && meta.sourceState !== 'ok';
+  const sourceDegraded = typeof meta?.sourceState === 'string'
+    && meta.sourceState !== 'ok'
+    && !sourceUnavailable;
   // Content-age trio (2026-05-04 health-readiness plan). Presence of
   // maxContentAgeMin is the opt-in signal — legacy seeders without it
   // get contentAge: null and skip the STALE_CONTENT branch in classifyKey.
@@ -829,7 +837,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
       contentStale: contentAgeMin == null || isFutureDated || contentAgeMin > meta.maxContentAgeMin,
     };
   }
-  return { seedAge, seedStale, seedError: sourceDegraded, metaReadFailed: false, metaCount, contentAge };
+  return { seedAge, seedStale, seedError: sourceDegraded, sourceUnavailable, metaReadFailed: false, metaCount, contentAge };
 }
 
 function isCascadeCovered(name, hasData, keyStrens, keyErrors) {
@@ -864,7 +872,7 @@ function classifyKey(name, redisKey, opts, ctx) {
 
   const strlen = keyStrens.get(redisKey) ?? 0;
   const hasData = keyHasData(redisKey, strlen);
-  const { seedAge, seedStale, seedError, metaCount, contentAge } = meta;
+  const { seedAge, seedStale, seedError, sourceUnavailable, metaCount, contentAge } = meta;
 
   // When the data key is gone the meta count is meaningless; force records=0
   // so we never display the contradictory "EMPTY records=N>0" pair (item 1).
@@ -872,7 +880,13 @@ function classifyKey(name, redisKey, opts, ctx) {
   const cascadeCovered = isCascadeCovered(name, hasData, keyStrens, keyErrors);
 
   let status;
-  if (seedError) status = 'SEED_ERROR';
+  // Precedes every fault branch: an adapter this deployment never configured has
+  // nothing to be stale, empty, or degraded ABOUT. The producer still writes the
+  // key each run (recordCount 0) so operators can see the adapter is dormant, and
+  // the moment the credential lands the next run reports sourceState 'ok' and this
+  // flips to OK on its own — no health-config change needed.
+  if (sourceUnavailable) status = 'NOT_CONFIGURED';
+  else if (seedError) status = 'SEED_ERROR';
   else if (!hasData) {
     if (cascadeCovered) status = 'OK_CASCADE';
     else if (EMPTY_DATA_OK_KEYS.has(name)) status = seedStale === true ? 'STALE_SEED' : 'OK';
@@ -920,6 +934,12 @@ function classifyKey(name, redisKey, opts, ctx) {
 const STATUS_COUNTS = {
   OK: 'ok',
   OK_CASCADE: 'ok',
+  // An optional source adapter this deployment never supplied a credential for
+  // (producer wrote sourceState:'unavailable'). Buckets to `ok` because there is
+  // no fault and no operator action that would clear it other than opting in.
+  // Must stay registered here: the summary does `STATUS_COUNTS[status] ?? 'warn'`,
+  // so an unlisted status would silently re-become the warn this exists to stop.
+  NOT_CONFIGURED: 'ok',
   STALE_SEED: 'warn',
   SEED_ERROR: 'warn',
   EMPTY_ON_DEMAND: 'warn',
@@ -1075,6 +1095,33 @@ async function releaseHealthVerdictRefreshLock(lockToken) {
   ]], 4_000).catch(() => null);
 }
 
+// Single source of truth for "is this check a problem?", shared by the compact
+// `problems` map and the failure log. Derived from STATUS_COUNTS rather than a
+// hardcoded status list: any status that buckets to `ok` is by definition not a
+// problem, so adding a new ok-bucket status (NOT_CONFIGURED) can never again
+// leave one problem surface silently reporting it. An unregistered status is
+// treated as a problem, matching the summary's `STATUS_COUNTS[s] ?? 'warn'`.
+function isProblemStatus(status) {
+  return STATUS_COUNTS[status] !== 'ok';
+}
+
+// Failure-log / ?history=1 problem set. Distinct from the compact `problems` map
+// in exactly one way: EMPTY_ON_DEMAND is suppressed here. It is warn-level for
+// visibility only (realWarnCount subtracts it, it never flips `overall`), so an
+// unrequested on-demand key must not pollute the incident signature and cause a
+// spurious failure-log append. That single exception is the ONLY divergence —
+// everything else defers to isProblemStatus.
+function collectFailureLogProblems(checks) {
+  const entries = Object.entries(checks)
+    .filter(([, c]) => isProblemStatus(c.status) && c.status !== 'EMPTY_ON_DEMAND');
+  return {
+    problemKeys: entries.map(([k, c]) => `${k}:${c.status}${c.seedAgeMin != null ? `(${c.seedAgeMin}min)` : ''}`),
+    // The dedupe signature uses only key:status (no age) so a long STALE_SEED
+    // window doesn't produce a new log entry on every poll.
+    sigKeys: entries.map(([k, c]) => `${k}:${c.status}`).sort(),
+  };
+}
+
 function healthResponseBody(snapshot, compact) {
   const body = {
     status: snapshot.status,
@@ -1089,7 +1136,7 @@ function healthResponseBody(snapshot, compact) {
 
   const problems = {};
   for (const [name, check] of Object.entries(snapshot.checks)) {
-    if (check.status !== 'OK' && check.status !== 'OK_CASCADE') problems[name] = check;
+    if (isProblemStatus(check.status)) problems[name] = check;
   }
   if (Object.keys(problems).length > 0) body.problems = problems;
   return body;
@@ -1382,13 +1429,7 @@ export default async function handler(req, ctx) {
     // problemKeys includes seedAgeMin for the snapshot (useful for post-mortem),
     // but the dedupe signature uses only key:status (no age) so a long STALE_SEED
     // window doesn't produce a new log entry on every poll.
-    const problemKeys = Object.entries(checks)
-      .filter(([, c]) => c.status !== 'OK' && c.status !== 'OK_CASCADE' && c.status !== 'EMPTY_ON_DEMAND')
-      .map(([k, c]) => `${k}:${c.status}${c.seedAgeMin != null ? `(${c.seedAgeMin}min)` : ''}`);
-    const sigKeys = Object.entries(checks)
-      .filter(([, c]) => c.status !== 'OK' && c.status !== 'OK_CASCADE' && c.status !== 'EMPTY_ON_DEMAND')
-      .map(([k, c]) => `${k}:${c.status}`)
-      .sort();
+    const { problemKeys, sigKeys } = collectFailureLogProblems(checks);
     console.log('[health] %s problems=[%s]', overall, problemKeys.join(', '));
     const failureLogEntry = {
       at: new Date(now).toISOString(),
@@ -1483,6 +1524,8 @@ export default async function handler(req, ctx) {
 export const __testing__ = {
   readSeedMeta,
   classifyKey,
+  healthResponseBody,
+  collectFailureLogProblems,
   ACTIVATION_MARKERS,
   STATUS_COUNTS,
   // List-typed data keys + the command builder that measures them with LLEN
