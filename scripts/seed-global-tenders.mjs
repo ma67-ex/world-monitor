@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { XMLParser } from 'fast-xml-parser';
 import Papa from 'papaparse';
 
-import { loadEnvFile, CHROME_UA, readCanonicalValue, runSeed, writeExtraKey } from './_seed-utils.mjs';
+import { loadEnvFile, CHROME_UA, httpRetryError, readCanonicalValue, runSeed, withRetry, writeExtraKey } from './_seed-utils.mjs';
 import {
   GLOBAL_TENDER_KEY,
   isOpenOpportunity,
@@ -23,15 +23,31 @@ const MAX_PER_SOURCE = 100;
 const GETS_FEED_URL = 'https://www.gets.govt.nz/ExternalRSSFeed.htm';
 const CANADA_BUYS_OPEN_CSV_URL = 'https://canadabuys.canada.ca/opendata/pub/openTenderNotice-ouvertAvisAppelOffres.csv';
 
+// Every tender source funnels through here, so this is the one place a transient
+// upstream blip can be absorbed. Without it a single failed fetch failed the whole
+// source and raised a health warn that self-healed on the next tick — noise the
+// operator cannot act on.
+//
+// The retry budget is BOUNDED by the bundle section, not chosen for its own sake:
+// Global-Tenders has timeoutMs 180_000 and CanadaBuys uses a 60s per-attempt
+// timeout, so maxRetries 2 would cost 60+1+60+2+60 = 183s and BREACH the section.
+// Callers with a long per-attempt timeout must lower maxRetries accordingly.
+// Sources run in parallel, so the section pays the slowest source, not the sum.
 async function fetchResponse(url, options = {}) {
-  const { timeoutMs = 20_000, ...fetchOptions } = options;
-  const response = await fetch(url, {
-    ...fetchOptions,
-    headers: { Accept: 'application/json', 'User-Agent': CHROME_UA, ...(fetchOptions.headers || {}) },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response;
+  const { timeoutMs = 20_000, maxRetries = 2, ...fetchOptions } = options;
+  return withRetry(async () => {
+    const response = await fetch(url, {
+      ...fetchOptions,
+      headers: { Accept: 'application/json', 'User-Agent': CHROME_UA, ...(fetchOptions.headers || {}) },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      // Reuse the repository retry contract: 408 and 429 remain retryable, permanent
+      // 4xx responses fail fast, and Retry-After is capped before it reaches withRetry.
+      throw httpRetryError(response);
+    }
+    return response;
+  }, maxRetries, 1000);
 }
 
 async function fetchJson(url, options = {}) {
@@ -113,6 +129,9 @@ export async function fetchContractsFinder({ now = Date.now(), fetchJsonFn = fet
 export async function fetchCanadaBuys({ now = Date.now(), fetchTextFn = fetchText } = {}) {
   const csv = await fetchTextFn(CANADA_BUYS_OPEN_CSV_URL, {
     timeoutMs: 60_000,
+    // 6 MB CSV on a 60s attempt timeout: one retry (60+1+60 = 121s) fits inside the
+    // 180s Global-Tenders section budget; two (183s) would breach it.
+    maxRetries: 1,
     headers: { Accept: 'text/csv, application/octet-stream;q=0.9, */*;q=0.1' },
   });
   const parsed = Papa.parse(csv, {
