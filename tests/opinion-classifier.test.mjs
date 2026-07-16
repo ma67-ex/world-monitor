@@ -249,6 +249,66 @@ describe('classifyOpinion — historical explainers are not digest events', () =
     );
   });
 
+  it('REGRESSION (July 16): Al Jazeera duration-led coup retrospective → exclude', () => {
+    assert.equal(
+      classifyOpinion({
+        title: '10 years on from Turkiye’s failed coup attempt on Erdogan',
+        link: 'https://www.aljazeera.com/video/newsfeed/2026/7/15/10-years-on-from-turkiyes-failed-coup-attempt-on-erdogan?traffic_source=rss',
+        description: '10 years on from Turkiye’s coup attempt to overthrow President Erdogan, the country remains divided over its legacy.',
+        publishedAt: Date.parse('2026-07-15T20:35:09Z'),
+      }),
+      true,
+    );
+  });
+
+  it('recognizes publisher rewrites that use reshaped with an historical event year', () => {
+    assert.equal(
+      classifyOpinion({
+        title: 'How the failed 2016 coup reshaped Turkiye’s civil-military relations',
+        link: 'https://www.aljazeera.com/news/2026/7/15/how-failed-2016-coup-reshaped-turkiyes-and-civil-military-relations',
+        description: 'The attempted takeover 10 years ago accelerated changes to civilian oversight.',
+        publishedAt: JULY_2026,
+      }),
+      true,
+    );
+  });
+
+  it('keeps duration-led live anniversary coverage without retrospective legacy framing', () => {
+    assert.equal(
+      classifyOpinion({
+        title: '10 years on from the coup attempt, authorities launch nationwide arrests',
+        link: 'https://example.com/world/turkey-arrests',
+        description: 'Police detained hundreds of suspects in operations across the country.',
+        publishedAt: JULY_2026,
+      }),
+      false,
+    );
+  });
+
+  it('keeps an anniversary-timed live development with ordinary analytical framing', () => {
+    assert.equal(
+      classifyOpinion({
+        title: '10 years since the nuclear deal, Iran resumes enrichment',
+        link: 'https://example.com/world/iran-enrichment',
+        description: 'Analysts say the move continues to shape regional security.',
+        publishedAt: JULY_2026,
+      }),
+      false,
+    );
+  });
+
+  it('keeps anniversary-timed current politics described as remaining divided', () => {
+    assert.equal(
+      classifyOpinion({
+        title: '10 years on from the election, parliament remains divided on the new sanctions bill',
+        link: 'https://example.com/world/parliament-sanctions',
+        description: 'Lawmakers will vote on the measure this week.',
+        publishedAt: JULY_2026,
+      }),
+      false,
+    );
+  });
+
   it('trims the headline before matching the explanatory shape', () => {
     assert.equal(
       classifyOpinion({
