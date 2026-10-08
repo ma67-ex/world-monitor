@@ -1313,3 +1313,67 @@ describe('go-forward VOID share KPI (#4930)', () => {
     assert.equal(scorecard.goForward.entries, 0);
   });
 });
+
+describe('spec-origin follow-through slice (#7067)', () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const GPS = 'intelligence:gpsjam:v2';
+  const hard = (overrides) => resolved({ spec: { kind: 'hard', sourceFeed: GPS, metricKey: `${GPS}|hexCount(region==Red Sea)` }, deadline: NOW - 3 * DAY_MS, ...overrides });
+  const downgraded = (overrides) => resolved({
+    specOrigin: 'hard_downgraded_unextractable',
+    spec: { kind: 'judged', question: 'q', specOrigin: 'hard_downgraded_unextractable', originalFamily: 'gps', originalSourceFeed: GPS },
+    deadline: NOW - 6 * DAY_MS,
+    ...overrides,
+  });
+
+  it('files rows by origin and family, keeps the legacy hard path beside the downgrade, and drops the #5334 baseline', () => {
+    const ledger = {
+      legacyYes: hard({ id: 'l1', resolvedAt: NOW - 3 * DAY_MS + 2 * HOUR_MS }),
+      legacyVoid: hard({ id: 'l2', outcome: 'VOID', resolvedAt: NOW - 3 * DAY_MS + 4 * HOUR_MS }),
+      gatedHard: hard({ id: 'g1', specOrigin: 'hard', outcome: 'NO', probability: 0.3, resolvedAt: NOW - 3 * DAY_MS + 6 * HOUR_MS }),
+      downOnTime: downgraded({ id: 'd1', resolvedAt: NOW - 6 * DAY_MS + DAY_MS }),
+      // Past deadline + 18h grace + 2d SLA: scored, but not within SLA.
+      downLate: downgraded({ id: 'd2', outcome: 'NO', probability: 0.2, resolvedAt: NOW - 6 * DAY_MS + 3 * DAY_MS }),
+      downPending: { id: 'd3', status: 'pending-judge', specOrigin: 'hard_downgraded_unextractable', domain: 'conflict', spec: { kind: 'judged', originalFamily: 'prediction_market', originalSourceFeed: 'prediction:markets-bootstrap:v1' }, deadline: NOW + DAY_MS },
+      judgedNative: { id: 'j1', status: 'pending-judge', domain: 'political', spec: { kind: 'judged', question: 'q' }, deadline: NOW + DAY_MS },
+      infraBaseline: hard({ id: 'i1', outcome: 'VOID', domain: 'infrastructure', spec: { kind: 'hard', sourceFeed: 'infra:outages:v1' } }),
+    };
+    const { specOrigins } = computeScorecard(ledger, NOW);
+    assert.equal(specOrigins.excludedInfrastructureBaseline, 1);
+    assert.deepEqual(Object.keys(specOrigins.byOrigin).sort(), ['hard', 'hard_downgraded_unextractable', 'legacy']);
+    assert.deepEqual(specOrigins.byOrigin.legacy.gps, {
+      entries: 2, resolved: 2, scored: 1, void: 1, pending: 0, pendingJudge: 0, scoredWithinSla: 1, scoredWithinSlaRate: 0.5, medianLatencyHours: 3,
+    });
+    assert.deepEqual(Object.keys(specOrigins.byOrigin.legacy).sort(), ['gps', 'judged:political']);
+    assert.equal(specOrigins.byOrigin.hard.gps.scored, 1);
+    assert.deepEqual(specOrigins.byOrigin.hard_downgraded_unextractable.gps, {
+      entries: 2, resolved: 2, scored: 2, void: 0, pending: 0, pendingJudge: 0, scoredWithinSla: 1, scoredWithinSlaRate: 0.5, medianLatencyHours: 48,
+    });
+    assert.equal(specOrigins.byOrigin.hard_downgraded_unextractable.prediction_market.pendingJudge, 1);
+    assert.equal(specOrigins.byOrigin.hard_downgraded_unextractable.prediction_market.scoredWithinSlaRate, null);
+  });
+
+  it('keys rows by the dispatch family, not the feed namespace, and leaves bets out', () => {
+    const row = (id, spec, extra = {}) => resolved({ id, spec: { kind: 'hard', ...spec }, deadline: NOW - 3 * DAY_MS, ...extra });
+    const ledger = {
+      shipping: row('s', { sourceFeed: 'supply_chain:shipping:v2' }),
+      commodity: row('c', { sourceFeed: 'market:commodities-bootstrap:v1' }),
+      eer: row('e', { sourceFeed: 'economic:bis:eer:v1' }),
+      chokepoint: row('k', { sourceFeed: 'supply_chain:chokepoints:v4' }),
+      unlisted: row('u', { sourceFeed: 'intelligence:other:v1' }),
+      gated: row('g', { sourceFeed: 'supply_chain:chokepoints:v4', specOrigin: 'hard', specFamily: 'market' }, { specOrigin: 'hard' }),
+      bet: row('b', { sourceFeed: 'prediction:markets-resolution:v1' }, { generationOrigin: 'bet_engine' }),
+    };
+    const { specOrigins } = computeScorecard(ledger, NOW);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(specOrigins.byOrigin.legacy).map(([family, counts]) => [family, counts.entries])),
+      { market: 3, supply_chain: 1, 'feed:intelligence:other:v1': 1 },
+    );
+    assert.equal(specOrigins.byOrigin.hard.market.entries, 1);
+    assert.equal(specOrigins.excludedBetEngine, 1);
+  });
+
+  it('stays off the public scorecard contract', async () => {
+    const { SCORECARD_DECLARED_FIELDS } = await import('../scripts/build-accuracy-page.mjs');
+    for (const field of ['specOrigins', 'withheldAtEmission']) assert.ok(!SCORECARD_DECLARED_FIELDS.includes(field), field);
+  });
+});
