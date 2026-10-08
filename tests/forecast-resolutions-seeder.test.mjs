@@ -1725,6 +1725,39 @@ describe('appendSample and seed contract', () => {
       console.warn = originalWarn;
     }
   });
+
+  it('refuses a receipt prefix inside the trace prefix, which has a retention rule (#9058)', async () => {
+    const base = {
+      CLOUDFLARE_R2_ACCOUNT_ID: 'acct',
+      CLOUDFLARE_R2_ACCESS_KEY_ID: 'id',
+      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'secret',
+      CLOUDFLARE_R2_BUCKET: 'bucket',
+    };
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      for (const env of [
+        base, // receipt prefix unset: falls back to the trace default
+        { ...base, CLOUDFLARE_R2_TRACE_PREFIX: 'traces', CLOUDFLARE_R2_FORECAST_RESOLUTION_PREFIX: 'traces/receipts' },
+      ]) {
+        const puts = [];
+        const archived = await appendR2Receipts([{ key: 'a@1', resolvedAt: T0, entry: { outcome: 'YES' } }], { env, putObject: async (_config, key) => { puts.push(key); } });
+        assert.deepEqual([archived, puts], [[], []]);
+      }
+      assert.equal(warnings.filter((line) => line.includes('inside the trace prefix')).length, 2);
+
+      const outside = [];
+      const archived = await appendR2Receipts([{ key: 'a@1', resolvedAt: T0, entry: { outcome: 'YES' } }], {
+        env: { ...base, CLOUDFLARE_R2_TRACE_PREFIX: 'data/traces', CLOUDFLARE_R2_FORECAST_RESOLUTION_PREFIX: 'data' },
+        putObject: async (_config, key) => { outside.push(key); },
+      });
+      assert.equal(archived.length, 1, 'a parent of the trace prefix is not inside it');
+      assert.match(outside[0], /^data\/forecast-resolutions\//);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });
 
 describe('pruneArchivedTerminalEntries', () => {
@@ -3616,6 +3649,33 @@ describe('projection horizon windows (#7075)', () => {
       assert.equal(row.projectionCurvesVersion, 1, horizon);
       assert.equal(row.lastSeenAt, later, `${horizon} saw the re-emission`);
     }
+  });
+
+  it('links each window to the run that opened it, frozen at first registration (#9058)', () => {
+    const SHA_A = 'a'.repeat(64);
+    const SHA_B = 'b'.repeat(64);
+    const run = (generatedAt, runId, snapshotSha256, overrides = {}) => ({
+      ...snapshot(generatedAt, [projected({ generatedAt, ...overrides })]),
+      runId,
+      snapshotSha256,
+    });
+    const first = processResolutionCycle({}, [run(T0, '1700-a', SHA_A)], HORMUZ(40), T0);
+    for (const key of [PARENT, ...horizonKeys(first.ledger)]) {
+      assert.equal(first.ledger[key].runId, '1700-a', key);
+      assert.equal(first.ledger[key].snapshotSha256, SHA_A, key);
+    }
+
+    const later = T0 + 60 * 60 * 1000;
+    const second = processResolutionCycle(first.ledger, [run(T0, '1700-a', SHA_A), run(later, '1800-b', SHA_B, { probability: 0.7 })], HORMUZ(40), later);
+    assert.equal(second.ledger[PARENT].lastSeenProbability, 0.7, 'the later run is a sighting of the same window');
+    assert.equal(second.ledger[PARENT].runId, '1700-a', 'a sighting does not move the link');
+    assert.equal(second.ledger[PARENT].snapshotSha256, SHA_A);
+
+    const legacy = processResolutionCycle({}, [snapshot(T0, [projected()])], HORMUZ(40), T0);
+    assert.ok(!('runId' in legacy.ledger[PARENT]) && !('snapshotSha256' in legacy.ledger[PARENT]), 'history from before #9058 links nothing');
+    const malformed = processResolutionCycle({}, [run(T0, '1700-a', 'not-a-digest')], HORMUZ(40), T0);
+    assert.equal(malformed.ledger[PARENT].runId, '1700-a');
+    assert.ok(!('snapshotSha256' in malformed.ledger[PARENT]), 'a malformed digest is not copied');
   });
 
   it('the same forecast at two deadlines and three horizons creates six distinct keys', () => {
