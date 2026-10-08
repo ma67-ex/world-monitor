@@ -14,7 +14,6 @@ import {
   SKILL_MIN_OUTCOME_FAMILIES,
   wilsonInterval,
 } from './_forecast-scorecard.mjs';
-import { MARKET_ALERT_BASE_RATE_RULE, MARKET_ALERT_RESOLUTION_RULE } from './_market-alert-ledger.mjs';
 import { FORECAST_ACCURACY_AUDIT } from '../shared/forecast-accuracy-audit.js';
 
 /** Bump when the page copy changes so its lastmod advances without touching every sibling. */
@@ -988,7 +987,9 @@ const CONTROL_GATED_ALERT_TYPES = new Set(['prediction_leads_news']);
 
 const isRate = (value) => isFiniteNumber(value) && value >= 0 && value <= 1;
 // Alerts are not forecast families, so they keep their own row count floor.
-const MARKET_ALERT_MIN_SAMPLE = 30;
+// The API withholds the median below MARKET_ALERT_MEDIAN_MIN_HITS in
+// server/worldmonitor/forecast/v1/scorecard-fields.ts (a test pins the parity).
+export const MARKET_ALERT_MIN_SAMPLE = 30;
 const isMeasurableCount = (value) => Number.isInteger(value) && value >= MARKET_ALERT_MIN_SAMPLE;
 
 function formatLeadTime(ms) {
@@ -998,16 +999,27 @@ function formatLeadTime(ms) {
   return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
 }
 
-function marketAlertCells(row) {
+function marketAlertGates(row) {
   const compared = isMeasurableCount(row.baseN) && isRate(row.pairedHitRate) && isRate(row.baseHitRate);
   const published = compared || !CONTROL_GATED_ALERT_TYPES.has(row.type);
   const hit = published && isMeasurableCount(row.scored) && isRate(row.hitRate);
-  const leadMeasured = hit && Math.round(row.hitRate * row.scored) >= MARKET_ALERT_MIN_SAMPLE;
+  return { compared, published, hit };
+}
+
+// hitRate × scored is the hit count exactly: the ledger's hitRate is hit / n.
+// The API applies the same gate (selectMarketAlertRow, test-pinned).
+export function marketAlertMedianPublished(row) {
+  return marketAlertGates(row).hit && Math.round(row.hitRate * row.scored) >= MARKET_ALERT_MIN_SAMPLE
+    && isFiniteNumber(row.medianLeadTimeMs) && row.medianLeadTimeMs >= 0;
+}
+
+function marketAlertCells(row) {
+  const { compared, published, hit } = marketAlertGates(row);
   return [
     hit ? rateOf(row.hitRate, row.scored, 'alerts') : NOT_YET_MEASURABLE,
     published && compared ? rateOf(row.pairedHitRate, row.baseN, 'alerts') : NOT_YET_MEASURABLE,
     published && compared ? rateOf(row.baseHitRate, row.baseN, 'earlier windows') : NOT_YET_MEASURABLE,
-    leadMeasured && isFiniteNumber(row.medianLeadTimeMs) && row.medianLeadTimeMs >= 0 ? formatLeadTime(row.medianLeadTimeMs) : NOT_YET_MEASURABLE,
+    marketAlertMedianPublished(row) ? formatLeadTime(row.medianLeadTimeMs) : NOT_YET_MEASURABLE,
   ];
 }
 
@@ -1023,9 +1035,11 @@ function marketAlertsSection(marketAlerts, escapeHtml, audited = false) {
   const days = isFiniteNumber(marketAlerts.rollingWindowDays) ? marketAlerts.rollingWindowDays : 30;
   const generated = isFiniteNumber(marketAlerts.generatedAt) ? ` and were generated ${formatUtcDateTime(marketAlerts.generatedAt)}` : '';
   const intro = `      <p>World Monitor raises a market alert when a market or a prediction market makes an unusual move. Some alerts fire when there is no news behind the move, and one type fires when related news is already out. Each alert is checked ${escapeHtml(formatCount(hours))} hours later. It counts as a hit if an established news outlet published a new story about the same company, commodity or topic in that time. The same check also runs on the same market for a stretch of the same length one day earlier, when no alert was raised, and that gives the base rate. An alert type is useful only when its hit rate is clearly above the base rate on the same alerts. The figures cover the last ${escapeHtml(formatCount(days))} days${escapeHtml(generated)}.</p>`;
+  // The rules come from the capture, so a rule change after it never sits
+  // beside figures scored under the old rules.
+  const methodology = typeof marketAlerts.methodology === 'string' ? marketAlerts.methodology.trim() : '';
   const rules = `      <h3>How an alert is scored</h3>
-      <p>${escapeHtml(MARKET_ALERT_RESOLUTION_RULE)}</p>
-      <p>${escapeHtml(MARKET_ALERT_BASE_RATE_RULE)}</p>`;
+      <p>${escapeHtml(methodology || 'This edition did not capture the rules these alerts were scored under.')}</p>`;
   if (marketAlerts.byType.length === 0) {
     return `${heading}
 ${intro}
@@ -1419,6 +1433,24 @@ function skillDownload(scorecard) {
   };
 }
 
+// A capture taken before the API applied the median floor can still carry a
+// median the page withholds; the download must not publish it either.
+function withPublishedMarketAlertMedians(scorecard) {
+  const marketAlerts = scorecard?.marketAlerts;
+  if (!isPlainObject(marketAlerts) || !Array.isArray(marketAlerts.byType)) return scorecard;
+  return {
+    ...scorecard,
+    marketAlerts: {
+      ...marketAlerts,
+      byType: marketAlerts.byType.map((row) => {
+        if (!isPlainObject(row) || !('medianLeadTimeMs' in row) || marketAlertMedianPublished(row)) return row;
+        const { medianLeadTimeMs: _withheld, ...rest } = row;
+        return rest;
+      }),
+    },
+  };
+}
+
 export function accuracyDatasetDownload({ state, snapshotPath, audit = FORECAST_ACCURACY_AUDIT }) {
   const skill = isPlainObject(state.scorecard?.skill) ? state.scorecard.skill : null;
   const payload = {
@@ -1474,7 +1506,7 @@ export function accuracyDatasetDownload({ state, snapshotPath, audit = FORECAST_
     // Point-in-time horizons are graded internally (#8939); neither the
     // projection values (#8967) nor those grades are published here.
     horizonProjections: { valuesPublished: false, gradesPublished: false, trackedIn: HORIZON_SCORING_ISSUE },
-    scorecard: state.scorecard,
+    scorecard: withPublishedMarketAlertMedians(state.scorecard),
   };
   return `${JSON.stringify(payload, null, 2)}\n`;
 }

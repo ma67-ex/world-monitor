@@ -167,7 +167,7 @@ const MARKET_ALERTS = Object.freeze({
   rollingWindowDays: 30,
   methodology: 'An emission resolves HIT when a tracked story names the same entity within six hours.',
   byType: [
-    { type: 'market', scored: 4, hitRate: 0.75, baseN: 2, baseHitRate: 0.5, pairedHitRate: 0.5, medianLeadTimeMs: 3600000 },
+    { type: 'market', scored: 40, hitRate: 0.75, baseN: 2, baseHitRate: 0.5, pairedHitRate: 0.5, medianLeadTimeMs: 3600000 },
     { type: 'prediction-market', scored: 0, baseN: 0 },
   ],
 });
@@ -1102,6 +1102,43 @@ describe('accuracy page market-alert hit rates (#8867)', () => {
     }
     assert.equal(buildScorecard({}, 0, { archive: {} }).methodology, `${MARKET_ALERT_RESOLUTION_RULE} ${MARKET_ALERT_BASE_RATE_RULE}`,
       'the quoted rules are the ones the ledger scores under');
+  });
+
+  it('quotes the rules captured with the figures, not the rules in the current code (#8985)', () => {
+    const captured = 'Captured rule: an alert resolves HIT when a fixture story names it.';
+    const text = stripTags(renderState(withAlerts([row('silent_divergence')], { methodology: captured })).html);
+    assert.ok(text.includes(captured), 'the page quotes the rules the figures were scored under');
+    for (const rule of [MARKET_ALERT_RESOLUTION_RULE, MARKET_ALERT_BASE_RATE_RULE]) {
+      assert.equal(text.replaceAll('&#39;', "'").includes(rule), false, 'a rule changed after the capture must not sit beside the old figures');
+    }
+  });
+
+  it('applies the page median floor and control gate to the dataset download (#8985)', () => {
+    const download = downloadFor(withAlerts([
+      row('silent_divergence', { scored: 48, hitRate: 0.625 }),
+      row('explained_market_move', { scored: 48, hitRate: 0.6 }),
+      row('prediction_leads_news', { scored: 120, baseN: 12 }),
+      row('flow_price_divergence', { scored: 120, baseN: 30 }),
+    ]));
+    const median = Object.fromEntries(download.scorecard.marketAlerts.byType.map((entry) => [entry.type, entry.medianLeadTimeMs]));
+    assert.deepEqual(median, {
+      silent_divergence: 2.5 * HOUR,
+      explained_market_move: undefined,
+      prediction_leads_news: undefined,
+      flow_price_divergence: 2.5 * HOUR,
+    }, 'a capture taken before the API floor must not publish a median the page withholds');
+    const kept = download.scorecard.marketAlerts.byType.find((entry) => entry.type === 'explained_market_move');
+    assert.equal(kept.scored, 48, 'only the median is withheld; the row stays');
+  });
+
+  it('says the rules were not captured rather than quoting the current code', () => {
+    for (const methodology of [undefined, '', '   ']) {
+      for (const byType of [[row('silent_divergence')], []]) {
+        const text = stripTags(renderState(withAlerts(byType, { methodology })).html);
+        assert.match(text, /This edition did not capture the rules these alerts were scored under\./);
+        assert.equal(text.replaceAll('&#39;', "'").includes(MARKET_ALERT_RESOLUTION_RULE), false);
+      }
+    }
   });
 
   it('labels every alert type the ledger scores in plain words', () => {
