@@ -79,6 +79,7 @@ import {
   loadCascadeRules,
   evaluateRuleConditions,
   summarizePublishFiltering,
+  WITHHELD_PUBLISH_FAMILIES,
   SIGNAL_TO_SOURCE,
   PREDICATE_EVALUATORS,
   DEFAULT_CASCADE_RULES,
@@ -1675,7 +1676,7 @@ describe('forecast evaluation and ranking', () => {
     conflictC.trend = 'stable';
     buildForecastCase(conflictC);
 
-    const cyberA = makePrediction('cyber', 'China', 'Cyber A', 0.69, 0.58, '7d', [
+    const cyberA = makePrediction('infrastructure', 'China', 'Cyber A', 0.69, 0.58, '7d', [
       { type: 'cyber', value: 'Hostile malware hosting remains elevated', weight: 0.4 },
       { type: 'news_corroboration', value: 'Security firms warn of sustained activity', weight: 0.2 },
     ]);
@@ -1683,7 +1684,7 @@ describe('forecast evaluation and ranking', () => {
     cyberA.trend = 'rising';
     buildForecastCase(cyberA);
 
-    const cyberB = makePrediction('cyber', 'Russia', 'Cyber B', 0.67, 0.56, '7d', [
+    const cyberB = makePrediction('infrastructure', 'Russia', 'Cyber B', 0.67, 0.56, '7d', [
       { type: 'cyber', value: 'C2 server concentration remains high', weight: 0.35 },
       { type: 'news_corroboration', value: 'Government agencies issue new advisories', weight: 0.2 },
     ]);
@@ -1701,7 +1702,7 @@ describe('forecast evaluation and ranking', () => {
 
     const market = makePrediction('market', 'Middle East', 'Oil price impact from Strait of Hormuz disruption', 0.73, 0.58, '30d', [
       { type: 'chokepoint', value: 'Hormuz transit risk rises', weight: 0.5 },
-      { type: 'prediction_market', value: 'Oil breakout chatter increases', weight: 0.2 },
+      { type: 'market_transmission', value: 'Oil breakout chatter increases', weight: 0.2 },
     ]);
     market.newsContext = ['Analysts warn of renewed stress in the Strait of Hormuz'];
     market.calibration = { marketTitle: 'Will oil close above $90?', marketPrice: 0.65, drift: 0.05, source: 'polymarket' };
@@ -1723,7 +1724,7 @@ describe('forecast evaluation and ranking', () => {
     assert.ok(enriched.some(pred => pred.domain === 'supply_chain'));
     assert.ok(enriched.some(pred => pred.domain === 'market'));
     assert.ok(enriched.filter(pred => pred.domain === 'conflict').length <= 2);
-    assert.ok(enriched.filter(pred => pred.domain === 'cyber').length <= 2);
+    assert.ok(enriched.filter(pred => pred.domain === 'infrastructure').length <= 2);
   });
 });
 
@@ -3267,8 +3268,8 @@ describe('forecast quality gating', () => {
 
   it('reserves scenario enrichment slots for scarce market and military forecasts', () => {
     const predictions = [
-      makePrediction('cyber', 'A', 'Cyber A', 0.7, 0.55, '7d', [{ type: 'cyber', value: '8 threats', weight: 0.5 }]),
-      makePrediction('cyber', 'B', 'Cyber B', 0.68, 0.55, '7d', [{ type: 'cyber', value: '7 threats', weight: 0.5 }]),
+      makePrediction('infrastructure', 'A', 'Cyber A', 0.7, 0.55, '7d', [{ type: 'cyber', value: '8 threats', weight: 0.5 }]),
+      makePrediction('infrastructure', 'B', 'Cyber B', 0.68, 0.55, '7d', [{ type: 'cyber', value: '7 threats', weight: 0.5 }]),
       makePrediction('conflict', 'C', 'Conflict C', 0.66, 0.6, '7d', [{ type: 'ucdp', value: '12 events', weight: 0.5 }]),
       makePrediction('market', 'Middle East', 'Oil price impact', 0.4, 0.5, '30d', [{ type: 'news_corroboration', value: 'Oil traders react', weight: 0.3 }]),
       makePrediction('military', 'Korean Peninsula', 'Elevated military air activity', 0.34, 0.5, '7d', [{ type: 'mil_surge', value: 'fighter surge', weight: 0.4 }]),
@@ -3280,6 +3281,19 @@ describe('forecast quality gating', () => {
     assert.ok(selected.scenarioOnly.some(item => item.domain === 'market'));
     assert.ok(selected.scenarioOnly.some(item => item.domain === 'military'));
     assert.deepEqual(selected.telemetry.reservedScenarioDomains.sort(), ['market', 'military']);
+  });
+
+  it('spends no enrichment slot on a forecast withheld from publication (#8990)', () => {
+    const predictions = [
+      makePrediction('cyber', 'A', 'Cyber A', 0.9, 0.8, '7d', [{ type: 'cyber', value: '80 threats', weight: 0.5 }]),
+      makePrediction('political', 'B', 'Will B hold an election?', 0.88, 0.8, '30d', [{ type: 'prediction_market', value: 'Polymarket: 88%', weight: 0.8 }]),
+      makePrediction('conflict', 'C', 'Conflict C', 0.5, 0.5, '7d', [{ type: 'ucdp', value: '12 events', weight: 0.5 }]),
+      makePrediction('market', 'Middle East', 'Oil price impact', 0.4, 0.5, '30d', [{ type: 'news_corroboration', value: 'Oil traders react', weight: 0.3 }]),
+    ];
+    buildForecastCases(predictions);
+    const selected = selectForecastsForEnrichment(predictions, { maxCombined: 2, maxScenario: 2, maxPerDomain: 2, minReadiness: 0 });
+    const enriched = [...selected.combined, ...selected.scenarioOnly].map(pred => pred.title).sort();
+    assert.deepEqual(enriched, ['Conflict C', 'Oil price impact']);
   });
 
   it('filters only the weakest fallback forecasts from publish output', () => {
@@ -3486,10 +3500,10 @@ describe('forecast quality gating', () => {
     const preds = [
       makePrediction('conflict', 'Iran', 'Escalation risk: Iran', 0.72, 0.65, '7d', [{ type: 'ucdp', value: 'Iran events elevated', weight: 0.4 }]),
       makePrediction('political', 'Iran', 'Political instability: Iran', 0.58, 0.59, '14d', [{ type: 'news_corroboration', value: 'Emergency meetings continue', weight: 0.35 }]),
-      makePrediction('market', 'Middle East', 'Oil repricing risk: Gulf', 0.55, 0.57, '30d', [{ type: 'prediction_market', value: 'Oil reprices higher', weight: 0.3 }]),
+      makePrediction('market', 'Middle East', 'Oil repricing risk: Gulf', 0.55, 0.57, '30d', [{ type: 'market_transmission', value: 'Oil reprices higher', weight: 0.3 }]),
       makePrediction('supply_chain', 'Persian Gulf', 'Shipping disruption: Persian Gulf', 0.53, 0.56, '14d', [{ type: 'chokepoint', value: 'Routing delays persist', weight: 0.35 }]),
       makePrediction('conflict', 'Ukraine', 'Escalation risk: Ukraine', 0.64, 0.61, '7d', [{ type: 'ucdp', value: 'Ukraine conflict remains active', weight: 0.42 }]),
-      makePrediction('market', 'Black Sea', 'Grain pricing pressure: Black Sea', 0.5, 0.54, '30d', [{ type: 'prediction_market', value: 'Grain risk premium widens', weight: 0.28 }]),
+      makePrediction('market', 'Black Sea', 'Grain pricing pressure: Black Sea', 0.5, 0.54, '30d', [{ type: 'market_transmission', value: 'Grain risk premium widens', weight: 0.28 }]),
     ];
 
     buildForecastCases(preds);
@@ -3626,7 +3640,7 @@ describe('forecast quality gating', () => {
 
   it('boosts market-confirmed situations during publish selection', () => {
     const confirmed = makePrediction('market', 'Middle East', 'Oil repricing: Strait of Hormuz', 0.51, 0.48, '30d', [
-      { type: 'prediction_market', value: 'Oil contracts reprice on Hormuz stress', weight: 0.3 },
+      { type: 'market_transmission', value: 'Oil contracts reprice on Hormuz stress', weight: 0.3 },
     ]);
     const unconfirmed = makePrediction('political', 'India', 'Political pressure: India', 0.54, 0.49, '14d', [
       { type: 'news_corroboration', value: 'Coalition bargaining remains active', weight: 0.32 },
@@ -3767,36 +3781,78 @@ describe('forecast quality gating', () => {
     for (let i = 0; i < 6; i++) add('political', i, 'hard', 0.5 - i * 0.01);
     add('market', 6, 'hard', 0.2);
     const conflict = add('conflict', 0, 'judged', 0.3);
-    const cyber = add('cyber', 0, 'hard', 0.01);
+    const infra = add('infrastructure', 0, 'hard', 0.01);
     const run = input => {
       const pool = selectPublishedForecastPool(structuredClone(input));
       const artifacts = buildPublishedForecastArtifacts(pool, []);
       const published = artifacts.publishedPredictions;
       assert.equal(published.length, 14);
-      assert.deepEqual(assessFunnelDiversity(published).domains, ['conflict', 'cyber', 'market', 'political', 'supply_chain']);
+      assert.deepEqual(assessFunnelDiversity(published).domains, ['conflict', 'infrastructure', 'market', 'political', 'supply_chain']);
       assert.equal(assessFunnelDiversity(published).collapsed, false);
       assert.ok(published.some(pred => pred.id === conflict.id));
-      assert.ok(published.some(pred => pred.id === cyber.id));
+      assert.ok(published.some(pred => pred.id === infra.id));
       assert.ok(published.filter(pred => pred.resolution.kind === 'hard').length >= 12);
       return published.map(pred => pred.id);
     };
     assert.deepEqual(run(candidates), run([...candidates].reverse()));
   });
 
+  it('withholds cyber and prediction-market forecasts from publication and publishes the other domains (#8990)', () => {
+    const candidates = [];
+    function add(domain, index, priority, signals = [{ type: 'news_corroboration', value: `${domain} evidence ${index}`, weight: 0.4 }]) {
+      const pred = makePrediction(domain, `${domain} region ${index}`, `${domain} outlook ${index}`, 0.6, 0.6, '7d', signals);
+      pred.id = `${domain}-${index}`;
+      pred.resolution = { kind: 'hard' };
+      attachPublishSelectionContext(pred, { priority });
+      candidates.push(pred);
+      return pred;
+    }
+    // Ranked first, so selection would take them on score alone.
+    const cyber = add('cyber', 0, 0.95);
+    const marketBacked = add('political', 'pm', 0.9, [{ type: 'prediction_market', value: 'Polymarket: 70%', weight: 0.8 }]);
+    for (const domain of ['conflict', 'market', 'supply_chain', 'political', 'military']) add(domain, 0, 0.5);
+    const withheldIds = [cyber.id, marketBacked.id];
+
+    for (const options of [{}, { targetCount: candidates.length }]) {
+      const pool = selectPublishedForecastPool(candidates, options);
+      const published = buildPublishedForecastArtifacts(pool, []).publishedPredictions;
+      const publishedIds = published.map(pred => pred.id);
+      for (const id of withheldIds) {
+        assert.ok(!publishedIds.includes(id), `${id} must not be published`);
+        assert.ok(!pool.deferredCandidates.some(pred => pred.id === id), `${id} must not wait for backfill`);
+      }
+      assert.deepEqual(publishedIds.sort(), ['conflict-0', 'market-0', 'military-0', 'political-0', 'supply_chain-0']);
+      assert.deepEqual(summarizePublishFiltering(candidates, pool, published).domainCoverage.eligible,
+        ['conflict', 'market', 'military', 'political', 'supply_chain']);
+      markDeferredFamilySelection(candidates, pool);
+      assert.equal(cyber.publishDiagnostics.reason, 'withheld_family');
+      assert.equal(cyber.publishDiagnostics.family, 'cyber');
+      assert.equal(marketBacked.publishDiagnostics.family, 'prediction_market');
+      for (const pred of candidates) pred.publishDiagnostics = null;
+    }
+    assert.deepEqual([...WITHHELD_PUBLISH_FAMILIES].sort(), ['cyber', 'prediction_market']);
+    for (const path of ['docs/panels/forecast.mdx', 'docs/zh/panels/forecast.mdx']) {
+      const doc = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+      for (const term of ['WITHHELD_PUBLISH_FAMILIES', 'DEFAULT_MIN_DISTINCT_DOMAINS', '`Political`', '`withheld_family`', '`judged_evidence_unreliable`', '`market_price_not_outcome`']) {
+        assert.ok(doc.includes(term), `${path} documents ${term}`);
+      }
+    }
+  });
+
   it('backfills an absent real domain before adding another represented hard forecast', () => {
     const supply = { id: 'supply', domain: 'supply_chain', probability: 0.7, resolution: { kind: 'hard' } };
-    const cyber = { id: 'cyber', domain: 'cyber', probability: 0.5, resolution: { kind: 'hard' } };
-    const deferred = [supply, cyber];
+    const infra = { id: 'infrastructure', domain: 'infrastructure', probability: 0.5, resolution: { kind: 'hard' } };
+    const deferred = [supply, infra];
     const selected = selectDeferredForecastForPublishBackfill(deferred, [
       { id: 'published-supply', domain: 'supply_chain', resolution: { kind: 'hard' } },
     ], 3);
-    assert.equal(selected.id, 'cyber');
+    assert.equal(selected.id, 'infrastructure');
     assert.deepEqual(deferred.map(pred => pred.id), ['supply']);
   });
 
   it('breaks equal selection scores by ID, independent of input order', () => {
     const candidates = ['b', 'a'].map(id => {
-      const pred = makePrediction('cyber', id, 'Cyber concentration', 0.6, 0.6, '7d', []);
+      const pred = makePrediction('infrastructure', id, 'Infra concentration', 0.6, 0.6, '7d', []);
       pred.id = id;
       return attachPublishSelectionContext(pred);
     });
@@ -3807,8 +3863,8 @@ describe('forecast quality gating', () => {
 
   it('continues past a protected cross-domain swap to allow a same-domain hard upgrade', () => {
     const candidates = [
-      ['cyber', 'judged', 0.9], ['market', 'hard', 0.8],
-      ['political', 'hard', 0.2], ['cyber', 'hard', 0.01],
+      ['infrastructure', 'judged', 0.9], ['market', 'hard', 0.8],
+      ['political', 'hard', 0.2], ['infrastructure', 'hard', 0.01],
     ].map(([domain, kind, priority], index) => {
       const pred = makePrediction(domain, `Region ${index}`, `Outlook ${index}`, 0.6, 0.6, '7d', []);
       pred.id = `upgrade-${index}`;
@@ -3818,13 +3874,13 @@ describe('forecast quality gating', () => {
     const pool = selectPublishedForecastPool(candidates, { targetCount: 2 });
     assert.deepEqual(pool.map(pred => pred.id), ['upgrade-1', 'upgrade-3']);
     assert.deepEqual(summarizePublishFiltering(candidates, pool, pool).domainCoverage, {
-      eligible: ['cyber', 'market', 'political'], selected: ['cyber', 'market'],
-      published: ['cyber', 'market'], missing: ['political'],
+      eligible: ['infrastructure', 'market', 'political'], selected: ['infrastructure', 'market'],
+      published: ['infrastructure', 'market'], missing: ['political'],
     });
   });
 
   it('reserves real domains without using weak or synthetic-only candidates as coverage', () => {
-    const real = ['market', 'cyber'].map(domain => attachPublishSelectionContext(
+    const real = ['market', 'infrastructure'].map(domain => attachPublishSelectionContext(
       makePrediction(domain, domain, `${domain} outlook`, 0.6, 0.6, '7d', []), { priority: 0.3 },
     ));
     const synthetic = attachPublishSelectionContext(
@@ -3844,31 +3900,31 @@ describe('forecast quality gating', () => {
     assert.equal(weak.publishDiagnostics.reason, 'weak_fallback');
     const telemetry = summarizePublishFiltering(candidates, pool, published);
     assert.deepEqual(telemetry.domainCoverage, {
-      eligible: ['cyber', 'market'], selected: ['cyber', 'market'], published: ['cyber', 'market'], missing: [],
+      eligible: ['infrastructure', 'market'], selected: ['infrastructure', 'market'], published: ['infrastructure', 'market'], missing: [],
     });
     assert.equal(telemetry.suppressedWeakFallback, 1);
     assert.equal(assessFunnelDiversity(published).collapsed, true);
   });
 
   it('preserves real domain breadth under final situation and family caps without raising those caps', () => {
-    const candidates = ['market', 'market', 'political', 'political', 'cyber'].map((domain, index) => {
+    const candidates = ['market', 'market', 'political', 'political', 'infrastructure'].map((domain, index) => {
       const pred = makePrediction(domain, `Region ${index}`, `Distinct outlook ${index}`, 0.6, 0.6, '7d', []);
       return attachPublishSelectionContext(pred, { stateId: 'shared-state', familyId: 'shared-family' });
     });
     const situationPublished = filterPublishedForecasts(candidates);
     assert.equal(situationPublished.length, 3);
-    assert.deepEqual(situationPublished.map(pred => pred.domain), ['market', 'political', 'cyber']);
+    assert.deepEqual(situationPublished.map(pred => pred.domain), ['market', 'political', 'infrastructure']);
     const familyPublished = applySituationFamilyCaps(candidates, [{
       id: 'shared-family', situationIds: candidates.map(pred => pred.situationContext.id),
     }]);
     assert.equal(familyPublished.length, 4);
-    assert.deepEqual(familyPublished.map(pred => pred.domain), ['market', 'market', 'political', 'cyber']);
+    assert.deepEqual(familyPublished.map(pred => pred.domain), ['market', 'market', 'political', 'infrastructure']);
   });
 
   it('does not let a higher-ranked synthetic or shadow duplicate erase real coverage', () => {
     for (const generationOrigin of ['state_derived', 'bet_engine']) {
       const real = attachPublishSelectionContext(
-        makePrediction('cyber', 'United States', 'Cyber concentration', 0.5, 0.6, '7d', []), { priority: 0.3 },
+        makePrediction('infrastructure', 'United States', 'Infra concentration', 0.5, 0.6, '7d', []), { priority: 0.3 },
       );
       buildForecastCases([real]);
       const synthetic = { ...structuredClone(real), id: 'synthetic-duplicate', generationOrigin, analysisPriority: 0.9 };
@@ -3887,7 +3943,7 @@ describe('forecast quality gating', () => {
     const candidates = [
       ['market', 'Gulf', 0.95, 'S1'], ['supply_chain', 'Gulf', 0.94, 'S1'],
       ['political', 'France', 0.6, 'S2'], ['conflict', 'Sahel', 0.55, 'S3'],
-      ['cyber', 'US', 0.5, 'S4'], ['political', 'Germany', 0.45, 'S5'],
+      ['infrastructure', 'US', 0.5, 'S4'], ['political', 'Germany', 0.45, 'S5'],
       ['political', 'Italy', 0.44, 'S6'], ['political', 'Rome', 0.3, 'S7'],
       ['market', 'Paris', 0.2, 'S2'],
     ].map(([domain, region, priority, stateId]) => {
@@ -3902,24 +3958,24 @@ describe('forecast quality gating', () => {
     const pool = selectPublishedForecastPool(candidates, { targetCount: 8 });
     assert.equal(pool.length, 8);
     assert.deepEqual([...new Set(pool.map(pred => pred.stateContext.id))].sort(), ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7']);
-    assert.deepEqual([...new Set(pool.map(pred => pred.domain))].sort(), ['conflict', 'cyber', 'market', 'political', 'supply_chain']);
+    assert.deepEqual([...new Set(pool.map(pred => pred.domain))].sort(), ['conflict', 'infrastructure', 'market', 'political', 'supply_chain']);
   });
 
   it('backfills an absent real judged domain before a represented hard forecast, ignoring synthetic absent domains', () => {
     const supply = { id: 'supply', domain: 'supply_chain', probability: 0.7, resolution: { kind: 'hard' } };
-    const syntheticCyber = { id: 'synthetic-cyber', domain: 'cyber', probability: 0.7, generationOrigin: 'state_derived', resolution: { kind: 'judged' } };
-    const cyber = { id: 'cyber', domain: 'cyber', probability: 0.5, resolution: { kind: 'judged' } };
-    const deferred = [supply, syntheticCyber, cyber];
+    const syntheticInfra = { id: 'synthetic-infra', domain: 'infrastructure', probability: 0.7, generationOrigin: 'state_derived', resolution: { kind: 'judged' } };
+    const infra = { id: 'infrastructure', domain: 'infrastructure', probability: 0.5, resolution: { kind: 'judged' } };
+    const deferred = [supply, syntheticInfra, infra];
     const selected = selectDeferredForecastForPublishBackfill(deferred, [
       { id: 'published-supply', domain: 'supply_chain', resolution: { kind: 'judged' } },
     ], 3);
-    assert.equal(selected.id, 'cyber');
-    assert.deepEqual(deferred.map(pred => pred.id), ['supply', 'synthetic-cyber']);
+    assert.equal(selected.id, 'infrastructure');
+    assert.deepEqual(deferred.map(pred => pred.id), ['supply', 'synthetic-infra']);
   });
 
   it('does not let a synthetic same-domain hard forecast replace a sole real representative', () => {
     const candidates = [
-      ['cyber', 'judged', 0.9, undefined], ['market', 'hard', 0.8, undefined], ['cyber', 'hard', 0.01, 'state_derived'],
+      ['infrastructure', 'judged', 0.9, undefined], ['market', 'hard', 0.8, undefined], ['infrastructure', 'hard', 0.01, 'state_derived'],
     ].map(([domain, kind, priority, generationOrigin], index) => {
       const pred = makePrediction(domain, `Region ${index}`, `Outlook ${index}`, 0.6, 0.6, '7d', []);
       pred.id = `swap-${index}`;
