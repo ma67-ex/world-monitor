@@ -20,6 +20,21 @@ export const JUDGED_EVIDENCE_GRACE_MS = 18 * 60 * 60 * 1000;
 // two days is two daily runs, a first attempt and one retry, at any deadline.
 export const DEFAULT_JUDGED_SLA_MS = 2 * DAY_MS;
 
+// The VOID-share KPI counts only windows opened from the start of the day the
+// owner re-based it (#4930, 2026-10-08). Every #8990 audit fix (#8995, #8999,
+// #9006) was in production by then, so these windows resolve only under the
+// fixed pipeline. Earlier windows hold the voids the audit relabelled
+// (resolver_envelope_bug, judged_old_selection, resolver_could_not_read_feed),
+// which describe the old pipeline's faults and would hold the share above
+// target until they leave the rolling window.
+export const GO_FORWARD_SINCE = '2026-10-08';
+export const GO_FORWARD_SINCE_MS = Date.parse(`${GO_FORWARD_SINCE}T00:00:00Z`);
+export const GO_FORWARD_VOID_SHARE_TARGET = 0.15;
+// Below this many resolved windows the share is stated but not compared with
+// the target. It matches the 30-family skill gate and the 30-hit market-alert
+// floor; at 30, 5 voids (16.7%) still carry a Wilson interval of 7.3% to 33.6%.
+export const GO_FORWARD_MIN_RESOLVED = 30;
+
 // Origins whose scored entries are held OUT of the headline skill Brier:
 // `state_derived` = synthetic count-padding backfill (not a real prediction);
 // `bet_engine`    = shadow bets scored for evidence but not yet promoted;
@@ -43,6 +58,19 @@ export function generationOriginOf(entry) {
 // The published-origin population: the headline skill set with bet_engine
 // held out regardless of the promotion flag. Calibration fits and evaluates
 // only this population (#7070).
+// Shadow origins the promotion flag has moved into publication. Promotion
+// (#5525 U14) is the only path; it moves bet_engine and nothing else.
+function promotedShadowOrigins(options) {
+  return options.promoteBetEngine === true ? ['bet_engine'] : [];
+}
+
+// An entry users were shown: shadow bets are scored for evidence but never
+// published until promoted. Synthetic and unattributed rows were published.
+function isPublishedEntry(entry, options) {
+  const origin = generationOriginOf(entry);
+  return !SHADOW_GENERATION_ORIGINS.includes(origin) || promotedShadowOrigins(options).includes(origin);
+}
+
 export function isPublishedOriginEntry(entry) {
   return !DEFAULT_SKILL_EXCLUDED_ORIGINS.includes(generationOriginOf(entry));
 }
@@ -86,12 +114,14 @@ export function computeScorecard(ledger, nowMs, options = {}) {
   const pending = entries.filter((entry) => entry?.status === 'pending');
   const pendingJudge = entries.filter((entry) => entry?.status === 'pending-judge');
 
+  const goForward = summarizeGoForward(entries, minResolvedAt, rollingWindowDays, options);
+
   const scorecard = {
     // 2: carries publishedByDomain (#5092).
     schemaVersion: 2,
     generatedAt: nowMs,
     rollingWindowDays,
-    methodology: `Brier/log score over resolved YES/NO published forecast windows; VOID and pending entries are counted for coverage but excluded from accuracy math. Each window is one question, and it is scored on the probability published when the window opened; a later re-emission of the same question does not change it. While an outcome-fitted calibration gate passes, that probability is calibrated, and the API does not mark which ones are; after a switch between raw and calibrated publication, the rolling window mixes forecasts published under both.${envelopeBugNote(voided)}`,
+    methodology: `Brier/log score over resolved YES/NO published forecast windows; VOID and pending entries are counted for coverage but excluded from accuracy math. Each window is one question, and it is scored on the probability published when the window opened; a later re-emission of the same question does not change it. While an outcome-fitted calibration gate passes, that probability is calibrated, and the API does not mark which ones are; after a switch between raw and calibrated publication, the rolling window mixes forecasts published under both.${envelopeBugNote(voided)}${nowMs >= GO_FORWARD_SINCE_MS ? goForwardNote(goForward) : ''}`,
     totals: {
       entries: entries.length,
       resolved: resolved.length,
@@ -103,6 +133,7 @@ export function computeScorecard(ledger, nowMs, options = {}) {
       publicationCoverage: entries.length ? round(scored.length / entries.length) : 0,
     },
     judgedLane: summarizeJudgedLane(entries, resolved, pendingJudge, nowMs, options),
+    goForward,
     byDomain: summarizeGroups(scored, resolved, 'domain', 'domain'),
     byGenerationOrigin: summarizeGroups(scored, resolved, 'generationOrigin', 'generationOrigin'),
     calibration: calibrationBuckets(scored),
@@ -117,10 +148,8 @@ export function computeScorecard(ledger, nowMs, options = {}) {
   // wires it from FORECAST_PROMOTE_BET_ENGINE=1) is the ONLY promotion path —
   // it removes bet_engine from the exclusion set while state_derived stays
   // excluded.
-  const promoteBetEngine = options.promoteBetEngine === true;
-  const defaultExcluded = promoteBetEngine
-    ? DEFAULT_SKILL_EXCLUDED_ORIGINS.filter((origin) => origin !== 'bet_engine')
-    : DEFAULT_SKILL_EXCLUDED_ORIGINS;
+  const promoted = promotedShadowOrigins(options);
+  const defaultExcluded = DEFAULT_SKILL_EXCLUDED_ORIGINS.filter((origin) => !promoted.includes(origin));
   const excludeOrigins = new Set(options.skillExcludeOrigins ?? defaultExcluded);
   const skill = summarizeSkill(scored, excludeOrigins);
   if (skill) scorecard.skill = skill;
@@ -243,6 +272,70 @@ function envelopeBugNote(voided) {
   return count === 1
     ? ' 1 forecast scored against a data feed we could not read correctly is voided and left out of every score (issue #5233).'
     : ` ${count} forecasts scored against a data feed we could not read correctly are voided and left out of every score (issue #5233).`;
+}
+
+// A window opens when it is first seen in a published snapshot; generatedAt
+// stands in for rows that lack the sighting time.
+function windowOpenedAt(entry) {
+  const firstSeenAt = Number(entry?.firstSeenAt);
+  if (Number.isFinite(firstSeenAt) && firstSeenAt > 0) return firstSeenAt;
+  const generatedAt = Number(entry?.generatedAt);
+  return Number.isFinite(generatedAt) && generatedAt > 0 ? generatedAt : NaN;
+}
+
+// The go-forward VOID-share KPI (#4930), over published forecasts only. It
+// starts from the `totals` population, so a row withheld, duplicated or outside
+// the rolling window counts in neither, and then drops unpromoted shadow bets,
+// which are never published and settle on market data that does not void.
+// Once GO_FORWARD_SINCE is older than the window, rows resolved before the
+// window start drop out and `windowTruncated` says so.
+function summarizeGoForward(entries, minResolvedAt, rollingWindowDays, options) {
+  const cohort = entries.filter((entry) => isPublishedEntry(entry, options) && windowOpenedAt(entry) >= GO_FORWARD_SINCE_MS);
+  const resolved = cohort.filter((entry) => entry?.status === 'resolved');
+  const voided = resolved.filter((entry) => entry?.outcome === 'VOID');
+  const voidByReason = {};
+  for (const entry of voided) {
+    const reason = entry?.evidence?.reason || 'unknown';
+    voidByReason[reason] = (voidByReason[reason] || 0) + 1;
+  }
+  return {
+    since: GO_FORWARD_SINCE,
+    target: GO_FORWARD_VOID_SHARE_TARGET,
+    minResolved: GO_FORWARD_MIN_RESOLVED,
+    windowTruncated: minResolvedAt > GO_FORWARD_SINCE_MS,
+    rollingWindowDays,
+    entries: cohort.length,
+    resolved: resolved.length,
+    void: voided.length,
+    voidShare: resolved.length ? round(voided.length / resolved.length) : null,
+    voidShareCi95: wilsonInterval(voided.length, resolved.length),
+    voidByReason,
+  };
+}
+
+const LONG_DATE = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+const COUNT = new Intl.NumberFormat('en-US');
+const percent = (value) => `${(value * 100).toFixed(1)}%`;
+
+// Published in the methodology, which /accuracy/ prints under the ledger
+// totals. The public OpenAPI document has no room for a structured field, and
+// the note travels with the capture it describes, like envelopeBugNote.
+function goForwardNote(goForward) {
+  const sinceDate = LONG_DATE.format(new Date(GO_FORWARD_SINCE_MS));
+  const lead = goForward.windowTruncated ? `In the last ${goForward.rollingWindowDays} days` : `Since ${sinceDate}`;
+  const target = `under ${percent(goForward.target).replace('.0%', '%')}`;
+  const scope = ` This counts published forecasts first issued on or after ${goForward.windowTruncated ? sinceDate : 'that date'}, so it leaves out unpublished shadow bets and the voids relabelled in the issue #8990 audit.`;
+  if (!goForward.resolved) {
+    return ` ${lead}, no published forecast has resolved${goForward.windowTruncated ? '' : ' yet'}, so there is no void share to compare with the target of ${target}.${scope}`;
+  }
+  const [low, high] = goForward.voidShareCi95;
+  const noun = goForward.resolved === 1 ? 'resolved published forecast' : 'resolved published forecasts';
+  const verb = goForward.void === 1 || goForward.resolved === 1 ? 'was' : 'were';
+  const share = `${lead}, ${COUNT.format(goForward.void)} of ${COUNT.format(goForward.resolved)} ${noun} ${verb} void (${percent(goForward.voidShare)}, 95% interval ${percent(low)} to ${percent(high)})`;
+  if (goForward.resolved < goForward.minResolved) {
+    return ` ${share}. That is too few to compare with the target of ${target}, which needs at least ${goForward.minResolved} resolved. Judged forecasts resolve days after hard ones and have voided more often, so early readings run low.${scope}`;
+  }
+  return ` ${share}; the target is ${target}.${scope}`;
 }
 
 export function isHorizonEntry(entry) {
