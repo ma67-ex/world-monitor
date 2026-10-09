@@ -73,7 +73,7 @@ async function loadPredictionService() {
           state.rpcCalls.push({ category: req.category, query: req.query });
           return {
             markets: state.rpcMarketsByCategory[req.category] ?? [],
-            dataAvailable: state.rpcDataAvailable === true,
+            ...(state.rpcDataAvailable === undefined ? {} : { dataAvailable: state.rpcDataAvailable }),
           };
         }
       }
@@ -236,6 +236,42 @@ describe('fetchCountryMarkets uses the producer country index', () => {
 
       assert.deepEqual(out.map((m: { title: string }) => m.title), [title], countryCode);
     }
+  });
+
+  it('excludes the Norwegian Cruise brand while preserving independent Norway evidence in the fallback', async () => {
+    const cases = [
+      ['Norwegian Cruise passengers carried in 2026: Above 3.25 million', false],
+      ['Will Norway hold an early election?', true],
+      ['Will the Norwegian government hold an early election?', true],
+      ['Will Norwegians approve the referendum?', true],
+      ['Will Norwegian Cruise expand service to Norway?', true],
+      ['Will Norwegian Cruise comply with Norwegian government rules?', true],
+      ['Will Norwegian cruise tourism exceed 2025 levels?', true],
+      ['Will a Norwegian cruise ship enter Russian waters?', true],
+    ] as const;
+
+    const actual: string[][] = [];
+    const expectedTitles: string[][] = [];
+    for (const rpcDataAvailable of [false, undefined]) {
+      for (const [title, expected] of cases) {
+        globalThis.__wmCountryMarketsTestState = {
+          rpcCalls: [],
+          rpcMarketsByCategory: {},
+          rpcDataAvailable,
+          hydrated: {
+            geopolitical: [{ ...bootstrapMarket(title, 10_000), source: 'kalshi' }],
+            tech: [],
+            finance: [],
+            fetchedAt: Date.now(),
+          },
+        };
+        const service = await loadPredictionService();
+        const out = await service.fetchCountryMarkets('Norway', 'NO');
+        actual.push(out.map((entry: { title: string }) => entry.title));
+        expectedTitles.push(expected ? [title] : []);
+      }
+    }
+    assert.deepEqual(actual, expectedTitles);
   });
 
   it('keeps excluded demonym phrases out of the bootstrap fallback', async () => {
