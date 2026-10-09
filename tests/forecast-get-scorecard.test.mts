@@ -12,10 +12,16 @@ import {
   SCORECARD_NESTED_CHILD_FIELDS,
   SCORECARD_NESTED_OBJECT_FIELDS,
   SCORECARD_NESTED_ROW_FIELDS,
+  HORIZON_GRADE_FIELDS as PAGE_HORIZON_GRADE_FIELDS,
+  HORIZON_GRADE_ROW_FIELDS as PAGE_HORIZON_GRADE_ROW_FIELDS,
   selectDeclaredScorecardFields,
 } from '../scripts/build-accuracy-page.mjs';
 import {
   FAMILY_OUTCOME_FIELDS,
+  HORIZON_GRADE_FIELDS,
+  HORIZON_GRADE_MIN_FAMILIES,
+  HORIZON_GRADE_MIN_OUTCOME_FAMILIES,
+  HORIZON_GRADE_ROW_FIELDS,
   MARKET_ALERT_FIELDS,
   MARKET_ALERT_MEDIAN_MIN_HITS,
   MARKET_ALERT_ROW_FIELDS,
@@ -28,7 +34,7 @@ import {
   selectMarketAlertScorecard,
   selectScorecardFields,
 } from '../server/worldmonitor/forecast/v1/scorecard-fields.ts';
-import { PUBLIC_FAMILY_OUTCOME_FIELDS, PUBLIC_RECEIPT_FIELDS } from '../scripts/_forecast-scorecard.mjs';
+import { PUBLIC_FAMILY_OUTCOME_FIELDS, PUBLIC_RECEIPT_FIELDS, SKILL_MIN_FAMILIES, SKILL_MIN_OUTCOME_FAMILIES } from '../scripts/_forecast-scorecard.mjs';
 import { FORECAST_ACCURACY_AUDIT } from '../shared/forecast-accuracy-audit.js';
 
 const originalFetch = globalThis.fetch;
@@ -322,6 +328,36 @@ describe('getForecastScorecard backend status', () => {
       assert.ok(!Object.hasOwn(skill ?? {}, 'preLineageAnchorCount'));
     }
     assert.ok(!Object.hasOwn((selectDeclaredScorecardFields(data) as { skill?: object }).skill ?? {}, 'preLineageAnchorCount'));
+  });
+
+  // Horizon grades (#9057) have no room in the public OpenAPI document, so
+  // only MCP serves them; /accuracy/ reads them through MCP with the same lists.
+  it('serves horizon grades to MCP only, counts only below the family minimums', () => {
+    assert.deepEqual([...HORIZON_GRADE_FIELDS], [...PAGE_HORIZON_GRADE_FIELDS]);
+    assert.deepEqual([...HORIZON_GRADE_ROW_FIELDS], [...PAGE_HORIZON_GRADE_ROW_FIELDS]);
+    const graded = { curvesVersion: 1, horizon: 'd7', scored: 40, yes: 8, no: 32, families: 30, yesFamilies: 6, noFamilies: 24, measurable: true, brier: { mean: 0.1, ci95: [0.05, 0.2] }, realizedRate: { count: 40, successes: 8, rate: 0.2, ci95: [0.1, 0.35] }, registered: 50 };
+    const short = { ...graded, horizon: 'h24', measurable: false };
+    const data = { generatedAt: 1, horizonGrades: { semantics: 'point_in_time', note: 'n', minimums: {}, unversionedScored: 0, rows: [graded, short], internal: 1 } };
+    assert.equal('horizonGrades' in selectScorecardFields(data), false, 'not on REST');
+    const mcp = selectScorecardFields(data, { extended: true }) as { horizonGrades?: { rows: Record<string, unknown>[] } };
+    assert.deepEqual(Object.keys(mcp.horizonGrades ?? {}).sort(), [...HORIZON_GRADE_FIELDS].sort());
+    assert.deepEqual(Object.keys(mcp.horizonGrades?.rows[0] ?? {}).sort(), [...HORIZON_GRADE_ROW_FIELDS].sort());
+    assert.ok(!('brier' in (mcp.horizonGrades?.rows[1] ?? {})) && !('realizedRate' in (mcp.horizonGrades?.rows[1] ?? {})));
+    assert.equal('horizonGrades' in (selectDeclaredScorecardFields(data) ?? {}), false, 'nor in the REST-shaped capture');
+  });
+
+  it('re-checks the horizon minimums from the counts, not the stored flag (#9057)', () => {
+    assert.equal(HORIZON_GRADE_MIN_FAMILIES, SKILL_MIN_FAMILIES);
+    assert.equal(HORIZON_GRADE_MIN_OUTCOME_FAMILIES, SKILL_MIN_OUTCOME_FAMILIES);
+    const graded = { curvesVersion: 1, horizon: 'd7', scored: 40, yes: 8, no: 32, families: 30, yesFamilies: 5, noFamilies: 5, measurable: true, brier: { mean: 0.1, ci95: [0.05, 0.2] }, realizedRate: { count: 40 } };
+    const served = (row: Record<string, unknown>) => (selectScorecardFields({ horizonGrades: { rows: [row] } }, { extended: true }) as { horizonGrades: { rows: Record<string, unknown>[] } }).horizonGrades.rows[0];
+    assert.equal(served(graded).measurable, true);
+    assert.ok('brier' in served(graded), 'exactly at the minimums keeps its grade');
+    for (const short of [{ families: 29 }, { yesFamilies: 4 }, { noFamilies: 4 }, { yesFamilies: 31 }, { families: '30' }]) {
+      const row = served({ ...graded, ...short });
+      assert.equal(row.measurable, false, JSON.stringify(short));
+      assert.ok(!('brier' in row) && !('realizedRate' in row), JSON.stringify(short));
+    }
   });
 
   // The corpus block is internal until the public contract has room (#7072).
