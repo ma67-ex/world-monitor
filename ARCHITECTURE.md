@@ -46,7 +46,7 @@ World Monitor is a real-time global intelligence dashboard built as a TypeScript
         │ CoinGeck│ │  FRED   │ │ FIRMS   │
         │   ...   │ │   ...   │ │   ...   │
         └─────────┘ └─────────┘ └─────────┘
-           548+ observed upstream hosts
+           552+ observed upstream hosts
 ```
 
 **Source files**: `package.json`, `vercel.json`
@@ -373,6 +373,9 @@ Runs before every `git push`:
 | `china-decision-parity-live.yml` | 6-hourly cron, push to main (audit paths), manual (optional staging URL) | Live half of the China decision-signal parity audit: probes the deployed composition RPC and the public `chinaDecisionSignals` bootstrap projection for the six-domain contract and a canonical snapshot under one hour old (#5643 — the probe existed but nothing invoked it, and `--require-live` keeps a lost `--url` from passing vacuously) |
 | `security-audit.yml` | PR, push to main, daily cron, manual | Production dependency audits for every tracked `package-lock.json` workspace, failing on unbaselined high/critical advisories |
 | `seed-freshness-monitor.yml` | 15-minute cron, manual | Enforces production ingestion acceptance after a green scheduled main gate; fails on every actionable compact-health problem except explicitly on-demand sources without grading production before Railway deploys or runs |
+| `seed-all.yml` | 3-hourly cron (:35), manual | Fork-only prod reseed: runs every `scripts/seed-*.mjs` (except the NASA FIRMS pair) across 15 matrix shards against the fork's production Upstash, 90s per script, per-script failures logged but never fail the job — `vercel.json` has no crons, so nothing else refreshes TTL'd seed keys |
+| `seed-commodities.yml` | `*/25` cron (:00/:25/:50), manual | Fork-only: runs `scripts/seed-commodity-quotes.mjs` so `market:commodities-bootstrap:v1` (30-minute TTL) never expires between runs |
+| `seed-nasa-firms.yml` | 3-hourly cron (:20), manual | Fork-only: runs `seed-fire-detections.mjs` then `seed-thermal-escalation.mjs` (which reads the fires key) at NASA FIRMS' ~3h NRT republish cadence; excluded from `seed-all.yml` so two crons never race for the same Redis lock |
 | `scenario-worker-drain.yml` | 5-minute cron, manual | Drains `scenario-queue:pending` via `scripts/scenario-worker.mjs` until empty or a 4-minute budget, then exits — replaces an always-on Railway worker (real recurring cost) with idle-time-costs-nothing polling; trades up to ~5 minutes of pickup latency, which the client already tolerates via async status polling |
 | `railway-deploy-drift.yml` | Hourly cron, manual | Runs two independent read-only checks against the exact production fleet: Viewer-safe source/build/deploy configuration drift and deployment/Git-closure drift. It has no mutation, dispatch, retry, approval, or acceptance-baseline path |
 | `railway-deploy-trigger.yml` | Manual rollback only | Keeps the legacy reconciler quiesced unless an operator explicitly activates the bounded rollback path; it does not own normal Railway deployment creation |
