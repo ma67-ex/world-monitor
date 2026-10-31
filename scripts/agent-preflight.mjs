@@ -134,6 +134,12 @@ Options:
   -h, --help            Show this help text.`);
 }
 
+export function createPreflightRunner({
+  spawn = spawnSync,
+} = {}) {
+  return (file, args, options) => spawn(file, args, options);
+}
+
 function runCommand(runner, file, args, options = {}) {
   const env = {
     ...process.env,
