@@ -9,8 +9,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function browserInlineScriptHash(scriptText) {
-  return `'sha256-${createHash('sha256').update(scriptText).digest('base64')}'`;
+  const browserText = scriptText.replace(/\r\n?/g, '\n');
+  return `'sha256-${createHash('sha256').update(browserText).digest('base64')}'`;
 }
+
 const navigationSource = readFileSync(resolve(ROOT, 'public/sw-navigation.js'), 'utf8');
 
 function createNavigationHarness({ fetchImpl, offlineResponse = { offline: true }, cacheNames = [] } = {}) {
@@ -142,7 +144,7 @@ describe('offline Retry CSP', () => {
   const offlineHtml = readFileSync(resolve(ROOT, 'public/offline.html'), 'utf8');
   const inlineScripts = [...offlineHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)];
   const retryButton = offlineHtml.match(/<button\b[^>]*\bid=["']t-retry["'][^>]*>/i)?.[0] ?? '';
-  const scriptHash = `'sha256-${createHash('sha256').update(inlineScripts[0]?.[1] ?? '').digest('base64')}'`;
+  const scriptHash = browserInlineScriptHash(inlineScripts[0]?.[1] ?? '');
 
   it('hashes LF, CRLF, and CR script text the same and rejects a script edit', () => {
     const script = inlineScripts[0][1];
