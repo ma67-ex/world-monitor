@@ -183,6 +183,29 @@ describe('agent preflight', () => {
     }
   });
 
+  it('ignores other package managers in npm_execpath on win32', () => {
+    const execPath = 'C:\\Program Files\\nodejs\\node.exe';
+    const fallback = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+    for (const npmExecPath of ['D:\\yarn\\bin\\yarn.js', 'D:/pnpm/bin/pnpm.js', 'D:\\alt\\not-npm-cli.js']) {
+      const calls = [];
+      const runner = createPreflightRunner({
+        platform: 'win32',
+        env: { npm_execpath: npmExecPath },
+        execPath,
+        spawn: (file, args) => {
+          calls.push({ file, args });
+          return { status: 0 };
+        },
+      });
+      runner('npm', ['ls', '--depth=0', '--json']);
+      runner('npm', ['ci', '--ignore-scripts']);
+      assert.deepEqual(calls, [
+        { file: execPath, args: [fallback, 'ls', '--depth=0', '--json'] },
+        { file: execPath, args: [fallback, 'ci', '--ignore-scripts'] },
+      ]);
+    }
+  });
+
   it('passes an injected dependency runner through unchanged', () => {
     const root = makeRoot();
     writeFileSync(join(root, 'package.json'), JSON.stringify({

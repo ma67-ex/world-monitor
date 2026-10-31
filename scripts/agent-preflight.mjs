@@ -136,7 +136,7 @@ Options:
 
 function npmCliScript(env, execPath) {
   const configured = env?.npm_execpath;
-  if (typeof configured === 'string' && configured.toLowerCase().endsWith('.js')) {
+  if (typeof configured === 'string' && win32.basename(configured).toLowerCase() === 'npm-cli.js') {
     return configured;
   }
   return win32.join(win32.dirname(execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
