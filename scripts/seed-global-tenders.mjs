@@ -97,7 +97,7 @@ async function fetchResponse(url, options = {}, transport = fetchResponseTranspo
       headers: { Accept: 'application/json', 'User-Agent': CHROME_UA, ...(fetchOptions.headers || {}) },
       timeoutMs,
     }, transport);
-    if (!response.ok) {
+    if (!response.ok && !(fetchOptions.redirect === 'manual' && [301, 302, 303, 307, 308].includes(response.status))) {
       // Reuse the repository retry contract: 408 and 429 remain retryable, permanent
       // 4xx responses fail fast, and Retry-After is capped before it reaches withRetry.
       const error = httpRetryError(response);
@@ -120,7 +120,7 @@ function createSamFetchJson(httpsGetFn = httpsGet) {
   return async (url, options = {}) => readTenderBody(await fetchResponse(url, options, transport), 'json');
 }
 
-export const __testing__ = { createSamFetchJson, writeSourceStatus };
+export const __testing__ = { createSamFetchJson, writeSourceStatus, fetchResponse };
 
 async function fetchText(url, options = {}) {
   return readTenderBody(await fetchResponse(url, { ...options, headers: { Accept: 'application/rss+xml, application/xml, text/xml', ...(options.headers || {}) } }), 'text');
@@ -420,7 +420,7 @@ const SOURCE_ADAPTERS = [
   ['gets', fetchGets],
   ['world-bank', fetchWorldBank],
   ...ADDITIONAL_TENDER_ADAPTERS.map(([source, fetchSource]) => [source,
-    (options) => fetchSource({ ...options, fetchJsonFn: fetchJson, fetchTextFn: fetchText })]),
+    (options) => fetchSource({ ...options, fetchJsonFn: fetchJson, fetchTextFn: fetchText, fetchResponseFn: fetchResponse })]),
 ];
 
 export async function fetchGlobalTenders({ previousSnapshot = null, adapters = SOURCE_ADAPTERS, now = Date.now(), receipt } = {}) {
@@ -512,7 +512,7 @@ export async function main({ adapters, now } = {}) {
     validateFn: validate,
     ttlSeconds: CACHE_TTL_SECONDS,
     declareRecords,
-    sourceVersion: 'global-tenders-16-sources-v3',
+    sourceVersion: 'global-tenders-19-sources-v4',
     schemaVersion: 1,
     maxStaleMin: 180,
     zeroIsValid: true,
