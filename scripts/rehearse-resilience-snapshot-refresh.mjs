@@ -58,14 +58,43 @@ function pick(record, fields) {
   return Object.fromEntries(fields.filter((field) => field in record).map((field) => [field, record[field]]));
 }
 
-// Pairs 0-1, 2-3, ... so every country moves exactly one place and nothing
-// wraps from the top of the table to the bottom. An odd tail rotates three.
-function neighbourOrder(length) {
-  if (length < 2) return Array.from({ length }, (_, index) => index);
-  const order = Array.from({ length }, (_, index) => (index % 2 === 0 ? index + 1 : index - 1));
-  if (length % 2 === 1) {
-    const last = length - 1;
-    [order[last - 2], order[last - 1], order[last]] = [last, last - 2, last - 1];
+// Every country moves a few places to a row showing a different value, so its
+// displayed score changes. Ties are common: 169 scores at one decimal share
+// about 139 values, and a plain 0-1, 2-3 swap left 15 tied pairs whose pinned
+// scores passed the rehearsal. Values must be sorted, so ties sit in runs.
+// Consecutive runs group into blocks at least twice their longest run, and
+// each row takes the row its longest run further on, wrapping inside the
+// block: rows that far apart cannot share a run. Blocks stay local, so
+// countries keep their band. Returns, for each row, the row whose identity
+// it takes.
+function neighbourOrder(values) {
+  const runs = [];
+  values.forEach((value, index) => {
+    if (index > 0 && value === values[index - 1]) runs.at(-1).size += 1;
+    else runs.push({ start: index, size: 1 });
+  });
+  const blocks = [];
+  let open = null;
+  const close = () => {
+    if (open.size < 2 * open.longest) return;
+    blocks.push(open);
+    open = null;
+  };
+  for (const run of runs) {
+    open ??= { start: run.start, size: 0, longest: 0 };
+    open.size += run.size;
+    open.longest = Math.max(open.longest, run.size);
+    close();
+  }
+  while (open) {
+    const previous = blocks.pop();
+    if (!previous) throw new Error('too many ranked countries share a score for every displayed score to move');
+    open = { start: previous.start, size: previous.size + open.size, longest: Math.max(previous.longest, open.longest) };
+    close();
+  }
+  const order = [];
+  for (const { start, size, longest } of blocks) {
+    for (let offset = 0; offset < size; offset += 1) order[start + offset] = start + ((offset + longest) % size);
   }
   return order;
 }
@@ -93,9 +122,9 @@ export function driftResilienceSnapshot(snapshot, { targetDate, keepReadings = M
   drifted.totals = { ...drifted.totals, rankedCountries: drifted.items.length, greyedOutCount: drifted.greyedOut.length };
 
   // Ranked readings stay in place so ranks and score order hold; countries
-  // trade places with their neighbour.
+  // trade places with their nearest neighbour of a different score.
   const itemIdentities = drifted.items.map((item) => pick(item, IDENTITY_FIELDS));
-  const itemOrder = neighbourOrder(drifted.items.length);
+  const itemOrder = neighbourOrder(drifted.items.map((item) => item.overallScore));
   drifted.items = drifted.items.map((item, index) => ({ ...item, ...itemIdentities[itemOrder[index]] }));
 
   // Greyed-out rows are ordered by country code, so the headline figures move

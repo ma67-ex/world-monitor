@@ -13,6 +13,7 @@ import {
   readRehearsedStep,
   refreshScripts,
 } from '../scripts/rehearse-resilience-snapshot-refresh.mjs';
+import { MICROSTATE_COVERAGE_STORY_CODES } from '../scripts/microstate-coverage-stories.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REHEARSAL_WORKFLOW_PATH = '.github/workflows/resilience-snapshot-rehearsal.yml';
@@ -63,7 +64,6 @@ describe('resilience snapshot refresh rehearsal', () => {
       const after = byCode(drifted.items, code);
       assert.notEqual(after.rank, before.rank, `${code} changes rank`);
       assert.notEqual(after.overallScore, before.overallScore, `${code} changes score`);
-      assert.ok(Math.abs(after.rank - before.rank) === 1, `${code} moves one place, so band anchors keep their band`);
       assert.equal(after.countryName, before.countryName, `${code} keeps its identity`);
     }
 
@@ -85,6 +85,62 @@ describe('resilience snapshot refresh rehearsal', () => {
     );
     assert.notEqual(byCode(withStory.greyedOut, 'AD').dimensionCoverage, 0.71, 'the other rows still move');
     assert.deepEqual(original, snapshot(), 'the committed snapshot is not mutated');
+  });
+
+  it('changes every published figure of every country in the committed snapshot', () => {
+    const file = readdirSync(resolve(repoRoot, 'docs/snapshots'))
+      .filter((name) => /^resilience-ranking-\d{4}-\d{2}-\d{2}\.json$/.test(name))
+      .sort()
+      .at(-1);
+    const original = JSON.parse(readFileSync(resolve(repoRoot, 'docs/snapshots', file), 'utf8'));
+    const drifted = driftResilienceSnapshot(original, { targetDate: '2099-01-01' });
+    const before = new Map([...original.items, ...original.greyedOut].map((row) => [row.countryCode, row]));
+    const unchanged = [];
+    for (const row of drifted.items) {
+      const was = before.get(row.countryCode);
+      if (row.overallScore === was.overallScore) unchanged.push(`${row.countryCode} score ${row.overallScore}`);
+      if (row.rank === was.rank) unchanged.push(`${row.countryCode} rank ${row.rank}`);
+    }
+    for (const row of drifted.greyedOut) {
+      const was = before.get(row.countryCode);
+      if (MICROSTATE_COVERAGE_STORY_CODES.includes(row.countryCode)) continue;
+      if (Math.round(row.dimensionCoverage * 100) === Math.round(was.dimensionCoverage * 100)) {
+        unchanged.push(`${row.countryCode} coverage`);
+      }
+      if (row.overallScore === was.overallScore) unchanged.push(`${row.countryCode} score ${row.overallScore}`);
+    }
+    assert.deepEqual(unchanged, [], 'a test pinned to any of these figures would pass the rehearsal');
+  });
+
+  // The last score in each list is the row the drift demotes.
+  for (const scores of [
+    [70, 60, 60, 60, 50, 40, 40, 30],
+    [70, 60, 50, 50, 10],
+    [70, 70, 60, 60, 50, 50, 50, 10],
+    [80, 70, 70, 70, 70, 70, 60, 50, 40, 30, 20, 10],
+  ]) {
+    it(`moves every ranked score past ties: ${scores.slice(0, -1).join(', ')}`, () => {
+      const original = {
+        ...snapshot(),
+        items: scores.map((score, index) => country(`C${index}`, { rank: index + 1, overallScore: score, dimensionCoverage: 0.8, headlineEligible: true })),
+      };
+      const kept = scores.slice(0, -1);
+      const drifted = driftResilienceSnapshot(original, { targetDate: '2026-12-01' });
+      assert.deepEqual(drifted.items.map((row) => row.overallScore), kept, 'score order holds');
+      assert.deepEqual(drifted.items.map((row) => row.countryCode).sort(), kept.map((_, index) => `C${index}`).sort(), 'each country appears once');
+      for (const row of drifted.items) {
+        const was = byCode(original.items, row.countryCode);
+        assert.notEqual(row.overallScore, was.overallScore, `${row.countryCode} shows a different score`);
+      }
+    });
+  }
+
+  it('refuses a ranking where no reshuffle can move every score', () => {
+    const original = {
+      ...snapshot(),
+      items: [70, 50, 50, 50, 10].map((score, index) => country(`C${index}`, { rank: index + 1, overallScore: score, dimensionCoverage: 0.8, headlineEligible: true })),
+    };
+    assert.throws(() => driftResilienceSnapshot(original, { targetDate: '2026-12-01' }), /share a score/);
   });
 
   it('replays the refresh workflow rebuild-and-verify step', () => {
