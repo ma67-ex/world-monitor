@@ -164,3 +164,21 @@ test('fetchAll queries a chokepoint whose CSV history ends before the previous s
   assert.equal(queried.has('Korea Strait'), true, 'the trailing CSV entry is re-queried');
   assert.equal(queried.has('Suez Canal'), false, 'a CSV entry with no newer previous history is not');
 });
+
+// Past fetchDeadlineAtMs runSeed has already given up on the run, so a query
+// could not publish and would only spend ArcGIS's per-IP rate limit.
+test('fetchAll rethrows a failed CSV after the fetch deadline instead of querying ArcGIS', async (t) => {
+  const calls = stubNetwork(t, () => new Response('unavailable', { status: 503 }));
+  await assert.rejects(fetchAll({ fetchDeadlineAtMs: NOW - 1 }), /HTTP 503/);
+  assert.equal(calls.filter(u => u.includes(HUB_HOST)).length, 1, 'the CSV was requested');
+  assert.deepEqual([...queriedNames(calls)], []);
+});
+
+test('fetchAll returns a partial CSV after the fetch deadline without querying what it lacks', async (t) => {
+  const calls = stubNetwork(t, () => new Response(CSV, { status: 200 }));
+  const result = await fetchAll({ fetchDeadlineAtMs: NOW - 1 });
+  assert.equal(calls.filter(u => u.includes(HUB_HOST)).length, 1, 'the CSV was requested');
+  assert.deepEqual([...queriedNames(calls)], []);
+  assert.deepEqual(Object.keys(result).sort(), ['korea_strait', 'suez']);
+  assert.equal(result.korea_strait.history.length, 174);
+});
