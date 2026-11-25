@@ -306,7 +306,14 @@ export class Panel {
     // unlock fully with a user-supplied key — the "PRO" badge would be a
     // stale/misleading leftover once the panel is actually usable, same
     // gap fixed for the lock CTA in panel-layout.ts's BYOK_GATED_PANELS.
-    if (options.premium && !getSecretState('WORLDMONITOR_API_KEY').present && !hasUserAiKey()) {
+    // SITREP: the 11 panels upstream sells as Pro keep a PRO badge, but stay
+    // fully usable (the fork unlocked them). Remove an id here to hide its badge.
+    const PRO_BADGE_PANELS = new Set([
+      'stock-analysis', 'stock-backtest', 'daily-market-brief', 'chat-analyst',
+      'market-implications', 'deduction', 'wsb-ticker-scanner', 'latest-brief',
+      'regional-intelligence', 'trade-policy', 'global-procurement',
+    ]);
+    if ((options.premium || PRO_BADGE_PANELS.has(options.id)) && !getSecretState('WORLDMONITOR_API_KEY').present && !hasUserAiKey()) {
       const proBadge = h('span', { className: 'panel-pro-badge' }, t('premium.pro'));
       headerLeft.appendChild(proBadge);
     }
