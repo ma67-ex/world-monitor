@@ -20,6 +20,8 @@ const PRODUCTION_PATTERNS: RegExp[] = [
   /^https:\/\/worldmonitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
   /^https:\/\/ma67-ex-worldmonitor\.vercel\.app$/,
   /^https:\/\/ma67-ex-worldmonitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
+  /^https:\/\/world-monitor\.vercel\.app$/,
+  /^https:\/\/world-monitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
   /^https:\/\/(.*\.)?sitrep\.app$/,
   /^https?:\/\/tauri\.localhost(:\d+)?$/,
   /^https?:\/\/[a-z0-9-]+\.tauri\.localhost(:\d+)?$/i,
