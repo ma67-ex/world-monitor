@@ -282,6 +282,15 @@ export function isProWidgetEnabled(): boolean {
 }
 
 export function isProUser(): boolean {
+  // Pro paywall disabled — every session counts as Pro, no sign-up required.
+  return true;
+}
+
+/**
+ * The real Pro-signal union, kept so koala-added Pro features and the
+ * telemetry grant report can still tell a genuine Pro session apart.
+ */
+export function isProUserReal(): boolean {
   return (
     isWidgetFeatureEnabled() ||
     isProWidgetEnabled() ||

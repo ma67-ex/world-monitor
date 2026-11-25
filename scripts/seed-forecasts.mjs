@@ -15343,6 +15343,7 @@ function getForecastLlmCallOptions(stage = 'default') {
   const criticalProviderOrder = parseForecastProviderOrder(process.env.FORECAST_LLM_CRITICAL_PROVIDER_ORDER);
   const impactProviderOrder = parseForecastProviderOrder(process.env.FORECAST_LLM_IMPACT_PROVIDER_ORDER);
   const marketImplicationsProviderOrder = parseForecastProviderOrder(process.env.FORECAST_LLM_MARKET_IMPLICATIONS_PROVIDER_ORDER);
+  const simulationProviderOrder = parseForecastProviderOrder(process.env.FORECAST_LLM_SIMULATION_PROVIDER_ORDER);
   const configuredProviderOrder = stage === 'combined'
     ? (combinedProviderOrder || effectiveGlobalProviderOrder || defaultProviderOrder)
     : stage === 'critical_signals'
@@ -15354,6 +15355,8 @@ function getForecastLlmCallOptions(stage = 'default') {
       // MARKET_IMPLICATIONS_DEFAULT_PROVIDER_ORDER). Its own stage env still overrides.
       : stage === 'market_implications'
         ? (marketImplicationsProviderOrder || MARKET_IMPLICATIONS_DEFAULT_PROVIDER_ORDER)
+      : stage === 'simulation_round_1' || stage === 'simulation_round_2'
+        ? (simulationProviderOrder || effectiveGlobalProviderOrder || defaultProviderOrder)
       : (effectiveGlobalProviderOrder || defaultProviderOrder);
   const providerOrder = configuredProviderOrder;
 

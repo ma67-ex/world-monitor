@@ -201,11 +201,19 @@ export async function listCryptoQuotes(
   const seedUnavailable = seedRead.status === 'error'
     || (seedRead.status === 'hit' && !Array.isArray(seedData?.quotes));
 
-  // Default request: return the seeded default crypto set, never the provider.
+  // Default request: prefer the seeded default crypto set.
   if (ids.length === 0 && invalid.length === 0) {
-    if (seedRead.status !== 'hit' || seedUnavailable) {
+    // A cache outage must not turn into provider work; a cold/empty seed may.
+    if (seedRead.status === 'error' || seedUnavailable) {
       markNoCacheResponse(ctx.request);
       return { quotes: [], unresolvedIds: [], provider: 'degraded' };
+    }
+    if (seedQuotes.length > 0) {
+      return {
+        quotes: seedQuotes.map((q) => ({ ...q, change7d: (q as Partial<CryptoQuote>).change7d ?? 0 })),
+        unresolvedIds: [],
+        provider: 'seed',
+      };
     }
 
     // Seed key is cold — fetch the default set live instead of surfacing an

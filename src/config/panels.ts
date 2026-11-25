@@ -132,8 +132,8 @@ const FULL_PANELS: Record<string, PanelConfig> = {
   'toronto-safety': { name: 'Toronto Safety', enabled: false, priority: 2 },
   'radiation-watch': { name: 'Radiation Watch', enabled: true, priority: 2 },
   'thermal-escalation': { name: 'Thermal Escalation', enabled: true, priority: 2 },
-  'oref-sirens': { name: 'Israel Sirens', enabled: true, priority: 2, ...(_desktop && { premium: 'locked' as const }) },
-  'telegram-intel': { name: 'Telegram Intel', enabled: true, priority: 2, ...(_desktop && { premium: 'locked' as const }) },
+  'oref-sirens': { name: 'Israel Sirens', enabled: true, priority: 2 },
+  'telegram-intel': { name: 'Telegram Intel', enabled: true, priority: 2 },
   'x-intel': { name: 'X News Accounts', enabled: true, priority: 2, ...(_desktop && { premium: 'locked' as const }) },
   'airline-intel': { name: 'Airline Intelligence', enabled: true, priority: 2 },
   'tech-readiness': { name: 'Tech Readiness Index', enabled: true, priority: 2 },
@@ -1361,65 +1361,19 @@ export function isPanelEntitled(key: string, config: PanelConfig, isPro = false)
 }
 
 /**
- * Clamp a panel-settings map to the free-tier panel cap. Single source of
- * truth for the count limit so App boot, the settings/search add paths, and
- * the dashboard-tab add/switch/load paths all enforce the SAME ceiling.
- *
- * Returns a NEW map; the input is never mutated. For free users: cw-*
- * custom-widget panels are a pro
- * feature and are always disabled. The map is free baseline infrastructure
- * and never consumes a capped panel slot. Locked Pro teaser panels
- * (`premium: 'locked'`) are also excluded from the count cap and left
- * untouched so Free users keep 40 usable panels plus locked teasers. Among
- * the remaining enabled panels
- * the lowest-priority ones past FREE_MAX_PANELS are disabled (priority asc,
- * key tiebreak — identical ordering to App.enforceFreeTierLimits).
- *
- * Pro users get the same panel eligibility, plus the inverse of the cw-* gate:
- * widgets this helper previously hid are restored (see restoreProGatedPanels).
- *
- * `isPro` is passed in (rather than read here) to keep this a pure config
- * helper with no service-state dependency, matching isPanelEntitled above.
+ * Formerly clamped a panel-settings map to the free-tier panel cap
+ * (FREE_MAX_PANELS) and force-disabled cw-* custom widgets on the free
+ * tier. This fork has no paid tier to gate against, so every caller gets the
+ * unclamped treatment Pro gets: just restore any panel a PAST run of the clamp
+ * left `proGated: true` on. Kept as a named passthrough so App boot, the
+ * settings/search add paths and the dashboard-tab paths stay in lockstep.
  */
 export function enforceFreePanelLimit(
   panelSettings: Record<string, PanelConfig>,
-  isPro: boolean,
-  variant: string = SITE_VARIANT,
+  _isPro?: boolean,
+  _variant: string = SITE_VARIANT,
 ): Record<string, PanelConfig> {
-  if (isPro) return restoreProGatedPanels(panelSettings);
-
-  const next: Record<string, PanelConfig> = {};
-  for (const [key, config] of Object.entries(panelSettings)) {
-    next[key] = { ...config };
-  }
-
-  // cw-* custom widgets are pro-only — never enabled on the free tier.
-  // Stamp `proGated` so restoreProGatedPanels can tell this apart from a
-  // widget the user hid themselves and put it back when they go Pro.
-  for (const key of Object.keys(next)) {
-    if (key.startsWith('cw-') && next[key]?.enabled) {
-      next[key] = { ...next[key]!, enabled: false, proGated: true };
-    }
-  }
-
-  const enabledKeys = Object.entries(next)
-    .filter(([k, v]) => v.enabled && isFreePanelCapCounted(k, v, variant))
-    .sort(([ka, a], [kb, b]) => (a.priority ?? 99) - (b.priority ?? 99) || ka.localeCompare(kb))
-    .map(([k]) => k);
-
-  // Stamp `proGated` for the same reason the cw-* gate above does: this is the
-  // GATE disabling the panel, not the user. Without the marker the count cap
-  // was a one-way door — App.enforceFreeTierLimits persists this map into
-  // STORAGE_KEYS.panels, and restoreProGatedPanels only re-enables what is
-  // marked, so a panel clamped during any window where the tier read as free
-  // stayed `enabled: false` forever. Going Pro never brought it back: the panel
-  // kept appearing in Cmd+K and as a checked box in settings while being absent
-  // from the dashboard.
-  for (const key of enabledKeys.slice(FREE_MAX_PANELS)) {
-    next[key] = { ...next[key]!, enabled: false, proGated: true };
-  }
-
-  return next;
+  return restoreProGatedPanels(panelSettings);
 }
 
 /**

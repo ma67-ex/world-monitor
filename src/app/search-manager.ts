@@ -48,7 +48,7 @@ import type { PositionSample } from '@/services/aviation';
 import { fetchAircraftPositions } from '@/services/aviation';
 import { subscribeWidgetAccess } from '@/services/widget-store';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
-import { hasPremiumAccess } from '@/services/panel-gating';
+import { hasPremiumAccess, hasProFeatureAccess } from '@/services/panel-gating';
 import { onEntitlementChange } from '@/services/entitlements';
 import { subscribeRuntimeConfig } from '@/services/runtime-config';
 import {
@@ -558,7 +558,7 @@ export class SearchManager implements AppModule {
   }
 
   private handleLiveFlightSearch(callsign: string): void {
-    if (!hasPremiumAccess(getAuthState())) return;
+    if (!hasProFeatureAccess(getAuthState())) return;
     void this.fetchAndPublishLiveFlight(callsign)
       .then(() => {
         if (!this.destroyed) this.ctx.searchModal?.refreshSearch();
@@ -886,7 +886,7 @@ export class SearchManager implements AppModule {
   }
 
   private isSearchResultVisible(result: SearchResult): boolean {
-    if (result.type === 'flight' && !hasPremiumAccess(getAuthState())) return false;
+    if (result.type === 'flight' && !hasProFeatureAccess(getAuthState())) return false;
     const requiredLayer = this.resultRequiredLayer(result);
     if (!requiredLayer) return true;
     return getAllowedLayerKeys((SITE_VARIANT || 'full') as MapVariant).has(requiredLayer);
@@ -943,7 +943,7 @@ export class SearchManager implements AppModule {
     this.latestMilitary = [...military];
     this.latestAdsbUpdatedAt = adsbUpdatedAt;
     if (!this.ctx.searchModal) return;
-    if (!hasPremiumAccess(getAuthState())) {
+    if (!hasProFeatureAccess(getAuthState())) {
       this.flightSearchItems = [];
       this.flightSourceExpiresAt = 0;
       this.liveFlightOverlay = [];

@@ -171,3 +171,4 @@ src-tauri/notices/*
 !src-tauri/notices/.gitkeep
 
 !vendor/vercel-og/dist/
+.env*

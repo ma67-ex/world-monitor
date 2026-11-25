@@ -25286,7 +25286,10 @@ body.map-width-resizing {
    pins both pixel floors: 220px = MAP_COL_MIN_PX and 306px = PANELS_COL_MIN_PX
    + MAP_COL_DIVIDER_PX. tests/responsive-zone-listener.test.mjs pins the
    alignment. */
-@media (min-width: 1440px) {
+/* SITREP: split layout disabled so the map is a full-width hero and the
+   panel cards sit below it (scroll down). Restore by setting this back to
+   1440px and SPLIT_LAYOUT_MIN_WIDTH in src/app/split-layout.ts to 1440. */
+@media (min-width: 100000px) {
   .main-content {
     display: grid;
     grid-template-columns: min(max(var(--map-col-width, 60%), 220px), calc(100% - 306px)) 6px 1fr;

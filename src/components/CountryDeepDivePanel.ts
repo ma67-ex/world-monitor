@@ -36,7 +36,7 @@ import { toFlagEmoji } from '@/utils/country-flag';
 import { PORTS } from '@/config/ports';
 import { getChokepointRoutes } from '@/config/trade-routes';
 import { STRATEGIC_WATERWAYS } from '@/config/geo';
-import { hasPremiumAccess, readClientEntitlementBelief, readPremiumAccessGrant } from '@/services/panel-gating';
+import { hasPremiumAccess, hasProFeatureAccess, readClientEntitlementBelief, readPremiumAccessGrant } from '@/services/panel-gating';
 import { getAuthState } from '@/services/auth-state';
 import { trackGateHit } from '@/services/analytics';
 import { fetchBypassOptions, fetchChokepointStatus } from '@/services/supply-chain';
@@ -313,6 +313,11 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     return typeof this.source?.canRequestPremium === 'function'
       ? this.source.canRequestPremium()
       : hasPremiumAccess(getAuthState());
+  }
+
+  private canRequestProFeature(): boolean {
+    if (this.source?.mode === 'host') return true;
+    return this.canRequestPremium() && hasProFeatureAccess(getAuthState());
   }
 
   public selectTopic(topic: BriefTopic): void {
@@ -830,20 +835,22 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     this.foodStocksRequestId++;
     this.demographicsCapabilityRequestId++;
     if (!hasAccess) { this.cachedTradeExposureData = null; this.cachedSectors = []; }
+    const proAccess = hasAccess && this.canRequestProFeature();
     for (const id of ['trade', 'food', 'demographics', 'debt', 'sanctions', 'flows', 'tariffs', 'products', 'scenario', 'commodities'] as const) {
       const section = this.sections.find(section => section.id === id);
-      if (section) section.body.replaceChildren(hasAccess
+      const sectionAccess = id === 'demographics' || id === 'commodities' ? proAccess : hasAccess;
+      if (section) section.body.replaceChildren(sectionAccess
         ? this.makeLoading(`Loading ${section.title.toLowerCase()}…`)
         : this.makeProLocked(`Upgrade to PRO for ${section.title.toLowerCase()}`));
     }
     if (this.intelMemoryBody) {
-      this.intelMemoryBody.replaceChildren(hasAccess
+      this.intelMemoryBody.replaceChildren(proAccess
         ? this.makeLoading(t('countryBrief.intelMemory.loading'))
         : this.makeProLocked(t('countryBrief.intelMemory.proLocked')));
     }
     if (hasAccess && this.currentCode) {
       if (this.foodStocksBody) void this.renderFoodStocks(this.currentCode, this.foodStocksBody);
-      if (this.demographicsBody) void this.renderDemographicsCapability(this.currentCode, this.demographicsBody);
+      if (this.demographicsBody && proAccess) void this.renderDemographicsCapability(this.currentCode, this.demographicsBody);
       if (this.cachedTradeExposureData?.primaryChokepointId) {
         void this.loadCostShock(this.cachedTradeExposureData.primaryChokepointId);
       } else if (this.tradeExposureBody?.querySelector('.cdp-empty')) {
@@ -851,15 +858,15 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
       }
     }
     this.currentDefenseIndustrial = null;
-    this.renderDefenseIndustrialBase(hasAccess ? 'loading' : 'locked');
+    this.renderDefenseIndustrialBase(proAccess ? 'loading' : 'locked');
     if (!this.commodityVulnerabilityBody) return;
-    this.commodityVulnerabilityBody.replaceChildren(hasAccess
+    this.commodityVulnerabilityBody.replaceChildren(proAccess
       ? this.makeLoading(t('components.supplyVulnerability.loading'))
       : this.makeProLocked(t('components.supplyVulnerability.proLocked')));
   }
 
   public mountIntelMemory(code: string, signal: AbortSignal): void {
-    if (this.source?.mode === 'host' || !this.canRequestPremium() || !this.intelMemoryBody) return;
+    if (this.source?.mode === 'host' || !this.canRequestProFeature() || !this.intelMemoryBody) return;
     if (this.currentCode?.toUpperCase() !== code.toUpperCase()) return;
     if (this.signal.aborted || signal.aborted) return;
     this.destroyIntelMemory();
@@ -950,7 +957,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     // because renderMilitaryActivity() also re-runs on updateMilitaryActivity,
     // whose free-tier flight/base data stays free — without this the section
     // would simply vanish for a free viewer instead of naming the paywall.
-    if (!this.canRequestPremium()) {
+    if (!this.canRequestProFeature()) {
       body.append(this.makeProLocked(t('countryBrief.defenseIndustrialBase.proLocked')));
       return;
     }
@@ -2983,56 +2990,50 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     bypassSection.append(bypassHeading);
     const bypassContent = this.el('div');
 
-    const isPro = this.canRequestPremium();
-    if (!isPro) {
-      const gateEl = this.makeProLocked('Bypass corridors available with PRO');
-      gateEl.addEventListener('click', () => trackGateHit('sector-bypass-corridors'), { once: true });
-      bypassContent.append(gateEl);
-    } else {
-      bypassContent.append(this.makeLoading('Loading bypass options\u2026'));
-      this.sectorBypassAbort = new AbortController();
-      const signal = this.sectorBypassAbort.signal;
-      void (this.source ? this.source.bypass(sector.primaryChokepointId, combineAbortSignals([signal, this.signal])) : fetchBypassOptions(sector.primaryChokepointId, 'container', 100)).then(resp => {
-        if (signal.aborted) return;
-        bypassContent.replaceChildren();
-        const top3 = resp.options.slice(0, 3);
-        if (top3.length === 0) {
-          bypassContent.append(this.el('div', 'cdp-route-path', 'No bypass options available'));
-          return;
-        }
-        const tbl = this.el('table', 'cdp-trade-exposure-table');
-        const tHead = this.el('thead');
-        const hRow = this.el('tr');
-        hRow.append(this.el('th', '', 'Corridor'), this.el('th', '', '+Days'), this.el('th', '', '+Cost'), this.el('th', '', 'Risk'));
-        tHead.append(hRow);
-        tbl.append(tHead);
-        const tBody = this.el('tbody');
-        const riskTierMap: Record<string, string> = {
-          WAR_RISK_TIER_UNSPECIFIED: 'Unknown',
-          WAR_RISK_TIER_WAR_ZONE: 'War Zone',
-          WAR_RISK_TIER_CRITICAL: 'Critical',
-          WAR_RISK_TIER_HIGH: 'High',
-          WAR_RISK_TIER_ELEVATED: 'Elevated',
-          WAR_RISK_TIER_NORMAL: 'Normal',
-        };
-        for (const opt of top3) {
-          const r = this.el('tr');
-          r.append(
-            this.el('td', '', opt.name),
-            this.el('td', '', opt.addedTransitDays > 0 ? `+${opt.addedTransitDays}d` : '\u2014'),
-            this.el('td', '', opt.addedCostMultiplier > 1 ? `+${((opt.addedCostMultiplier - 1) * 100).toFixed(0)}%` : '\u2014'),
-            this.el('td', '', riskTierMap[opt.bypassWarRiskTier] ?? opt.bypassWarRiskTier),
-          );
-          tBody.append(r);
-        }
-        tbl.append(tBody);
-        bypassContent.append(tbl);
-      }).catch(() => {
-        if (signal.aborted) return;
-        bypassContent.replaceChildren();
-        bypassContent.append(this.el('div', 'cdp-route-path', 'Bypass data unavailable'));
-      });
-    }
+    bypassContent.append(this.makeLoading('Loading bypass options\u2026'));
+    this.sectorBypassAbort = new AbortController();
+    const signal = this.sectorBypassAbort.signal;
+    void (this.source ? this.source.bypass(sector.primaryChokepointId, combineAbortSignals([signal, this.signal])) : fetchBypassOptions(sector.primaryChokepointId, 'container', 100)).then(resp => {
+      if (signal.aborted) return;
+      bypassContent.replaceChildren();
+      const top3 = resp.options.slice(0, 3);
+      if (top3.length === 0) {
+        bypassContent.append(this.el('div', 'cdp-route-path', 'No bypass options available'));
+        return;
+      }
+      const tbl = this.el('table', 'cdp-trade-exposure-table');
+      const tHead = this.el('thead');
+      const hRow = this.el('tr');
+      hRow.append(this.el('th', '', 'Corridor'), this.el('th', '', '+Days'), this.el('th', '', '+Cost'), this.el('th', '', 'Risk'));
+      tHead.append(hRow);
+      tbl.append(tHead);
+      const tBody = this.el('tbody');
+      const riskTierMap: Record<string, string> = {
+        WAR_RISK_TIER_UNSPECIFIED: 'Unknown',
+        WAR_RISK_TIER_WAR_ZONE: 'War Zone',
+        WAR_RISK_TIER_CRITICAL: 'Critical',
+        WAR_RISK_TIER_HIGH: 'High',
+        WAR_RISK_TIER_ELEVATED: 'Elevated',
+        WAR_RISK_TIER_NORMAL: 'Normal',
+      };
+      for (const opt of top3) {
+        const r = this.el('tr');
+        r.append(
+          this.el('td', '', opt.name),
+          this.el('td', '', opt.addedTransitDays > 0 ? `+${opt.addedTransitDays}d` : '\u2014'),
+          this.el('td', '', opt.addedCostMultiplier > 1 ? `+${((opt.addedCostMultiplier - 1) * 100).toFixed(0)}%` : '\u2014'),
+          this.el('td', '', riskTierMap[opt.bypassWarRiskTier] ?? opt.bypassWarRiskTier),
+        );
+        tBody.append(r);
+      }
+      tbl.append(tBody);
+      bypassContent.append(tbl);
+    }).catch(() => {
+      if (signal.aborted) return;
+      bypassContent.replaceChildren();
+      bypassContent.append(this.el('div', 'cdp-route-path', 'Bypass data unavailable'));
+    });
+  
 
     bypassSection.append(bypassContent);
     wrap.append(bypassSection);
@@ -3767,14 +3768,9 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     });
     const evidenceButton = this.el('button', 'cdp-action-btn cdp-evidence-export-btn', 'Evidence') as HTMLButtonElement;
     evidenceButton.setAttribute('type', 'button');
-    evidenceButton.setAttribute('title', 'Export evidence bundle as Markdown (PRO)');
+    evidenceButton.setAttribute('title', 'Export evidence bundle as Markdown');
     evidenceButton.addEventListener('click', async () => {
       if (evidenceButton.disabled) return;
-      if (!this.canRequestPremium()) {
-        trackGateHit('evidence-export');
-        showToast('Evidence export is available on Pro.');
-        return;
-      }
       const signal = this.signal;
       const code = this.currentCode;
       evidenceButton.disabled = true;
@@ -3788,7 +3784,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     const decisionButton = this.el('button', 'cdp-action-btn', t('components.decisionBrief.title')) as HTMLButtonElement;
     decisionButton.type = 'button';
     decisionButton.addEventListener('click', () => {
-      if (!this.canRequestPremium()) {
+      if (!this.canRequestProFeature()) {
         trackGateHit('decision-brief');
         showToast(t('components.decisionBrief.locked'));
         return;
@@ -3798,7 +3794,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     const commodityButton = this.el('button', 'cdp-action-btn', t('components.decisionBrief.commodityTitle')) as HTMLButtonElement;
     commodityButton.type = 'button';
     commodityButton.addEventListener('click', () => {
-      if (!this.canRequestPremium()) { trackGateHit('decision-brief'); showToast(t('components.decisionBrief.locked')); return; }
+      if (!this.canRequestProFeature()) { trackGateHit('decision-brief'); showToast(t('components.decisionBrief.locked')); return; }
       void this.openDecisionBrief(commodityButton, true);
     });
     const moreActions = this.el('details', 'cdp-more-actions');
@@ -3834,7 +3830,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     summaryGrid.append(scoreCard, this.renderResilienceWidgetSlot(code));
 
     const bodyGrid = this.el('div', 'cdp-grid');
-    const isPro = this.canRequestPremium();
+    const isPro = this.canRequestProFeature();
     const [signalsCard, signalBody] = this.sectionCard('signals', t('countryBrief.activeSignals'));
     const [timelineCard, timelineBody] = this.sectionCard('timeline', t('countryBrief.timeline'));
     let historyCard: HTMLElement | undefined;
@@ -3888,16 +3884,8 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
       t('countryBrief.foodStocksHelp'),
     );
     this.foodStocksBody = foodStocksBody;
-    // Pro-gated like every other premium card in this panel. Firing the two
-    // premium RPCs for a free user cost two guaranteed 401s per deep-dive open
-    // and painted a dead "unavailable" card where the sibling cards show the
-    // upgrade prompt.
-    if (isPro) {
-      foodStocksBody.append(this.makeLoading(t('countryBrief.loadingFoodStocks')));
-      void this.renderFoodStocks(code, foodStocksBody);
-    } else {
-      foodStocksBody.append(this.makeProLocked(t('countryBrief.foodStocksProLocked')));
-    }
+    foodStocksBody.append(this.makeLoading(t('countryBrief.loadingFoodStocks')));
+    void this.renderFoodStocks(code, foodStocksBody);
 
     const [demographicsCard, demographicsBody] = this.sectionCard(
       'demographics',

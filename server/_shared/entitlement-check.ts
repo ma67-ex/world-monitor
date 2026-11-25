@@ -281,6 +281,34 @@ const ENDPOINT_ENTITLEMENTS: Record<string, number> = {
   '/api/news/v1/list-sent-alerts': 1,
 };
 
+const FORK_FREE_ENDPOINTS = new Set<string>([
+  '/api/forecast/v1/trigger-simulation',
+  '/api/intelligence/v1/classify-event',
+  '/api/intelligence/v1/get-country-intel-brief',
+  '/api/intelligence/v1/search-intel-history',
+  '/api/intelligence/v1/get-intel-timeline',
+  '/api/intelligence/v1/get-similar-events',
+  '/api/market/v1/analyze-stock',
+  '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/backtest-stock',
+  '/api/market/v1/list-stored-stock-backtests',
+  '/api/economic/v1/list-global-tenders',
+  '/api/sanctions/v1/list-sanctions-pressure',
+  '/api/scenario/v1/run-scenario',
+  '/api/scenario/v1/get-scenario-status',
+  '/api/supply-chain/v1/get-country-chokepoint-index',
+  '/api/supply-chain/v1/get-bypass-options',
+  '/api/supply-chain/v1/get-country-cost-shock',
+  '/api/supply-chain/v1/get-route-explorer-lane',
+  '/api/supply-chain/v1/get-route-impact',
+  '/api/supply-chain/v1/get-country-products',
+  '/api/supply-chain/v1/get-multi-sector-cost-shock',
+  '/api/supply-chain/v1/get-sector-dependency',
+  '/api/trade/v1/list-comtrade-flows',
+  '/api/trade/v1/get-tariff-trends',
+  '/api/resilience/v1/get-food-stocks',
+]);
+
 const CONVEX_INTERNAL_ENTITLEMENTS_PATH = '/api/internal-entitlements';
 let _didWarnMissingConvexSharedSecret = false;
 let _didWarnMissingConvexSiteUrl = false;
@@ -1016,19 +1044,34 @@ export async function checkEntitlement(
 export async function checkEntitlementDetailed(
   userId: string | null,
   pathname: string,
-  _corsHeaders: Record<string, string>,
-  _options: EntitlementCheckOptions = {},
+  corsHeaders: Record<string, string>,
+  options: EntitlementCheckOptions = {},
 ): Promise<EntitlementCheckResult> {
-  // ponytail (task 08): this fork's deploy has no Clerk/Convex/Dodo billing
-  // behind it (Akul's own decision, see docs/tasks/abdullah/08-server-entitlement-stripping.md)
-  // — tier gates never deny. getRequiredTier's map stays intact (existing
-  // tests pin it, and it still drives cache-tier classification elsewhere in
-  // gateway.ts), but the deny path below it is gone. Still resolve a real
-  // entitlement row when a userId is present so downstream telemetry/rate-limit
-  // code keeps accurate data.
-  if (getRequiredTier(pathname) === null || !userId) {
+  const requiredTier = getRequiredTier(pathname);
+  // Fork keeps these endpoints free (no billing stack behind the fork); only
+  // endpoints added after the fork point stay Pro-gated.
+  if (requiredTier === null || FORK_FREE_ENDPOINTS.has(pathname)) {
+    // Unrestricted endpoint -- no check needed
     return { response: null, entitlements: null };
   }
+
+  if (!userId) {
+    return {
+      response: new Response(
+        JSON.stringify({ error: 'Authentication required', requiredTier }),
+        { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
+      ),
+      entitlements: null,
+    };
+  }
+
+  // Preserve the legacy Pro bearer contract for tier-1 gates. Complimentary,
+  // tester, and legacy Clerk-role grants can have no Convex entitlement row,
+  // while the frontend still unlocks Pro panels for role='pro'.
+  if (options.clerkRole === 'pro' && requiredTier <= 1) {
+    return { response: null, entitlements: null };
+  }
+
   const ent = await getEntitlements(userId);
   if (!ent) {
     // An absent row is a verdict about the account only when a lookup could

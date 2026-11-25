@@ -144,6 +144,11 @@ const SOURCE_DOMAIN_OVERRIDES = new Map([
   ['SlideRule Earth', 'environment'],
   ['TradingView', 'finance'],
   ['api.rainviewer.com', 'environment'],
+  // God's Eye View map tiles/terrain (src/components/GodsEyeView.ts).
+  ['services.arcgisonline.com', 'environment'],
+  ['terrain.reearth.land', 'environment'],
+  ['tile.openstreetmap.org', 'environment'],
+  ['apewisdom.io', 'finance'],
   // #6229: NVD CVE reference store for the cyber surface (scripts/seed-cve-reference.mjs).
   ['NVD (NIST)', 'infrastructure'],
   // #6153: Moscow Exchange ISS serves the RU country stock index (scripts/_country-stock-index-moex.mjs).

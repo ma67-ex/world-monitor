@@ -1,7 +1,7 @@
 // Vercel-edge route entry. The implementation lives under ./mcp/; this file
 // stays here so the deployed route URL (`/api/mcp`) doesn't move.
 
-import { latestProtocolVersion, supportedProtocolVersions } from './mcp/constants';
+import { latestProtocolVersion, supportedProtocolVersions } from './mcp/_constants';
 
 export const config = { runtime: 'edge' };
 
@@ -36,10 +36,10 @@ export {
 // snapshots call the same env-reading functions the handler uses.
 export const MCP_SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = supportedProtocolVersions();
 export const MCP_PROTOCOL_VERSION: string = latestProtocolVersion();
-export { dispatchToolsCall, executeTool } from './mcp/dispatch';
-export { evaluateFreshness } from './mcp/freshness';
-export { applyJmespath, JMESPATH_SCHEMA } from './mcp/jmespath';
-export { reserveQuota } from './mcp/quota';
+export { dispatchToolsCall, executeTool } from './mcp/_dispatch';
+export { evaluateFreshness } from './mcp/_freshness';
+export { applyJmespath, JMESPATH_SCHEMA } from './mcp/_jmespath';
+export { reserveQuota } from './mcp/_quota';
 export {
   buildPublicTool,
   SUMMARY_SCHEMA,

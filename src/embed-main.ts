@@ -106,7 +106,7 @@ async function bootEmbed(): Promise<void> {
     }
   } catch (error) {
     console.error('[embed] Failed to boot panel:', error);
-    mountError(root, 'World Monitor embed could not load.');
+    mountError(root, 'SITREP embed could not load.');
     document.body.dataset.embedReady = 'error';
   }
 }

@@ -599,7 +599,7 @@
       "headers": [{ "key": "Origin-Trial", "value": "AuCXuVDK3hZkPQ08HW7gbY6uLk4btX+6pMLZK6pqaCTR5yp0fNlTAbtuKq7tvF0oHVlS1ICLNHBDE8F+Ipo0yg4AAABXeyJvcmlnaW4iOiJodHRwczovL2VuZXJneS53b3JsZG1vbml0b3IuYXBwOjQ0MyIsImZlYXR1cmUiOiJXZWJNQ1AiLCJleHBpcnkiOjE4MDYzNjQ4MDB9" }]
     },
     {
-      "source": "/((?!docs|embed|embed\\.html|wm-widget-sandbox\\.html).*)",
+      "source": "/((?!docs|embed|embed\\.html|cesium/|wm-widget-sandbox\\.html).*)",
       "headers": [
         { "key": "Content-Signal", "value": "ai-train=yes, search=yes, ai-input=yes" },
         { "key": "X-Content-Type-Options", "value": "nosniff" },

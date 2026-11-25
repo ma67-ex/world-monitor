@@ -3945,7 +3945,17 @@ async function _commoditySparkline(symbol, quote) {
   return { sparkline: sparkline.map((value) => (value !== 0 ? Number(value.toPrecision(7)) : value)), ...labels };
 }
 
+// Shared rate gate (#053): every fetchYahooChartDirect caller serializes through
+// one chain so independent seed loops can never burst Yahoo concurrently.
+let _yahooGateChain = Promise.resolve();
 function fetchYahooChartDirect(symbol, query = '') {
+  const run = () => _fetchYahooChartDirectRaw(symbol, query);
+  const result = _yahooGateChain.then(run, run);
+  _yahooGateChain = result.then(() => {}, () => {});
+  return result;
+}
+
+function _fetchYahooChartDirectRaw(symbol, query = '') {
   return _fetchYahooChartOnce(symbol, query).then(async (quote) => {
     if (query || !quote) return quote;
     if (!isYahooEquityIndex(symbol)) {
@@ -7954,7 +7964,7 @@ function startCiiWarmPingLoop() {
 // seconds after the interval starts, so a 5-minute tick could land just before
 // expiry and re-read the cached reading on every other tick.
 const CHOKEPOINT_WARM_PING_INTERVAL_MS = 6 * 60 * 1000;
-const CHOKEPOINT_RPC_URL = 'https://api.worldmonitor.app/api/supply-chain/v1/get-chokepoint-status';
+const CHOKEPOINT_RPC_URL = `${WM_API_BASE}/api/supply-chain/v1/get-chokepoint-status`;
 
 async function seedChokepointWarmPing() {
   try {

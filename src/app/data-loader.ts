@@ -143,7 +143,7 @@ import { addExposureCoverage, enrichEventsWithExposure, ucdpExposureEvents } fro
 import { debounce, getCircuitBreakerCooldownInfo } from '@/utils';
 import { addLocalDays, localYmd } from '@/utils/local-date';
 import { isFeatureAvailable, isFeatureEnabled } from '@/services/runtime-config';
-import { hasPremiumAccess } from '@/services/panel-gating';
+import { hasPremiumAccess, hasProFeatureAccess } from '@/services/panel-gating';
 import { isDesktopRuntime, toApiUrl } from '@/services/runtime';
 import { filterFeedsByLanguage } from '@/services/feed-language';
 import { getAiFlowSettings } from '@/services/ai-flow-settings';
@@ -3018,7 +3018,7 @@ export class DataLoaderManager implements AppModule {
       // _buildTabBar reads to decide whether the Physical tab exists — so a
       // free viewer sees the commodity tape unchanged rather than a tab that
       // opens onto a 401.
-      if (commoditiesPanel && hasPremiumAccess()) {
+      if (commoditiesPanel && hasProFeatureAccess()) {
         try {
           const physicalGeneration = this.physicalComparisonLoadGuard.begin();
           await loadPhysicalPremiumComparisonIfNeeded(
@@ -3026,7 +3026,7 @@ export class DataLoaderManager implements AppModule {
             () => (
               isCurrent()
               && this.physicalComparisonLoadGuard.isCurrent(physicalGeneration)
-              && hasPremiumAccess()
+              && hasProFeatureAccess()
             ),
             fetchPhysicalPremiums,
             fetchPhysicalDivergence,
@@ -3099,7 +3099,7 @@ export class DataLoaderManager implements AppModule {
     // This is the tab-activation entry point, so without it clicking Physical
     // would re-fire the two gated RPCs for a free user on every open.
     // Free→Pro / Pro→free transitions are handled in App.firePremiumLoaders().
-    if (!hasPremiumAccess()) return;
+    if (!hasProFeatureAccess()) return;
     const panel = this.ctx.panels['commodities'] as CommoditiesPanel | undefined;
     if (!panel) return;
     const generation = this.physicalComparisonLoadGuard.begin();
@@ -3110,7 +3110,7 @@ export class DataLoaderManager implements AppModule {
       () => (
         !signal?.aborted
         && this.physicalComparisonLoadGuard.isCurrent(generation)
-        && hasPremiumAccess()
+        && hasProFeatureAccess()
       ),
       () => fetchPhysicalPremiums(signal),
       () => fetchPhysicalDivergence(signal),
@@ -4916,13 +4916,13 @@ export class DataLoaderManager implements AppModule {
   }
 
   async loadMineralProduction(): Promise<void> {
-    if (!hasPremiumAccess()) return;
+    if (!hasProFeatureAccess()) return;
     const panel = this.ctx.panels['supply-chain'] as SupplyChainPanel | undefined;
     if (!panel) return;
     const generation = this.mineralProductionLoadGuard.begin();
     const { fetchMineralProduction } = await import('@/services/supply-chain');
     const data = await fetchMineralProduction();
-    if (!hasPremiumAccess() || !this.mineralProductionLoadGuard.isCurrent(generation)) return;
+    if (!hasProFeatureAccess() || !this.mineralProductionLoadGuard.isCurrent(generation)) return;
     panel.updateMineralProduction(data);
   }
 
@@ -5163,6 +5163,7 @@ export class DataLoaderManager implements AppModule {
         fetchGdeltTensions()
       ]);
 
+      this.pizzintHasShownData = true;
       this.ctx.pizzintIndicator?.show();
       this.ctx.pizzintIndicator?.updateStatus(status);
       this.ctx.pizzintIndicator?.updateTensions(tensions);
@@ -5485,7 +5486,7 @@ export class DataLoaderManager implements AppModule {
   }
 
   async loadXIntel(): Promise<void> {
-    if (isDesktopRuntime() && !hasPremiumAccess()) return;
+    if (isDesktopRuntime() && !hasProFeatureAccess()) return;
     // `xFeed` is intentionally NOT a bootstrap tier key (R4, #6654): its items
     // carry post bodies, and every tier is served unauthenticated at
     // `?tier=<t>&public=1` with ACAO:*. So this read is inert today and always

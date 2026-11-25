@@ -19,7 +19,11 @@ export function classifyPublicBootstrapUrl(parsedUrl) {
   const pathname = stripTrailingSlashes(parsedUrl.pathname);
   if (pathname !== '/api/bootstrap') return null;
 
+  // api/misc-gateway/[name].ts is a Vercel dynamic route: the platform echoes
+  // the matched segment back as `?name=bootstrap`. Strip it so the exact-shape
+  // check below doesn't 401 every anonymous public request.
   const paramNames = new Set(parsedUrl.searchParams.keys());
+  if (parsedUrl.searchParams.get('name') === 'bootstrap') paramNames.delete('name');
   const publicParams = parsedUrl.searchParams.getAll('public');
   if (paramNames.size !== 2 || !paramNames.has('public')) return null;
   if (publicParams.length !== 1 || publicParams[0] !== '1') return null;

@@ -58,6 +58,7 @@ import { collectStoryData } from '@/services/story-data';
 // (post-paint), so the import() latency is hidden.
 
 import { hasPremiumAccess, readClientEntitlementBelief } from '@/services/panel-gating';
+import { hasUserAiKey, generateStructuredCompletion } from '@/services/user-ai-keys';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
 import { onEntitlementChange } from '@/services/entitlements';
 import { showMapContextMenu, type MapContextMenuItem } from '@/components/MapContextMenu';
@@ -870,7 +871,11 @@ export class CountryIntelManager implements AppModule {
           const countryFw = getActiveFrameworkForPanel('country-brief');
           // A denial can arrive after a sign-in or an entitlement change.
           presentation.briefAccessRevision = this.briefAccessRevision;
-          briefResult = await this.fetchCountryIntelBrief(code, contextSnapshot, countryFw?.systemPromptAppend ?? '');
+          const fwText = countryFw?.systemPromptAppend ?? '';
+          // Fork fallback: non-premium users with their own Groq/OpenRouter key skip the paid RPC.
+          briefResult = !hasPremiumAccess(getAuthState()) && hasUserAiKey()
+            ? await this.generateCountryIntelBriefFromUserKey(contextSnapshot, fwText, briefSources)
+            : await this.fetchCountryIntelBrief(code, contextSnapshot, fwText);
           briefText = briefResult.brief;
         } catch { /* server unreachable */ }
         if (!this.isCurrentBriefRequest(request) || !this.isCurrentPresentation(presentation)) return;
@@ -1057,6 +1062,25 @@ export class CountryIntelManager implements AppModule {
     if (!code || code === '__loading__' || code === '__error__') return;
     const country = page.getName() ?? CountryIntelManager.resolveCountryName(code);
     this.mountCountryTimeline(code, country, this.currentCoverageEvents);
+  }
+
+  /** BYOK fallback (Groq/OpenRouter via services/user-ai-keys.ts) for non-premium users; sources are the client-collected headlines. */
+  private async generateCountryIntelBriefFromUserKey(
+    contextSnapshot: string,
+    framework: string,
+    briefSources: BriefSource[],
+  ): Promise<CountryIntelBriefResult> {
+    const systemPrompt = `You are a geopolitical intelligence analyst writing a concise country brief for an intelligence dashboard.
+Given real signal data for a country (CII score, event counts, recent headlines, infrastructure context), write a short brief (3-5 sentences) summarizing the current situation and its trajectory.
+${framework ? `Apply this analytical framework: ${framework}\n` : ''}Respond ONLY with a JSON object: { "brief": string }. Be specific and grounded strictly in the given data — never invent facts.`;
+    try {
+      const parsed = await generateStructuredCompletion(systemPrompt, contextSnapshot) as { brief?: string };
+      const brief = typeof parsed.brief === 'string' ? parsed.brief.trim() : '';
+      return { brief, sources: brief ? briefSources : [], evidence: [], generatedAt: brief ? new Date().toISOString() : undefined };
+    } catch (err) {
+      console.warn('[CountryIntel] User-key brief generation failed:', err);
+      return { brief: '', sources: [], evidence: [] };
+    }
   }
 
   private async fetchCountryIntelBrief(code: string, contextSnapshot: string, framework = ''): Promise<CountryIntelBriefResult> {

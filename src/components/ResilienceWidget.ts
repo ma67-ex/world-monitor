@@ -4,7 +4,7 @@ import {
   onEntitlementChange,
   onEntitlementVerificationChange,
 } from '@/services/entitlements';
-import { PanelGateReason, getPanelGateReason } from '@/services/panel-gating';
+import { PanelGateReason } from '@/services/panel-gating';
 import { loadStoredMissionPreset, onMissionPresetChange } from '@/services/mission-presets';
 import { trackProPreviewCta, trackProPreviewViewed } from '@/services/analytics';
 import { isProTierResolved } from '@/services/widget-store';
@@ -213,7 +213,13 @@ export class ResilienceWidget {
   }
 
   private getGateReason(): PanelGateReason {
-    return this.managed ? PanelGateReason.NONE : getPanelGateReason(this.authState, true);
+    // De-paywalled on this fork: getResilienceScore() (src/services/resilience.ts)
+    // now serves a real free composite score to non-entitled users instead of
+    // WorldMonitor's paid RPC, so the Pro lock/CTA below no longer applies.
+    // A real Pro entitlement (if this deploy ever has one) still gets
+    // WorldMonitor's actual model -- that precedence lives in the service,
+    // not here.
+    return PanelGateReason.NONE;
   }
 
   private render(): void {

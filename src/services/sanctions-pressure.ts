@@ -4,6 +4,7 @@ import { premiumFetch } from '@/services/premium-fetch';
 import { getHydratedData } from '@/services/bootstrap';
 import { hasPremiumAccess } from '@/services/panel-gating';
 import { toApiUrl } from '@/services/runtime';
+import { nameToCountryCode } from '@/services/country-geometry';
 import type { SanctionsEntry as ProtoSanctionsEntry, SanctionsEntityType as ProtoSanctionsEntityType, CountrySanctionsPressure as ProtoCountryPressure, ProgramSanctionsPressure as ProtoProgramPressure, ListSanctionsPressureResponse, UnattributedSanctionsPressure, FlagRegistrySanctionsPressure } from '@/generated/client/worldmonitor/sanctions/v1/service_client';
 import { SanctionsServiceClient } from '@/services/generated-rpc-clients';
 import { normalizeFlagRegistries, splitSanctionsAttribution } from '../../shared/sanctions-attribution';
@@ -195,6 +196,44 @@ function isCacheableSanctionsPressureResult(result: SanctionsPressureResult): bo
   return result.totalCount > 0 && result.semaError === null;
 }
 
+// Fork fallback (additive): when the shared bootstrap seed is empty (self-hosted
+// fork with no seeder), use api/_sanctions-ofac-proxy.ts, a free OFAC SDN
+// per-country/per-program aggregate (no per-entity `entries`).
+interface OfacAggregateResponse {
+  fetchedAt: number;
+  datasetDate: string | null;
+  totalCount: number;
+  newEntryCount: number;
+  vesselCount: number;
+  aircraftCount: number;
+  countries: { countryName: string; entryCount: number; newEntryCount: number; vesselCount: number; aircraftCount: number }[];
+  programs: ProgramSanctionsPressure[];
+}
+
+async function fetchSanctionsPressureFromOfacProxy(): Promise<SanctionsPressureResult | null> {
+  try {
+    // Generous: a cache-miss re-triggers the proxy's ~45s upstream parse.
+    const resp = await fetch(toApiUrl('/api/sanctions-ofac-proxy'), { signal: AbortSignal.timeout(60_000) });
+    if (!resp.ok) return null;
+    const raw = (await resp.json()) as OfacAggregateResponse;
+    if (!raw?.totalCount) return null;
+    return {
+      ...emptyResult,
+      fetchedAt: new Date(raw.fetchedAt),
+      datasetDate: raw.datasetDate ? new Date(raw.datasetDate) : null,
+      totalCount: raw.totalCount,
+      sdnCount: raw.totalCount,
+      newEntryCount: raw.newEntryCount,
+      vesselCount: raw.vesselCount,
+      aircraftCount: raw.aircraftCount,
+      countries: raw.countries.map((c) => ({ ...c, countryCode: nameToCountryCode(c.countryName) ?? '' })),
+      programs: raw.programs,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchSanctionsPressure(): Promise<SanctionsPressureResult> {
   const hydrated = getHydratedData('sanctionsPressure') as ListSanctionsPressureResponse | undefined;
   if (hydrated?.entries?.length || hydrated?.countries?.length || hydrated?.programs?.length) {
@@ -238,6 +277,13 @@ export async function fetchSanctionsPressure(): Promise<SanctionsPressureResult>
     }, emptyResult, {
       shouldCache: isCacheableSanctionsPressureResult,
     });
+    if (result.totalCount === 0) {
+      const ofac = await fetchSanctionsPressureFromOfacProxy();
+      if (ofac) {
+        latestSanctionsPressureResult = ofac;
+        return ofac;
+      }
+    }
     latestSanctionsPressureResult = result;
     return result;
   }

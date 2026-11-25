@@ -21,7 +21,7 @@ import { openExternalUrl } from './external-navigation';
 import type { ClientEntitlementBelief } from './premium-denial';
 import { getSecretState } from './runtime-config';
 import { isSelfHostKeyUnlocked } from './self-host-key';
-import { isProUser } from './widget-store';
+import { isProUserReal } from './widget-store';
 import { openUpgradePlans } from './upgrade-flow';
 
 export enum PanelGateReason {
@@ -54,7 +54,16 @@ export enum PanelGateReason {
  * agrees with panel gating. That keeps this function a thin union of
  * signals that aren't already covered by isProUser.
  */
-export function hasPremiumAccess(authState?: AuthSession): boolean {
+export function hasPremiumAccess(_authState?: AuthSession): boolean {
+  // Pro paywall disabled — every panel unlocks without sign-up or payment.
+  return true;
+}
+
+/**
+ * The real access union. Used only by Pro features added after the fork
+ * point, which stay locked for free users.
+ */
+export function hasProFeatureAccess(authState?: AuthSession): boolean {
   return readPremiumAccessGrant(authState) !== 'none';
 }
 
@@ -86,7 +95,7 @@ export function readPremiumAccessGrant(authState?: AuthSession): PremiumAccessGr
   // reports it as its own source. Like api_key it says nothing about the
   // signed-in account.
   if (isSelfHostKeyUnlocked()) return 'self_host_key';
-  if (isProUser()) return 'pro_user';
+  if (isProUserReal()) return 'pro_user';
   if (authState?.user?.role === 'pro') return 'auth_role';
   return 'none';
 }

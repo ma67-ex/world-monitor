@@ -5,7 +5,7 @@ import { fetchHormuzTracker } from '@/services/hormuz-tracker';
 import type { HormuzTrackerData, HormuzChart, HormuzSeries } from '@/services/hormuz-tracker';
 import { fetchChokepointDependencies } from '@/services/supply-chain';
 import type { GetChokepointDependenciesResponse } from '@/services/supply-chain';
-import { hasPremiumAccess } from '@/services/panel-gating';
+import { hasProFeatureAccess } from '@/services/panel-gating';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
 import { onEntitlementChange } from '@/services/entitlements';
 
@@ -129,7 +129,7 @@ export class HormuzPanel extends Panel {
 
   constructor() {
     super({ id: 'hormuz-tracker', title: t('components.hormuzTracker.title'), showCount: false, infoTooltip: t('components.hormuzTracker.infoTooltip') });
-    this.lastHadPremium = hasPremiumAccess(getAuthState());
+    this.lastHadPremium = hasProFeatureAccess(getAuthState());
     this.authUnsubscribe = subscribeAuthState(() => this.handlePremiumAccessChange());
     this.entitlementUnsubscribe = onEntitlementChange(() => this.handlePremiumAccessChange());
     window.addEventListener(I18N_RESOURCES_LOADED_EVENT, this.handleTranslationsLoaded);
@@ -151,7 +151,7 @@ export class HormuzPanel extends Panel {
     // The Hormuz tape itself stays free; only the commodity-dependency fan-out
     // over it is Pro (#6449). Gate just that leg so a free viewer keeps the
     // tracker and sees an upgrade line where the dependencies would be.
-    const isPro = hasPremiumAccess(getAuthState());
+    const isPro = hasProFeatureAccess(getAuthState());
     this.dependencyState = isPro ? 'loading' : 'pro-locked';
     let dependencyRequest = isPro ? this.startDependencyRequest() : null;
     try {
@@ -164,7 +164,7 @@ export class HormuzPanel extends Panel {
       this.data = data;
       this.showingData = true;
       this.dependencies = null;
-      const currentIsPro = hasPremiumAccess(getAuthState());
+      const currentIsPro = hasProFeatureAccess(getAuthState());
       if (currentIsPro) {
         this.dependencyState = 'loading';
         if (!dependencyRequest || dependencyRequest.generation !== this.dependencyGeneration) {
@@ -181,7 +181,7 @@ export class HormuzPanel extends Panel {
           this.signal.aborted ||
           generation !== this.fetchGeneration ||
           dependencyRequest?.generation !== this.dependencyGeneration ||
-          !hasPremiumAccess(getAuthState())
+          !hasProFeatureAccess(getAuthState())
         ) return;
         this.dependencies = dependencies;
         this.dependencyState = dependencies?.upstreamUnavailable === false
@@ -208,7 +208,7 @@ export class HormuzPanel extends Panel {
   }
 
   private handlePremiumAccessChange(): void {
-    const hasPremium = hasPremiumAccess(getAuthState());
+    const hasPremium = hasProFeatureAccess(getAuthState());
     if (hasPremium === this.lastHadPremium) return;
     this.lastHadPremium = hasPremium;
 
@@ -222,7 +222,7 @@ export class HormuzPanel extends Panel {
         if (
           this.signal.aborted ||
           dependencyRequest.generation !== this.dependencyGeneration ||
-          !hasPremiumAccess(getAuthState())
+          !hasProFeatureAccess(getAuthState())
         ) return;
         this.dependencies = dependencies;
         this.dependencyState = dependencies?.upstreamUnavailable === false

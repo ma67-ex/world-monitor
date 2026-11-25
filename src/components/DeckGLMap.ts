@@ -155,7 +155,7 @@ import { isProTierResolved } from '@/services/widget-store';
 import { layerExplanationLookup, renderLayerExplanationCard } from '@/utils/layer-explanation-card';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
 import { onEntitlementChange } from '@/services/entitlements';
-import { hasPremiumAccess } from '@/services/panel-gating';
+import { hasPremiumAccess, hasProFeatureAccess } from '@/services/panel-gating';
 import { trackGateHit } from '@/services/analytics';
 import { MapPopup, type PopupType } from './MapPopup';
 import { fireDetectionPopupData } from './map-popup-fire';
@@ -7616,7 +7616,7 @@ export class DeckGLMap {
     const scenarioHit = (this.scenarioState?.disruptedChokepointIds ?? []).some((id) => lane.chokepointIds.includes(id));
     const color = scenarioHit
       ? scenario
-      : !hasPremiumAccess(getAuthState())
+      : !hasProFeatureAccess(getAuthState())
         ? active
         : maxScore >= 70 ? disrupted : maxScore > 30 ? highRisk : active;
     const legs: BypassArcDatum[] = [];

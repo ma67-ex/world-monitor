@@ -10,6 +10,14 @@ export function isHostedAppOrigin(origin) {
 
 const ALLOWED_ORIGIN_PATTERNS = [
   APP_ORIGIN_PATTERN,
+  // Fork deploy origins (SITREP / ma67-ex forks). Tight on purpose: never a bare *.vercel.app.
+  /^https:\/\/worldmonitor-one-theta\.vercel\.app$/,
+  /^https:\/\/worldmonitor(-[a-z0-9-]+)?-akul-sharmas-projects-8d7c98ac\.vercel\.app$/,
+  /^https:\/\/worldmonitor-roan-one\.vercel\.app$/,
+  /^https:\/\/worldmonitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
+  /^https:\/\/ma67-ex-worldmonitor\.vercel\.app$/,
+  /^https:\/\/ma67-ex-worldmonitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
+  /^https:\/\/(.*\.)?sitrep\.app$/,
   /^https?:\/\/tauri\.localhost(:\d+)?$/,
   /^https?:\/\/[a-z0-9-]+\.tauri\.localhost(:\d+)?$/i,
   /^tauri:\/\/localhost$/,

@@ -120,6 +120,8 @@ const PANEL_CLUSTER: Record<string, PanelChunkName> = {
   NewsMarketCorrelation: 'panels-markets',
   NqCatalysts: 'panels-markets', NqPulse: 'panels-markets',
   Positioning: 'panels-markets', Stablecoin: 'panels-markets',
+  CongressTrading: 'panels-markets', PotusTracker: 'panels-markets',
+  MiningMonitor: 'panels-markets', StaticJson: 'panels-markets',
   IndiaMarkets: 'panels-markets', GlobalMarkets: 'panels-markets',
   StockAnalysis: 'panels-markets', StockBacktest: 'panels-markets',
   WsbTickerScanner: 'panels-markets', YieldCurve: 'panels-markets',
@@ -1212,9 +1214,6 @@ export default defineConfig(({ mode, command }) => {
       rssProxyPlugin(),
       miitNewsPlugin(),
       gpsjamDevPlugin(),
-      sanctionsOfacProxyDevPlugin(),
-      hormuzTrackerDevPlugin(),
-      gatewayRouteDevPlugin(),
       sebufApiPlugin(),
       // Must stay after every plugin that serves /api/* in dev.
       devApiSourceGuardPlugin(),

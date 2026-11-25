@@ -116,7 +116,7 @@ test('dual wm-pro-key cookies use the first value sent by the browser', async ()
 
 test('a stale wm-session cookie does not shadow a later valid one', async () => {
   // Browsers send an older host-only wm-session before a newer
-  // Domain=.worldmonitor.app one. The tombstone in api/wm-session.js only
+  // Domain=.worldmonitor.app one. The tombstone in api/_wm-session.js only
   // clears it once the browser re-mints on the api host, so the reader must
   // not stop at the first stale value.
   const { token } = await issueSessionToken();

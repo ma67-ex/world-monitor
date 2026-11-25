@@ -48,8 +48,8 @@ import { buildPreMeta, buildFinalMeta } from './regional-snapshot/snapshot-meta.
 import { diffRegionalSnapshot, inferTriggerReason } from './regional-snapshot/diff-snapshot.mjs';
 import { persistSnapshot, readLatestSnapshot } from './regional-snapshot/persist-snapshot.mjs';
 import { ALL_INPUT_KEYS, ALL_META_KEYS } from './regional-snapshot/freshness.mjs';
-import { generateSnapshotId, unwrapEnvelope } from './regional-snapshot/_helpers.mjs';
 import { hydrateEnergyImportAggregate } from './regional-snapshot/_energy-import-aggregate.mjs';
+import { generateSnapshotId, unwrapEnvelope, getCaseFileText } from './regional-snapshot/_helpers.mjs';
 import { generateRegionalNarrative, emptyNarrative } from './regional-snapshot/narrative.mjs';
 import { emitRegionalAlerts } from './regional-snapshot/alert-emitter.mjs';
 import { buildMobilityState } from './regional-snapshot/mobility.mjs';
@@ -322,24 +322,28 @@ async function main() {
   const t0 = Date.now();
   console.log(`[regional-snapshots] Starting compute for ${REGIONS.length} regions`);
 
-  // Step 1: read all inputs once (shared across regions), plus seed-meta
-  // companions for inputs whose payloads lack top-level timestamps.
-  const { sources, metaSources } = await readAllInputs();
-  // Fail closed before compute and persistence when the audited producer,
-  // its transport, or any indexed country row is incomplete.
-  await hydrateEnergyImportAggregate(
-    sources,
-    readRedisKeys,
-    metaSources['seed-meta:resilience:static'],
-  );
-  const presentKeys = Object.entries(sources).filter(([, v]) => v !== null).length;
-  const presentMetaKeys = Object.entries(metaSources).filter(([, v]) => v !== null).length;
-  console.log(`[regional-snapshots] Read inputs: ${presentKeys}/${ALL_INPUT_KEYS.length} keys present, ${presentMetaKeys}/${ALL_META_KEYS.length} meta keys present`);
+  const runId = `${t0}-${Math.random().toString(16).slice(2, 8)}`;
+  const lockResult = await acquireLockSafely(SNAPSHOT_LOCK_DOMAIN, runId, SNAPSHOT_LOCK_TTL_MS);
+  if (!lockResult.locked) {
+    if (lockResult.skipped) {
+      console.warn('[regional-snapshots] Redis unavailable during lock acquisition; skipping run');
+    } else {
+      console.log('[regional-snapshots] Skipped: another run holds the lock');
+    }
+    return;
+  }
 
   try {
     // Step 1: read all inputs once (shared across regions), plus seed-meta
     // companions for inputs whose payloads lack top-level timestamps.
     const { sources, metaSources } = await readAllInputs();
+    // Fail closed before compute and persistence when the audited producer,
+    // its transport, or any indexed country row is incomplete.
+    await hydrateEnergyImportAggregate(
+      sources,
+      readRedisKeys,
+      metaSources['seed-meta:resilience:static'],
+    );
     const presentKeys = Object.entries(sources).filter(([, v]) => v !== null).length;
     const presentMetaKeys = Object.entries(metaSources).filter(([, v]) => v !== null).length;
     console.log(`[regional-snapshots] Read inputs: ${presentKeys}/${ALL_INPUT_KEYS.length} keys present, ${presentMetaKeys}/${ALL_META_KEYS.length} meta keys present`);

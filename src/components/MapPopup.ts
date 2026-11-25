@@ -48,7 +48,7 @@ import { sparkline } from '@/utils/sparkline';
 import { vesselTypeLabel } from '@/utils/vessel-type-label';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
 import { onEntitlementChange } from '@/services/entitlements';
-import { hasPremiumAccess } from '@/services/panel-gating';
+import { hasPremiumAccess, hasProFeatureAccess } from '@/services/panel-gating';
 import { trackGateHit } from '@/services/analytics';
 import { bindCyberNetworkSection, renderCyberNetworkSection } from './cyber-network-info';
 import { renderPopupSourceLinks } from './map-popup-source-links';
@@ -345,7 +345,7 @@ export class MapPopup {
       let eventCompare: EventCompareHooks | undefined;
       let unsubscribeAuth: (() => void) | null = null;
       if (eventMs !== null) {
-        const access = hasPremiumAccess(getAuthState()) ? 'open' : 'locked';
+        const access = hasProFeatureAccess(getAuthState()) ? 'open' : 'locked';
         if (access === 'locked') trackGateHit('orbital-event-compare');
         eventCompare = {
           eventMs,
@@ -359,7 +359,7 @@ export class MapPopup {
         // Access confirmed after the popup opened (sign-in or entitlements still loading) unlocks the row in place.
         if (access === 'locked') {
           const unlock = (state = getAuthState()) => {
-            if (this.popup !== popup || !hasPremiumAccess(state)) return;
+            if (this.popup !== popup || !hasProFeatureAccess(state)) return;
             this.disposeImagery?.();
             this.disposeImagery = null;
             row.remove();

@@ -113,6 +113,84 @@ function normalizeOffer(offer, item, currency, fxRate) {
   return price;
 }
 
+// Numbeo publishes real per-country grocery prices as plain static HTML — free,
+// no key, no CAPTCHA (unlike search-engine scraping). Covers 5 of our 10 items;
+// the rest (sugar, salt, pasta, oil, flour) aren't tracked by Numbeo at all and
+// stay on the existing search/EXA/Firecrawl ladder below. Labels are stable
+// English text regardless of the country page (confirmed across US/JP/etc).
+// LB_TO_KG converts Numbeo's imperial units to our kg-based item units.
+const LB_TO_KG = 2.2046226218;
+const NUMBEO_ITEM_LABELS = {
+  milk: { label: 'Milk (Regular, 1 Liter)', unitScale: 1 },
+  rice: { label: 'White Rice (1 lb)', unitScale: LB_TO_KG },
+  potatoes: { label: 'Potatoes (1 lb)', unitScale: LB_TO_KG },
+  eggs: { label: 'Eggs (12, Large Size)', unitScale: 1 },
+  bread: { label: 'Fresh White Bread (1 lb Loaf)', unitScale: 1 }, // loaf-for-loaf, no unit conversion
+};
+
+export async function fetchNumbeoCountryPrices(countryName, { fetchFn = fetch } = {}) {
+  const url = `https://www.numbeo.com/cost-of-living/country_result.jsp?country=${encodeURIComponent(countryName)}`;
+  const prices = new Map();
+  try {
+    const resp = await fetchFn(url, {
+      headers: { 'User-Agent': CHROME_UA },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) {
+      console.warn(`  Numbeo ${resp.status} for ${countryName}`);
+      return prices;
+    }
+    const html = await resp.text();
+    for (const [itemId, { label, unitScale }] of Object.entries(NUMBEO_ITEM_LABELS)) {
+      // Numbeo prefixes the price with an HTML numeric entity for the currency
+      // symbol (e.g. &#36; for $) — that entity's own digits ("36") would be
+      // mismatched as the price by a naive [^\d]* skip, so match it explicitly.
+      const re = new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*</td>\\s*<td[^>]*class="priceValue[^"]*"[^>]*>\\s*<span[^>]*>(?:&#\\d+;)?\\s*([\\d,]+\\.?\\d*)</span>`);
+      const match = html.match(re);
+      if (!match) continue;
+      const rawPrice = parseFloat(match[1].replace(/,/g, ''));
+      if (Number.isFinite(rawPrice) && rawPrice > 0) {
+        prices.set(itemId, +(rawPrice * unitScale).toFixed(4));
+      }
+    }
+  } catch (err) {
+    console.warn(`  Numbeo error for ${countryName}: ${err.message}`);
+  }
+  return prices;
+}
+
+// Free/self-hosted URL discovery (SEARXNG_URL), site:-restricted to the same
+// retailer domains EXA would target. Only URLs are used: the offer itself is still
+// verified by the structured Firecrawl extraction, never taken from a snippet.
+async function searchSearxng(query, sites) {
+  const baseUrl = process.env.SEARXNG_URL;
+  if (!baseUrl) return null;
+
+  const siteFilter = sites?.length ? ` (${sites.map(s => `site:${s}`).join(' OR ')})` : '';
+  const url = new URL('/search', baseUrl);
+  url.searchParams.set('q', query + siteFilter);
+  url.searchParams.set('format', 'json');
+
+  try {
+    const resp = await fetch(url, {
+      headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) {
+      console.warn(`  SearXNG ${resp.status}`);
+      return null;
+    }
+    const payload = await resp.json();
+    const results = (payload.results || [])
+      .filter(r => r.content || r.title)
+      .map(r => ({ summary: r.content || '', title: r.title || '', url: r.url || '' }));
+    return results.length ? { results } : null;
+  } catch (err) {
+    console.warn(`  SearXNG error: ${err.message}`);
+    return null;
+  }
+}
+
 async function searchExa(item, country) {
   const apiKey = (process.env.EXA_API_KEYS || process.env.EXA_API_KEY || '').split(/[\n,]+/)[0].trim();
   if (!apiKey) throw new Error('EXA_API_KEYS or EXA_API_KEY not set');
@@ -209,9 +287,32 @@ const ITEM_USD_MAX = { sugar: 3.5, salt: 2.5, rice: 6, pasta: 3.5, potatoes: 6, 
 export async function fetchCountryItems(country, { fxRate, learnedRoutes, routeUpdates, routeDeletes, processItemRouteFn = processItemRoute }) {
   console.log(`\n  Processing ${country.flag} ${country.name} (${country.currency})...`);
   const allowedHosts = country.sites.map(s => s.replace(/^www\./, '').split('/')[0]);
+  // Numbeo covers 5 items per country in one free static-page fetch; items it prices
+  // within the plausibility cap skip the learned-route/EXA/Firecrawl ladder entirely.
+  const numbeoPrices = await fetchNumbeoCountryPrices(country.name);
 
   // Process all items concurrently — 100ms stagger to respect EXA/Firecrawl rate limits
   const settled = await Promise.allSettled(config.items.map(async (item, idx) => {
+    const numbeoPrice = numbeoPrices.get(item.id);
+    if (numbeoPrice != null) {
+      const usdEquiv = fxRate ? numbeoPrice * fxRate : null;
+      if (!ITEM_USD_MAX[item.id] || !usdEquiv || usdEquiv <= ITEM_USD_MAX[item.id]) {
+        const usdPrice = usdEquiv != null ? +usdEquiv.toFixed(4) : null;
+        console.log(`    [${country.code}] ${item.id}: ${numbeoPrice} ${country.currency} = $${usdPrice} (numbeo)`);
+        return {
+          itemId: item.id,
+          itemName: item.name,
+          unit: item.unit,
+          localPrice: numbeoPrice,
+          usdPrice,
+          currency: country.currency,
+          sourceSite: 'https://www.numbeo.com',
+          available: true,
+        };
+      }
+      console.warn(`    [${country.code}] numbeo ${item.id}: ${numbeoPrice} ${country.currency} ($${usdEquiv.toFixed(2)}) > max $${ITEM_USD_MAX[item.id]} — skipping`);
+    }
+
     await sleep(idx * 200); // stagger starts — 200ms prevents EXA rate limit with 10 concurrent
 
     const routeKey = `${country.code}:${item.id}`;
@@ -244,6 +345,12 @@ export async function fetchCountryItems(country, { fxRate, learnedRoutes, routeU
           }
         } catch (err) {
           console.warn(`    [${country.code}/${item.id}] EXA error: ${err.message}`);
+        }
+        if (!urls.length) {
+          const searx = await searchSearxng(`${item.query} price`, country.sites);
+          for (const entry of searx?.results ?? []) {
+            if (isAllowedRouteHost(entry.url, allowedHosts) && !isListingUrl(entry.url)) urls.push(entry.url);
+          }
         }
         for (const url of urls.slice(0, 2)) {
           const offer = await scrapeFirecrawl(url, item, country.currency, fxRate);

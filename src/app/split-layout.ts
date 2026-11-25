@@ -10,7 +10,8 @@
  * layout (map band above the panel grid) to the split layout (map column
  * beside the panels). At 1440px the default 60% map leaves room for two
  * 270px panel tracks plus gaps/padding. Shared by web and desktop (#10458). */
-export const SPLIT_LAYOUT_MIN_WIDTH = 1440;
+// SITREP: 100000 disables the split layout (map hero + cards below). Use 1440 to restore.
+export const SPLIT_LAYOUT_MIN_WIDTH = 100000;
 
 /** Whether the viewport is in the split layout, read the way the stylesheet
  * reads it. `window.innerWidth` is a rounded integer, so at a fractional

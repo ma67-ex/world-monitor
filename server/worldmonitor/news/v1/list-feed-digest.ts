@@ -218,7 +218,9 @@ const POST_FETCH_HEADROOM_MS = 15_000;
 const RESPONSE_GUARD_BAND_MS = 3_000;
 const RESPONSE_DEADLINE_MS = VERCEL_INITIAL_RESPONSE_LIMIT_MS - RESPONSE_GUARD_BAND_MS;
 const OVERALL_DEADLINE_MS = VERCEL_INITIAL_RESPONSE_LIMIT_MS - POST_FETCH_HEADROOM_MS;
-const BATCH_CONCURRENCY = 20;
+// 20 -> 40: a cold cache is fetch-bound, not cache-bound; doubling batch width
+// lets each attempt reach about twice as many feeds before the deadline.
+const BATCH_CONCURRENCY = 40;
 const MAX_REDIS_PIPELINE_COMMANDS = 1000;
 const STORY_BATCH_SIZE = 80; // bounds per-story work; command chunks enforce the hard cap
 // #4925 item 1: canonical adoption reads two commands per member hash
@@ -1078,6 +1080,9 @@ export async function fetchAndParseRss(
   feed: ServerFeed,
   variant: string,
   signal: AbortSignal,
+  // One getCachedJsonBatch() across the whole build (see buildDigest) instead
+  // of a cache round-trip per feed. A miss falls through to getCachedJson.
+  prefetchedCache?: Map<string, unknown>,
 ): Promise<ParseResult> {
   // Cache key is rss:feed:v11 from rssFeedCacheKey in _rss-cache.ts. Digest readers must call that helper so they share one prefix.
   const cacheKey = rssFeedCacheKey(variant, feed.url);
@@ -1086,7 +1091,7 @@ export async function fetchAndParseRss(
     // Read the cache on every call. A cached zero-item parse is the throttle.
     // setCachedJson writes it with CACHE_TTL_EMPTY_S, so the next request
     // within 5 minutes hits cache instead of upstream.
-    const cached = (await getCachedJson(cacheKey)) as ParseResult | null;
+    const cached = (prefetchedCache?.get(cacheKey) ?? await getCachedJson(cacheKey)) as ParseResult | null;
     if (cached) {
       if (cached.parsedTotal === 0 && cached.items.length === 0) {
         // Only a cached prior fetch failure is negative. A valid RSS body
@@ -2688,7 +2693,7 @@ export async function listFeedDigest(
         async () => {
           leaderSlot = beginDigestAttempt(variant, lang, attemptedAt);
           try {
-            const result = await buildDigest(variant, lang, (await revokedPromise).urls);
+            const result = await buildDigest(variant, lang, OVERALL_DEADLINE_MS, (await revokedPromise).urls);
             const totalItems = Object.values(result.categories).reduce((sum, b) => sum + b.items.length, 0);
             if (totalItems > 0) {
               leaderSlot = finishSuccessfulDigestAttempt(variant, lang, leaderSlot);
@@ -3777,9 +3782,12 @@ function buildDigestFeedBatches(variant: string, lang: string): {
   return { allEntries, batches };
 }
 
-async function buildDigest(
+// overallDeadlineMs defaults to the Vercel Edge budget; scripts/seed-news-digest.mts
+// passes a longer one (Railway child process, no platform response ceiling).
+export async function buildDigest(
   variant: string,
   lang: string,
+  overallDeadlineMs: number = OVERALL_DEADLINE_MS,
   // #7084: the operator suppression set, threaded in so a revoked item is
   // dropped BEFORE the per-category cap rather than after it. Filtering only
   // at serve time left a hole: the revoked item had already taken a cap slot,
@@ -3808,7 +3816,7 @@ async function buildDigest(
     // failure here just means every feed falls through to its own
     // individual getCachedJson read, identical to pre-batching behavior.
     const prefetchedCache = await getCachedJsonBatch(
-      allEntries.map(({ feed }) => feedCacheKey(variant, feed)),
+      allEntries.map(({ feed }) => rssFeedCacheKey(variant, feed.url)),
     ).catch(() => new Map<string, unknown>());
 
     const results = new Map<string, ParsedItem[]>();
@@ -3819,7 +3827,7 @@ async function buildDigest(
       deadlineController.signal,
       async (entry) => {
         const { category, feed } = entry;
-        const result = await fetchAndParseRss(feed, variant, deadlineController.signal);
+        const result = await fetchAndParseRss(feed, variant, deadlineController.signal, prefetchedCache);
         const outcome = classifyFeedAttempt(true, result.attempt ?? {
           source: 'cache', failure: null, negativeCache: false,
         }, {
@@ -3885,7 +3893,7 @@ async function buildDigest(
       const { byOutcome, byCategory, headroomMs } = summarizeFeedAttempts(
         attempts.attemptCategories,
         attempts.attemptOutcomes,
-        OVERALL_DEADLINE_MS,
+        overallDeadlineMs,
         attempts.finalCompletionMs ?? Date.now() - buildStart,
       );
       console.info(

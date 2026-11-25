@@ -116,7 +116,6 @@ import {
   DIRECT_LLM_DAILY_QUOTA_LIMIT,
   DIRECT_LLM_UNVERIFIED_DAILY_QUOTA_LIMIT,
   DIRECT_LLM_GATEWAY_QUOTA_PATHS,
-  DIRECT_LLM_UNVERIFIED_DAILY_QUOTA_LIMIT,
   resolveActiveDirectLlmLimit,
   reserveDirectLlmQuota,
 } from './_shared/direct-llm-quota';
@@ -605,6 +604,49 @@ const RPC_CACHE_TIER: Record<string, CacheTier> = {
 
 import { PREMIUM_RPC_PATHS } from '../src/shared/premium-paths';
 
+// Premium paths that existed at the fork point stay free here (no billing stack
+// behind the fork); premium paths added since remain behind the legacy Pro gate.
+const FORK_FREE_PREMIUM_RPC_PATHS = new Set<string>([
+  '/api/chat-analyst',
+  '/api/economic/v1/get-national-debt',
+  '/api/economic/v1/list-global-tenders',
+  '/api/forecast/v1/trigger-simulation',
+  '/api/intelligence/v1/classify-event',
+  '/api/intelligence/v1/deduct-situation',
+  '/api/intelligence/v1/get-country-intel-brief',
+  '/api/intelligence/v1/get-intel-timeline',
+  '/api/intelligence/v1/get-regime-history',
+  '/api/intelligence/v1/get-regional-brief',
+  '/api/intelligence/v1/get-regional-snapshot',
+  '/api/intelligence/v1/get-similar-events',
+  '/api/intelligence/v1/list-market-implications',
+  '/api/intelligence/v1/search-intel-history',
+  '/api/market/v1/analyze-stock',
+  '/api/market/v1/backtest-stock',
+  '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/list-stored-stock-backtests',
+  '/api/mcp-proxy',
+  '/api/resilience/v1/get-food-stocks',
+  '/api/resilience/v1/get-resilience-ranking',
+  '/api/resilience/v1/get-resilience-score',
+  '/api/sanctions/v1/list-sanctions-pressure',
+  '/api/scenario/v1/get-scenario-status',
+  '/api/scenario/v1/run-scenario',
+  '/api/supply-chain/v1/get-bypass-options',
+  '/api/supply-chain/v1/get-country-chokepoint-index',
+  '/api/supply-chain/v1/get-country-cost-shock',
+  '/api/supply-chain/v1/get-country-products',
+  '/api/supply-chain/v1/get-multi-sector-cost-shock',
+  '/api/supply-chain/v1/get-route-explorer-lane',
+  '/api/supply-chain/v1/get-route-impact',
+  '/api/supply-chain/v1/get-sector-dependency',
+  '/api/trade/v1/get-tariff-trends',
+  '/api/trade/v1/list-comtrade-flows',
+  '/api/v2/shipping/route-intelligence',
+  '/api/v2/shipping/webhooks',
+]);
+
+
 /**
  * Routes that answer with one account's private data, read by the user id the
  * gateway stamps on the request.
@@ -635,6 +677,8 @@ export const PUBLIC_NO_AUTH_RPC_PATHS = new Set<string>([
   '/api/scorecard/v1/list-five-factor-scorecards',
   '/api/intelligence/v1/get-china-decision-signals',
   '/api/resilience/v1/get-runtime-manifest',
+  // Fork has no billing stack; a tier gate here would 401 anonymous callers forever.
+  '/api/sanctions/v1/list-sanctions-pressure',
   // Lead-capture RPCs serve ANONYMOUS prospects by definition: the /pro
   // marketing page contact form and the waitlist/desktop signup both POST
   // without a wms_ session or API key (see pro-test/src/App.tsx onSubmit and
@@ -1685,7 +1729,7 @@ export function createDomainGateway(
       (request.method === 'GET' || request.method === 'HEAD') &&
       pathname === COUNTRY_INTEL_BRIEF_PATH &&
       process.env.LOCAL_API_MODE === 'docker';
-    const needsLegacyProBearerGate = !internalMcpVerified && !isPublicNoAuthRpc && PREMIUM_RPC_PATHS.has(pathname) && !isTierGated;
+    const needsLegacyProBearerGate = !internalMcpVerified && !isPublicNoAuthRpc && PREMIUM_RPC_PATHS.has(pathname) && !FORK_FREE_PREMIUM_RPC_PATHS.has(pathname) && !isTierGated;
     const isProFreshCacheRpc = PRO_FRESH_CACHE_RPC_PATHS.has(pathname);
     const needsProFreshnessResolution =
       !internalMcpVerified &&
@@ -2722,12 +2766,10 @@ export function createDomainGateway(
       const operatorQuotaUserId = isEnterpriseAuth
         ? await operatorKeyQuotaPrincipal(enterpriseCredential)
         : null;
-      const quotaUserId = operatorQuotaUserId ?? sessionUserId ?? dockerQuotaUserId;
-      if (!quotaUserId) {
-        await releaseDailyMeter();
-        emitRequest(401, 'auth_401', null);
-        return createGatewayAuthErrorResponse(401, 'Pro authentication required', corsHeaders, request);
-      }
+      // No sign-in required: anonymous callers are bounded per IP at the
+      // unverified ceiling instead of 401ing (fork depaywall).
+      const quotaUserId = operatorQuotaUserId ?? sessionUserId ?? dockerQuotaUserId
+        ?? `anon-ip:${hashKeySync(deriveIp(request) ?? 'unknown')}`;
 
       let ent: CachedEntitlements | null = null;
       if (isEnterpriseAuth) {

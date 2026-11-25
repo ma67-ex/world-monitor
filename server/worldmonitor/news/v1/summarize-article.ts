@@ -72,6 +72,8 @@ const SKIP_REASONS: Record<string, string> = {
   ollama: 'OLLAMA_API_URL not configured',
   groq: 'GROQ_API_KEY not configured',
   openrouter: 'OPENROUTER_API_KEY not configured',
+  anthropic: 'ANTHROPIC_API_KEY not configured',
+  '': 'No AI provider is available for this request',
 };
 
 export function hasReasoningPreamble(text: string): boolean {
@@ -349,13 +351,6 @@ export async function summarizeArticle(
   );
 
   // Provider credential check
-  const skipReasons: Record<string, string> = {
-    ollama: 'OLLAMA_API_URL not configured',
-    openrouter: 'OPENROUTER_API_KEY not configured',
-    anthropic: 'ANTHROPIC_API_KEY not configured',
-    '': 'No AI provider is available for this request',
-  };
-
   const credentials = providerIsSelectable ? getProviderCredentials(provider) : null;
   if (!credentials) {
     return unserved({
@@ -367,7 +362,7 @@ export async function summarizeArticle(
       error: '',
       errorType: '',
       status: 'SUMMARIZE_STATUS_SKIPPED',
-      statusDetail: (providerIsSelectable && skipReasons[provider]) || `Unknown provider: ${provider}`,
+      statusDetail: (providerIsSelectable && SKIP_REASONS[provider]) || `Unknown provider: ${provider}`,
     });
   }
 

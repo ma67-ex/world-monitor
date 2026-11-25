@@ -224,7 +224,6 @@ import { replaceRawI18nKeyPlaceholders } from '@/utils/i18n-raw-key-healer';
 import { startAccountAuthHandoff } from '@/app/account-auth-handoff';
 import { TierPreferenceHandoff } from '@/app/tier-preference-handoff';
 import { initialRegionFromCache, resolveUserRegion, resolvePreciseUserCoordinates, type PreciseCoordinates } from '@/utils/user-location';
-import { showProBanner } from '@/components/ProBanner';
 import { getAuthState, initAuthState, subscribeAuthState } from '@/services/auth-state';
 import { installSignUpResume } from '@/services/sign-up-resume';
 import { createSignUpResumeOverlay } from '@/components/SignUpResumeOverlay';
@@ -1032,18 +1031,18 @@ export class App {
     }
 
     const _wmAccess = hasPremiumAccess();
+    if (shouldPrime('trade-policy')) {
+      primeTask('tradePolicy', () => this.dataLoader.loadTradePolicy());
+    }
+    if (shouldPrime('stock-backtest')) {
+      primeTask('stockBacktest', () => this.dataLoader.loadStockBacktest());
+    }
+    if (shouldPrime('daily-market-brief')) {
+      primeTask('dailyMarketBrief', () => this.dataLoader.loadDailyMarketBrief());
+    }
     if (_wmAccess) {
-      if (shouldPrime('trade-policy')) {
-        primeTask('tradePolicy', () => this.dataLoader.loadTradePolicy());
-      }
       if (shouldPrime('stock-analysis')) {
         primeTask('stockAnalysis', () => this.dataLoader.loadStockAnalysis());
-      }
-      if (shouldPrime('stock-backtest')) {
-        primeTask('stockBacktest', () => this.dataLoader.loadStockBacktest());
-      }
-      if (shouldPrime('daily-market-brief')) {
-        primeTask('dailyMarketBrief', () => this.dataLoader.loadDailyMarketBrief());
       }
       if (shouldPrime('market-implications')) {
         primeTask('marketImplications', () => this.dataLoader.loadMarketImplications());
@@ -3146,7 +3145,6 @@ export class App {
     await this.panelLayout.init();
     markLcpDebug('wm:layout:init-complete');
     this.eventHandlers.setupSearchControls();
-    showProBanner(this.state.container);
     this.updateConnectivityUi();
     window.addEventListener('online', this.handleConnectivityChange);
     window.addEventListener('offline', this.handleConnectivityChange);
@@ -4236,7 +4234,7 @@ export class App {
         { name: 'canadaAlerts', fn: () => this.dataLoader.loadCanadaAlerts(), intervalMs: REFRESH_INTERVALS.canadaAlerts, condition: () => !!this.state.mapLayers.canadaAlerts },
         { name: 'fred', fn: () => this.dataLoader.loadFredData(), intervalMs: REFRESH_INTERVALS.fred, condition: () => this.isPanelNearViewport('economic') },
         { name: 'spending', fn: () => this.dataLoader.loadGovernmentSpending(), intervalMs: REFRESH_INTERVALS.spending, condition: () => this.isPanelNearViewport('economic') },
-        { name: 'global-tenders', fn: (signal) => this.dataLoader.loadGlobalTenders(undefined, false, signal), intervalMs: REFRESH_INTERVALS.spending, condition: () => hasPremiumAccess() && this.isPanelNearViewport('global-procurement') },
+        { name: 'global-tenders', fn: (signal) => this.dataLoader.loadGlobalTenders(undefined, false, signal), intervalMs: REFRESH_INTERVALS.spending, condition: () => this.isPanelNearViewport('global-procurement') },
         { name: 'bis', fn: () => this.dataLoader.loadBisData(), intervalMs: REFRESH_INTERVALS.bis, condition: () => this.isPanelNearViewport('economic') },
         { name: 'oil', fn: () => this.dataLoader.loadOilAnalytics(), intervalMs: REFRESH_INTERVALS.oil, condition: () => this.isPanelNearViewport('energy-complex') },
         // inFlight key 'fires' matches the hydration loader and loadDataForLayer
@@ -4381,12 +4379,9 @@ export class App {
     }
 
     // WTO trade policy data — annual data, poll every 10 min to avoid hammering upstream.
-    // PRO-gated: the isNearViewport check is a visibility gate, not an entitlement gate,
-    // so without hasPremiumAccess() here we'd still hit the 6 WTO RPCs every poll for
-    // free users once the panel scrolled into view.
     // Not variant-gated: a user can add these panels to any variant, and each
     // condition already requires the panel on screen (#9396).
-    this.refreshScheduler.scheduleRefresh('tradePolicy', () => this.dataLoader.loadTradePolicy(), REFRESH_INTERVALS.tradePolicy, () => hasPremiumAccess() && this.isPanelNearViewport('trade-policy'));
+    this.refreshScheduler.scheduleRefresh('tradePolicy', () => this.dataLoader.loadTradePolicy(), REFRESH_INTERVALS.tradePolicy, () => this.isPanelNearViewport('trade-policy'));
     this.refreshScheduler.scheduleRefresh('supplyChain', () => this.dataLoader.loadSupplyChain(), REFRESH_INTERVALS.supplyChain, () => this.isPanelNearViewport('supply-chain'));
     this.refreshScheduler.scheduleRefresh('chinaCorridors', () => this.dataLoader.loadChinaCorridors(), REFRESH_INTERVALS.chinaCorridors, () => this.isPanelNearViewport('china-corridors'));
     this.refreshScheduler.scheduleRefresh('chinaActivityNowcast', () => this.dataLoader.loadChinaActivityNowcast(), REFRESH_INTERVALS.chinaActivityNowcast, () => this.isPanelNearViewport('china-activity-nowcast'));

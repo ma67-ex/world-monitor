@@ -26,6 +26,7 @@ import {
   type FontScaleChangedDetail,
 } from '@/services/font-scale-settings';
 import { escapeHtml } from '@/utils/sanitize';
+import { getUserAiKey, setUserAiKey, type UserAiProvider } from '@/services/user-ai-keys';
 import { trackLanguageChange } from '@/services/analytics';
 import { exportSettings, importSettings, type ImportResult } from '@/utils/settings-persistence';
 import { getSyncState, getLastSyncAt, syncNow, isCloudSyncEnabled } from '@/utils/cloud-prefs-sync';
@@ -51,8 +52,6 @@ import {
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import type { PreferenceSectionId } from '@/config/settings-sections';
 
-
-const DESKTOP_RELEASES_URL = 'https://github.com/koala73/worldmonitor/releases';
 
 export interface PreferencesHost {
   isDesktopApp: boolean;
@@ -317,7 +316,22 @@ const aiSection: PreferenceSectionSpec = {
         <div class="ai-flow-cta">
           <div class="ai-flow-cta-title">${t('components.insights.aiFlowOllamaCta')}</div>
           <div class="ai-flow-cta-desc">${t('components.insights.aiFlowOllamaCtaDesc')}</div>
-          <a href="${DESKTOP_RELEASES_URL}" target="_blank" rel="noopener noreferrer" class="ai-flow-cta-link">${t('components.insights.aiFlowDownloadDesktop')}</a>
+        </div>
+      `;
+      html += `
+        <div class="ai-flow-cta" style="margin-top:12px">
+          <div class="ai-flow-cta-title">Your Own AI Key</div>
+          <div class="ai-flow-cta-desc">Locked panels (market implications, deduction, stock analysis) need a structured LLM response the built-in browser model can't produce. Paste your own free Groq or OpenRouter key here. It is stored only in this browser and called directly, no server in between.</div>
+          <div class="us-data-mgmt" style="margin-top:8px">
+            <input type="password" id="usUserKeyGroq" data-provider="groq" placeholder="Groq API key" value="${escapeHtml(getUserAiKey('groq'))}" autocomplete="off" style="flex:1;min-width:0" />
+          </div>
+          <div class="us-data-mgmt" style="margin-top:6px">
+            <input type="password" id="usUserKeyOpenrouter" data-provider="openrouter" placeholder="OpenRouter API key" value="${escapeHtml(getUserAiKey('openrouter'))}" autocomplete="off" style="flex:1;min-width:0" />
+          </div>
+          <div style="display:flex;gap:12px;margin-top:6px">
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" class="ai-flow-cta-link" style="font-size:11px">Get a free Groq key</a>
+            <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer" class="ai-flow-cta-link" style="font-size:11px">Get a free OpenRouter key</a>
+          </div>
         </div>
       `;
     }
@@ -396,6 +410,8 @@ const aiSection: PreferenceSectionSpec = {
     return html;
   },
   onChange: {
+    usUserKeyGroq: (target) => { setUserAiKey(target.dataset.provider as UserAiProvider, target.value.trim()); return false; },
+    usUserKeyOpenrouter: (target) => { setUserAiKey(target.dataset.provider as UserAiProvider, target.value.trim()); return false; },
     'us-cloud': (target, root) => {
       setAiFlowSetting('cloudLlm', target.checked);
       updateAiStatus(root);

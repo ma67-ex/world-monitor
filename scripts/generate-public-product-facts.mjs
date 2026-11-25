@@ -4,7 +4,7 @@
  *
  * Source chain:
  *   convex/config/productCatalog.ts (lifecycle, plans, prices, public copy)
- *   api/mcp/registry/index.ts        (machine-readable MCP server card)
+ *   api/mcp/registry/_index.ts       (machine-readable MCP server card)
  *
  * These outputs are committed because lifecycle, prices, entitlements, and
  * catalog identities are reviewed product contracts. Extensible inventory
@@ -26,10 +26,10 @@ import { getCompleteLayerCatalogKeys } from '../src/config/map-layer-definitions
 import { INTEL_HOTSPOTS } from '../shared/geo-data.ts';
 import { PIPELINES } from '../shared/pipelines-data.ts';
 import { ORBITAL_WATCH_PLAN_LINES, orbitalWatchAccess } from '../shared/orbital-watch-pricing.ts';
-import { TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
+import { TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
 import { MCP_DOMAIN_SUMMARY, MCP_TAGS, MCP_TOOL_CATEGORIES } from '../api/mcp/domains.ts';
 import { serverCardTools } from '../api/mcp/server-card-tools.ts';
-import { UI_RESOURCE_LIST_RESPONSE } from '../api/mcp/ui/registry.ts';
+import { UI_RESOURCE_LIST_RESPONSE } from '../api/mcp/ui/_registry.ts';
 import { FREE_ACCOUNT_CALLS_PER_DAY } from '../api/mcp/upgrade-constants.ts';
 import { publishedRankedCountries } from './build-crawlable-corpus.mjs';
 import { commandPaletteCommandCount } from './lib/command-palette-count.mjs';
@@ -648,7 +648,7 @@ function pricingSummary() {
         name: 'Free',
         price_usd_monthly: 0,
         signup_required: false,
-        features: planFeatures('free', ['global map coverage (Resilience is Pro)', 'curated feeds', 'country briefs', 'chokepoints', 'instability scores', 'watchlists', '3 dashboard tabs', FREE_ACCOUNT_MCP_LINE]),
+        features: planFeatures('free', ['global map coverage', 'curated feeds', 'country briefs', 'chokepoints', 'instability scores', 'watchlists', '3 dashboard tabs', FREE_ACCOUNT_MCP_LINE]),
       },
       {
         name: 'Pro',
