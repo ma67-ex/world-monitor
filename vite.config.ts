@@ -5,7 +5,7 @@ import { appChunkRuntimeCache, createDashboardPrecache } from './shared/pwa-prec
 import type { OutputBundle } from 'rollup';
 import { resolve, dirname, extname, basename, posix, relative, isAbsolute } from 'path';
 import { cp, mkdir, readFile, writeFile } from 'fs/promises';
-import { existsSync, statSync } from 'fs';
+import { createReadStream, existsSync, statSync } from 'fs';
 import { brotliCompress } from 'zlib';
 import { promisify } from 'util';
 import pkg from './package.json';
