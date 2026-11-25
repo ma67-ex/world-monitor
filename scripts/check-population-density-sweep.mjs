@@ -4,12 +4,14 @@
 import { readFileSync } from 'node:fs';
 import { feature } from 'topojson-client';
 import { isMainModule } from './lib/main-module.mjs';
-import { densityCountryAt } from '../shared/population-density-country-at.ts';
+import { densityCountryAt, preloadDensityBoundaries } from '../shared/population-density-country-at.ts';
 import { PRIORITY_COUNTRIES } from '../shared/analysis-population-exposure.ts';
 import { resolveCountryCode } from '../shared/country-code-resolve.ts';
 import { iso2ToUnCode } from '../shared/country-numeric-codes.ts';
 import { inRing } from '../shared/population-density-geometry.ts';
 import DATA from '../shared/population-density-boundaries.json' with { type: 'json' };
+
+await preloadDensityBoundaries();
 
 const atlas = JSON.parse(readFileSync(new URL('./data/population-density-countries-10m.json', import.meta.url), 'utf8'));
 const codes = new Map(Object.keys(PRIORITY_COUNTRIES).map((code) => {

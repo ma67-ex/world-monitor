@@ -7,10 +7,12 @@ import {
   getRadiusForEventType,
   listCountryPopulations,
 } from '../shared/analysis-population-exposure.ts';
-import { densityCountryAt, estimatePointExposure } from '../shared/population-density-country-at.ts';
+import { densityCountryAt, estimatePointExposure, preloadDensityBoundaries } from '../shared/population-density-country-at.ts';
 import { inRing, ringEdgesNearLatitude } from '../shared/population-density-geometry.ts';
 import PALESTINE from '../shared/population-density-palestine.json' with { type: 'json' };
 import DATA from '../shared/population-density-boundaries.json' with { type: 'json' };
+
+await preloadDensityBoundaries();
 import { feature } from 'topojson-client';
 // Accept the old schema only to let the documented revert run reach assertions.
 const BOUNDARIES = { countries: DATA.countries ?? Object.fromEntries(feature(DATA.topology, DATA.topology.objects.countries).features.map(({properties, geometry}) => [properties.code, geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates])) };

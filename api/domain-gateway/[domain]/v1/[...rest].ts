@@ -21,6 +21,7 @@
 // this only replaces how many separate Vercel functions wrap them.
 export const config = { runtime: 'edge' };
 
+import { rewriteToSebuf } from '../../../../server/alias-rewrite';
 import { createDomainGateway, serverOptions, type GatewayCtx } from '../../../../server/gateway';
 
 import { createNewsServiceRoutes as newsRoutes } from '../../../../src/generated/server/worldmonitor/news/v1/service_server';
@@ -53,8 +54,6 @@ import { createGivingServiceRoutes as givingRoutes } from '../../../../src/gener
 import { givingHandler } from '../../../../server/worldmonitor/giving/v1/handler';
 import { createConsumerPricesServiceRoutes as consumerPricesRoutes } from '../../../../src/generated/server/worldmonitor/consumer_prices/v1/service_server';
 import { consumerPricesHandler } from '../../../../server/worldmonitor/consumer-prices/v1/handler';
-import { createIntelligenceServiceRoutes as intelligenceRoutes } from '../../../../src/generated/server/worldmonitor/intelligence/v1/service_server';
-import { intelligenceHandler } from '../../../../server/worldmonitor/intelligence/v1/handler';
 import { createForecastServiceRoutes as forecastRoutes } from '../../../../src/generated/server/worldmonitor/forecast/v1/service_server';
 import { forecastHandler } from '../../../../server/worldmonitor/forecast/v1/handler';
 import { createResearchServiceRoutes as researchRoutes } from '../../../../src/generated/server/worldmonitor/research/v1/service_server';
@@ -94,18 +93,26 @@ import { scenarioHandler } from '../../../../server/worldmonitor/scenario/v1/han
 import { createShippingV2ServiceRoutes as shippingV2Routes } from '../../../../src/generated/server/worldmonitor/shipping/v2/service_server';
 import { shippingV2Handler } from '../../../../server/worldmonitor/shipping/v2/handler';
 import feedbackGateway from '../../../feedback/v1/_rpc';
-import orbitalGateway from '../../../orbital/v1/_rpc';
 import safetyGateway from '../../../safety/v1/_rpc';
 import scorecardGateway from '../../../scorecard/v1/_rpc';
 
 type EdgeHandler = (req: Request, ctx?: GatewayCtx) => Promise<Response>;
 
-// Exported (not just module-local) because api/scenario/v1/_status.ts,
-// templates.ts, run.ts and api/supply-chain/v1/_country-products.ts,
-// multi-sector-cost-shock.ts are alias files that used to `import gateway
-// from './[rpc]'` (the file this module replaced) -- they now import
-// REGISTRY.scenario / REGISTRY['supply-chain'] directly instead.
-export const REGISTRY: Record<string, EdgeHandler> = {
+// intelligence and orbital live in api/misc-gateway2.ts to keep this bundle
+// under Vercel Hobby's 1 MB function limit.
+
+// Documented v1 URLs that diverge from the generated sebuf RPC paths. Served
+// here, not by separate alias handlers, so the heavy REGISTRY is bundled once.
+// See server/alias-rewrite.ts.
+const SEBUF_ALIASES: Record<string, string> = {
+  '/api/scenario/v1/status': '/api/scenario/v1/get-scenario-status',
+  '/api/scenario/v1/templates': '/api/scenario/v1/list-scenario-templates',
+  '/api/scenario/v1/run': '/api/scenario/v1/run-scenario',
+  '/api/supply-chain/v1/country-products': '/api/supply-chain/v1/get-country-products',
+  '/api/supply-chain/v1/multi-sector-cost-shock': '/api/supply-chain/v1/get-multi-sector-cost-shock',
+};
+
+const REGISTRY: Record<string, EdgeHandler> = {
   news: createDomainGateway(newsRoutes(newsHandler, serverOptions)),
   resilience: createDomainGateway(resilienceRoutes(resilienceHandler, serverOptions)),
   batch: createDomainGateway(batchRoutes(batchHandler, serverOptions)),
@@ -121,7 +128,6 @@ export const REGISTRY: Record<string, EdgeHandler> = {
   imagery: createDomainGateway(imageryRoutes(imageryHandler, serverOptions)),
   giving: createDomainGateway(givingRoutes(givingHandler, serverOptions)),
   'consumer-prices': createDomainGateway(consumerPricesRoutes(consumerPricesHandler, serverOptions)),
-  intelligence: createDomainGateway(intelligenceRoutes(intelligenceHandler, serverOptions)),
   forecast: createDomainGateway(forecastRoutes(forecastHandler, serverOptions)),
   research: createDomainGateway(researchRoutes(researchHandler, serverOptions)),
   maritime: createDomainGateway(maritimeRoutes(maritimeHandler, serverOptions)),
@@ -141,7 +147,6 @@ export const REGISTRY: Record<string, EdgeHandler> = {
   aviation: createDomainGateway(aviationRoutes(aviationHandler, serverOptions)),
   scenario: createDomainGateway(scenarioRoutes(scenarioHandler, serverOptions)),
   feedback: feedbackGateway,
-  orbital: orbitalGateway,
   safety: safetyGateway,
   scorecard: scorecardGateway,
   'v2-shipping': createDomainGateway(shippingV2Routes(shippingV2Handler, serverOptions)),
@@ -162,6 +167,8 @@ export default async function handler(req: Request, ctx?: GatewayCtx): Promise<R
       headers: { 'Content-Type': 'application/json' },
     });
   }
+  const alias = SEBUF_ALIASES[url.pathname];
+  if (alias) return rewriteToSebuf(req, alias, gateway, ctx ?? { waitUntil: () => {} });
   // req.url is already /api/<domain>/v1/<rpc> -- no reconstruction needed.
   return gateway(req, ctx);
 }

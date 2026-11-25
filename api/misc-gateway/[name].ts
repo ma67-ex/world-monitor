@@ -44,7 +44,6 @@ import gpsjamHandler from '../_gpsjam';
 import healthHandler from '../_health';
 import httpMessageSignaturesDirectoryHandler from '../_http-message-signatures-directory';
 import invalidateUserApiKeyCacheHandler from '../_invalidate-user-api-key-cache';
-import latestBriefHandler from '../_latest-brief';
 import notificationChannelsHandler from '../_notification-channels';
 import notifyHandler from '../_notify';
 import oauthAuthorizationServerHandler from '../_oauth-authorization-server';
@@ -113,7 +112,6 @@ const REGISTRY: Record<string, EdgeHandler> = {
   'health': healthHandler,
   'http-message-signatures-directory': httpMessageSignaturesDirectoryHandler,
   'invalidate-user-api-key-cache': invalidateUserApiKeyCacheHandler,
-  'latest-brief': latestBriefHandler,
   'notification-channels': notificationChannelsHandler,
   'notify': notifyHandler,
   'oauth-authorization-server': oauthAuthorizationServerHandler,

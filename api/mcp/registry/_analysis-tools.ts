@@ -59,7 +59,7 @@ import {
   listCountryPopulations,
   MAX_EXPOSURE_RADIUS_KM,
 } from '../../../shared/analysis-population-exposure';
-import { estimatePointExposure } from '../../../shared/population-density-country-at';
+import { estimatePointExposure, preloadDensityBoundaries } from '../../../shared/population-density-country-at';
 import { INTEL_HOTSPOTS } from '../../../shared/geo-data';
 import { applyRedisKeyPrefix, readJsonBatchFromUpstashWithStatus } from '../../_upstash-json.js';
 import { isAppOwnedRedisKey } from '../../_redis-key-ownership.js';
@@ -1096,6 +1096,7 @@ export const ANALYSIS_TOOLS: ToolDef[] = [
           };
         }
         const radiusKm = Math.min(MAX_EXPOSURE_RADIUS_KM, Math.max(1, Number(params.radius_km ?? 50) || 50));
+        await preloadDensityBoundaries();
         const exposure = estimatePointExposure(lat, lon, radiusKm);
         return {
           cached_at: null,
@@ -1144,6 +1145,7 @@ export const ANALYSIS_TOOLS: ToolDef[] = [
         'No event feeds are available for exposure enrichment',
       );
 
+      await preloadDensityBoundaries();
       const enriched = reads
         .flatMap((read, i) => read.adapt(payloads[i], Number.POSITIVE_INFINITY))
         .flatMap((event) => {

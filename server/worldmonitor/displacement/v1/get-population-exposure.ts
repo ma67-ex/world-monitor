@@ -10,13 +10,14 @@ import type {
   GetPopulationExposureResponse,
 } from '../../../../src/generated/server/worldmonitor/displacement/v1/service_server';
 import { listCountryPopulations } from '../../../../shared/analysis-population-exposure';
-import { estimatePointExposure } from '../../../../shared/population-density-country-at';
+import { estimatePointExposure, preloadDensityBoundaries } from '../../../../shared/population-density-country-at';
 
 export async function getPopulationExposure(
-  _ctx: ServerContext,
+  ctx: ServerContext,
   req: GetPopulationExposureRequest,
 ): Promise<GetPopulationExposureResponse> {
   if (req.mode === 'exposure') {
+    await preloadDensityBoundaries(ctx?.request ? new URL(ctx.request.url).origin : undefined);
     const estimate = estimatePointExposure(req.lat, req.lon, req.radius || 50);
     if (!estimate) return { success: true, countries: [] };
     const { country, ...exposure } = estimate;

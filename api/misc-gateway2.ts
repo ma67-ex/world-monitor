@@ -48,11 +48,6 @@ import userMcpRevokeHandler from './user/_mcp-revoke';
 import youtubeEmbedHandler from './youtube/_embed';
 // @ts-expect-error — JS module, no declaration file
 import youtubeLiveHandler from './youtube/_live';
-import scenarioStatusHandler from './scenario/v1/_status';
-import scenarioTemplatesHandler from './scenario/v1/_templates';
-import scenarioRunHandler from './scenario/v1/_run';
-import supplyChainCountryProductsHandler from './supply-chain/v1/_country-products';
-import supplyChainMultiSectorCostShockHandler from './supply-chain/v1/_multi-sector-cost-shock';
 // @ts-expect-error — JS module, no declaration file
 import supplyChainHormuzTrackerHandler from './supply-chain/_hormuz-tracker';
 import desktopAuthAuthorizeHandler from './desktop-auth/_authorize';
@@ -62,9 +57,15 @@ import embedEntitlementHandler from './embed/_entitlement';
 import embedMapFrameHandler from './embed/_map-frame';
 import embedSessionHandler from './embed/_session';
 import userPasskeyOfferHandler from './user/_passkey-offer';
+import latestBriefHandler from './_latest-brief';
 import mdTwinHandler from './_md-twin';
 // @ts-expect-error — JS module, no declaration file
 import openDataChokepointsHandler from './_open-data-chokepoints';
+
+import { createDomainGateway, serverOptions } from '../server/gateway';
+import { createIntelligenceServiceRoutes as intelligenceRoutes } from '../src/generated/server/worldmonitor/intelligence/v1/service_server';
+import { intelligenceHandler } from '../server/worldmonitor/intelligence/v1/handler';
+import orbitalGateway from './orbital/v1/_rpc';
 
 type EdgeCtx = { waitUntil: (p: Promise<unknown>) => void };
 type EdgeHandler = (req: Request, ctx: EdgeCtx) => Response | Promise<Response>;
@@ -90,11 +91,6 @@ const REGISTRY: Record<string, EdgeHandler> = {
   'user/mcp-revoke': userMcpRevokeHandler,
   'youtube/embed': youtubeEmbedHandler,
   'youtube/live': youtubeLiveHandler,
-  'scenario/v1/status': scenarioStatusHandler,
-  'scenario/v1/templates': scenarioTemplatesHandler,
-  'scenario/v1/run': scenarioRunHandler,
-  'supply-chain/v1/country-products': supplyChainCountryProductsHandler,
-  'supply-chain/v1/multi-sector-cost-shock': supplyChainMultiSectorCostShockHandler,
   'desktop-auth/authorize': desktopAuthAuthorizeHandler,
   'desktop-auth/token': desktopAuthTokenHandler,
   'desktop-key/status': desktopKeyStatusHandler,
@@ -102,9 +98,14 @@ const REGISTRY: Record<string, EdgeHandler> = {
   'embed/map-frame': embedMapFrameHandler,
   'embed/session': embedSessionHandler,
   'user/passkey-offer': userPasskeyOfferHandler,
+  'latest-brief': latestBriefHandler,
   'md-twin': mdTwinHandler,
   'open-data-chokepoints': openDataChokepointsHandler,
   'supply-chain/hormuz-tracker': supplyChainHormuzTrackerHandler,
+  // Domain gateways moved out of api/domain-gateway to keep it under 1 MB.
+  // They route on the original pathname, which Vercel rewrites preserve.
+  intelligence: createDomainGateway(intelligenceRoutes(intelligenceHandler, serverOptions)),
+  orbital: orbitalGateway,
 };
 
 export default async function handler(req: Request, ctx: EdgeCtx): Promise<Response> {

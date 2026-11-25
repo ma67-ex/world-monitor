@@ -56,6 +56,7 @@ export const STEPS = [
   ['sandbox fixtures', [NODE, 'scripts/generate-sandbox-fixtures.mjs']],
   ['orbital watched sites', [...TSX, 'scripts/generate-orbital-watched-sites.mjs']],
   ['population density boundaries', [...TSX, 'scripts/generate-population-density-boundaries.mjs']],
+  ['edge data mirrors', [NODE, 'scripts/sync-edge-data.mjs']],
   ['scorecard edge mirrors', [NODE, 'scripts/generate-scorecard-edge-mirrors.mjs']],
   ['Sentry Convex probe filters', [NODE, 'scripts/sync-sentry-convex-probe-filters.mjs'], '--write'],
   ['legal digests', [NODE, 'scripts/legal-digests.mjs']],

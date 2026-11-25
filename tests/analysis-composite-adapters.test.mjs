@@ -15,6 +15,9 @@ import {
   stressToDigestInput,
   buildDigestInputs,
 } from '../shared/analysis-composite-adapters.ts';
+import { preloadDensityBoundaries } from '../shared/population-density-country-at.ts';
+
+await preloadDensityBoundaries();
 
 const PRODUCER_PAYLOADS = JSON.parse(
   readFileSync(new URL('./fixtures/analysis-producer-payloads.json', import.meta.url), 'utf8'),
