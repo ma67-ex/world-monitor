@@ -35,13 +35,12 @@ let submitContact;
 let ValidationError;
 let ApiError;
 let EdgeFreeEmailDomains;
-let ConvexHttpClient;
-let ConvexError;
-let originalConvexMutation;
 
 describe('LeadsService.submitContact', () => {
   beforeEach(async () => {
-    process.env.CONVEX_URL = 'https://fake-convex.cloud';
+    process.env.CONVEX_URL = 'https://fake-convex.convex.cloud';
+    delete process.env.CONVEX_SITE_URL;
+    process.env.CONVEX_SERVER_SHARED_SECRET = 'synthetic-contact-secret';
     process.env.TURNSTILE_SECRET_KEY = 'test-secret';
     process.env.RESEND_API_KEY = 'test-resend-key';
     process.env.VERCEL_ENV = 'production';
@@ -53,16 +52,11 @@ describe('LeadsService.submitContact', () => {
     const gen = await import('../src/generated/server/worldmonitor/leads/v1/service_server.ts');
     ValidationError = gen.ValidationError;
     ApiError = gen.ApiError;
-    ({ ConvexHttpClient } = await import('convex/browser'));
-    ({ ConvexError } = await import('convex/values'));
-    originalConvexMutation = ConvexHttpClient.prototype.mutation;
+
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    if (ConvexHttpClient && originalConvexMutation) {
-      ConvexHttpClient.prototype.mutation = originalConvexMutation;
-    }
     Object.keys(process.env).forEach((k) => {
       if (!(k in originalEnv)) delete process.env[k];
     });
@@ -89,6 +83,25 @@ describe('LeadsService.submitContact', () => {
       await assert.rejects(
         () => submitContact(makeCtx(), validReq({ email: 'not-an-email' })),
         (err) => err instanceof ValidationError,
+      );
+    });
+
+    it('rejects an over-long email before the format regex runs', async () => {
+      globalThis.fetch = async (url) => {
+        if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
+        return new Response('{}');
+      };
+      // 'a@' + dots + '@' backtracks super-linearly in the format regex.
+      const email = 'a@' + '.'.repeat(64 * 1024) + '@';
+      const started = performance.now();
+      await assert.rejects(
+        () => submitContact(makeCtx(), validReq({ email })),
+        (err) => err instanceof ValidationError && err.violations[0].field === 'email',
+      );
+      assert.ok(performance.now() - started < 250, `took ${performance.now() - started}ms`);
+      await assert.rejects(
+        () => submitContact(makeCtx(), validReq({ email: `${'a'.repeat(243)}@example.com` })),
+        (err) => err instanceof ValidationError && err.violations[0].field === 'email',
       );
     });
 
@@ -135,15 +148,55 @@ describe('LeadsService.submitContact', () => {
       );
     });
 
-    it('rejects missing phone', async () => {
-      globalThis.fetch = async (url) => {
+    it('accepts a missing phone and omits it from the Convex lead and the ops email', async () => {
+      let convexBody;
+      let resendBody;
+      globalThis.fetch = async (url, init) => {
         if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
+        if (typeof url === 'string' && url.includes('fake-convex')) {
+          convexBody = JSON.parse(init.body);
+          return new Response(JSON.stringify({ status: 'sent' }));
+        }
+        if (typeof url === 'string' && url.includes('resend')) {
+          resendBody = JSON.parse(init.body);
+          return new Response(JSON.stringify({ id: 'msg_123' }));
+        }
         return new Response('{}');
       };
-      await assert.rejects(
-        () => submitContact(makeCtx(), validReq({ phone: '' })),
-        (err) => err instanceof ValidationError && err.violations[0].field === 'phone',
-      );
+      const withoutPhone = validReq();
+      delete withoutPhone.phone;
+      for (const req of [withoutPhone, validReq({ phone: '' }), validReq({ phone: '   ' })]) {
+        const res = await submitContact(makeCtx(), req);
+        assert.equal(res.status, 'sent');
+        assert.equal('phone' in convexBody, false, 'an empty phone must not reach Convex');
+        assert.equal(resendBody.html.includes('>Phone<'), false, 'the ops email must not show an empty Phone row');
+      }
+    });
+
+    it('forwards a provided phone to Convex and the ops email', async () => {
+      let convexBody;
+      let resendBody;
+      globalThis.fetch = async (url, init) => {
+        if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
+        if (typeof url === 'string' && url.includes('fake-convex')) {
+          convexBody = JSON.parse(init.body);
+          return new Response(JSON.stringify({ status: 'sent' }));
+        }
+        if (typeof url === 'string' && url.includes('resend')) {
+          resendBody = JSON.parse(init.body);
+          return new Response(JSON.stringify({ id: 'msg_123' }));
+        }
+        return new Response('{}');
+      };
+      await submitContact(makeCtx(), validReq({ phone: '  +1 555 123 4567 ' }));
+      assert.equal(convexBody.phone, '+1 555 123 4567');
+      assert.ok(resendBody.html.includes('>Phone<'));
+      // The ops email uses the WorldMonitor frame (shared/email-frame.ts).
+      assert.match(resendBody.html, /^<!DOCTYPE html>/);
+      assert.ok(resendBody.html.includes('WORLD MONITOR'));
+      assert.ok(resendBody.html.includes('android-chrome-192x192.png'));
+      assert.ok(resendBody.html.includes('>Enterprise lead</span>'));
+      assert.ok(resendBody.html.includes('+1 555 123 4567'));
     });
 
     it('rejects invalid phone format', async () => {
@@ -196,7 +249,7 @@ describe('LeadsService.submitContact', () => {
       process.env.VERCEL_ENV = 'development';
       globalThis.fetch = async (url) => {
         if (typeof url === 'string' && url.includes('fake-convex')) {
-          return new Response(JSON.stringify({ status: 'success', value: { status: 'sent' } }));
+          return new Response(JSON.stringify({ status: 'sent' }));
         }
         if (typeof url === 'string' && url.includes('resend')) return new Response(JSON.stringify({ id: '1' }));
         return new Response('{}');
@@ -211,7 +264,7 @@ describe('LeadsService.submitContact', () => {
       delete process.env.RESEND_API_KEY;
       globalThis.fetch = async (url) => {
         if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
-        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'success', value: { status: 'sent' } }));
+        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'sent' }));
         return new Response('{}');
       };
       const res = await submitContact(makeCtx(), validReq());
@@ -222,7 +275,7 @@ describe('LeadsService.submitContact', () => {
     it('returns emailSent: false when Resend API returns error', async () => {
       globalThis.fetch = async (url) => {
         if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
-        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'success', value: { status: 'sent' } }));
+        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'sent' }));
         if (typeof url === 'string' && url.includes('resend')) return new Response('Rate limited', { status: 429 });
         return new Response('{}');
       };
@@ -234,7 +287,7 @@ describe('LeadsService.submitContact', () => {
     it('returns emailSent: true on successful notification', async () => {
       globalThis.fetch = async (url) => {
         if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
-        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'success', value: { status: 'sent' } }));
+        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'sent' }));
         if (typeof url === 'string' && url.includes('resend')) return new Response(JSON.stringify({ id: 'msg_123' }));
         return new Response('{}');
       };
@@ -246,7 +299,7 @@ describe('LeadsService.submitContact', () => {
     it('still succeeds (stores in Convex) even when email fails', async () => {
       globalThis.fetch = async (url) => {
         if (typeof url === 'string' && url.includes('turnstile')) return new Response(JSON.stringify({ success: true }));
-        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'success', value: { status: 'sent' } }));
+        if (typeof url === 'string' && url.includes('fake-convex')) return new Response(JSON.stringify({ status: 'sent' }));
         if (typeof url === 'string' && url.includes('resend')) throw new Error('Network failure');
         return new Response('{}');
       };
@@ -278,31 +331,57 @@ describe('LeadsService.submitContact', () => {
       await assert.rejects(() => submitContact(makeCtx(), validReq()));
     });
 
-    it('translates Convex free-email policy failures into 422 ApiError', async () => {
-      globalThis.fetch = async (url) => {
-        if (typeof url === 'string' && url.includes('turnstile')) {
-          return new Response(JSON.stringify({ success: true }));
-        }
-        return new Response('{}');
-      };
-      const policyError = {
-        kind: 'FREE_EMAIL_NOT_ALLOWED',
-        message: 'Please use a corporate email address.',
-      };
-
-      for (const errorData of [policyError, JSON.stringify(policyError)]) {
-        ConvexHttpClient.prototype.mutation = async () => {
-          throw new ConvexError(errorData);
+    for (const status of [422, 429]) {
+      it(`preserves storage policy status ${status} without notifying`, async () => {
+        globalThis.fetch = async (url) => {
+          if (url.includes('turnstile')) return Response.json({ success: true });
+          assert.ok(url.includes('/leads/submit-contact'));
+          return Response.json({ error: 'policy' }, { status });
         };
+        await assert.rejects(() => submitContact(makeCtx(), validReq()),
+          (err) => err instanceof ApiError && err.statusCode === status);
+      });
+    }
 
-        await assert.rejects(
-          () => submitContact(makeCtx(), validReq()),
-          (err) =>
-            err instanceof ApiError
-            && err.statusCode === 422
-            && /corporate email/i.test(err.message),
-        );
-      }
+    it('sends the server secret only to the contact bridge after Turnstile succeeds', async () => {
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        calls.push(url);
+        if (url.includes('turnstile')) return Response.json({ success: true });
+        if (url.includes('fake-convex')) {
+          assert.equal(url, 'https://fake-convex.convex.site/leads/submit-contact');
+          assert.equal(init.headers['x-convex-shared-secret'], 'synthetic-contact-secret');
+          assert.equal(JSON.parse(init.body).email, 'test@example.com');
+          return Response.json({ status: 'sent' });
+        }
+        assert.equal(init.headers['x-convex-shared-secret'], undefined);
+        return Response.json({ id: 'synthetic-email' });
+      };
+      assert.deepEqual(await submitContact(makeCtx(), validReq()), { status: 'sent', emailSent: true });
+      assert.equal(calls.length, 3);
+      assert.ok(calls[0].includes('turnstile'));
     });
+
+    it('fails closed without the server secret', async () => {
+      delete process.env.CONVEX_SERVER_SHARED_SECRET;
+      globalThis.fetch = async (url) => {
+        assert.ok(url.includes('turnstile'));
+        return Response.json({ success: true });
+      };
+      await assert.rejects(() => submitContact(makeCtx(), validReq()),
+        (err) => err instanceof ApiError && err.statusCode === 503);
+    });
+
+    for (const body of ['not json', '{}', '{"status":"failed"}']) {
+      it(`does not notify on invalid storage acknowledgment ${body}`, async () => {
+        globalThis.fetch = async (url) => {
+          if (url.includes('turnstile')) return Response.json({ success: true });
+          assert.ok(url.includes('/leads/submit-contact'));
+          return new Response(body);
+        };
+        await assert.rejects(() => submitContact(makeCtx(), validReq()),
+          (err) => err instanceof ApiError && err.statusCode === 503);
+      });
+    }
   });
 });

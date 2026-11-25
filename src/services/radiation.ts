@@ -1,4 +1,4 @@
-import { createCircuitBreaker } from '@/utils';
+import { createCircuitBreaker } from '@/utils/circuit-breaker';
 import { getRpcBaseUrl } from '@/services/rpc-client';
 import { getHydratedData } from '@/services/bootstrap';
 import type { RadiationConfidence as ProtoRadiationConfidence, RadiationFreshness as ProtoRadiationFreshness, RadiationObservation as ProtoRadiationObservation, RadiationSeverity as ProtoRadiationSeverity, RadiationSource as ProtoRadiationSource, ListRadiationObservationsResponse } from '@/generated/client/worldmonitor/radiation/v1/service_client';
@@ -23,7 +23,7 @@ export interface RadiationObservation {
   freshness: RadiationFreshness;
   baselineValue: number;
   delta: number;
-  zScore: number;
+  zScore: number | null;
   severity: RadiationSeverity;
   confidence: RadiationConfidence;
   corroborated: boolean;
@@ -53,6 +53,7 @@ const breaker = createCircuitBreaker<RadiationWatchResult>({
   name: 'Radiation Watch',
   cacheTtlMs: 15 * 60 * 1000,
   persistCache: true,
+  revivePersistedData: reviveRadiationWatchResult,
 });
 const client = new RadiationServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 
@@ -71,6 +72,23 @@ const emptyResult: RadiationWatchResult = {
   },
 };
 
+function reviveDate(value: Date): Date {
+  if (value instanceof Date) return value;
+  const revived = new Date(value as unknown as string | number);
+  return Number.isNaN(revived.getTime()) ? new Date(0) : revived;
+}
+
+function reviveRadiationWatchResult(result: RadiationWatchResult): RadiationWatchResult {
+  return {
+    ...result,
+    fetchedAt: reviveDate(result.fetchedAt),
+    observations: result.observations.map((observation) => ({
+      ...observation,
+      observedAt: reviveDate(observation.observedAt),
+    })),
+  };
+}
+
 function toObservation(raw: ProtoRadiationObservation): RadiationObservation {
   return {
     id: raw.id,
@@ -86,7 +104,7 @@ function toObservation(raw: ProtoRadiationObservation): RadiationObservation {
     freshness: mapFreshness(raw.freshness),
     baselineValue: raw.baselineValue ?? raw.value,
     delta: raw.delta ?? 0,
-    zScore: raw.zScore ?? 0,
+    zScore: (raw.zScoreAvailable ?? raw.zScore !== 0) ? raw.zScore : null,
     severity: mapSeverity(raw.severity),
     confidence: mapConfidence(raw.confidence),
     corroborated: raw.corroborated ?? false,
@@ -101,19 +119,24 @@ export async function fetchRadiationWatch(): Promise<RadiationWatchResult> {
   if (hydrated?.observations?.length) {
     const result = toResult(hydrated);
     latestRadiationWatchResult = result;
+    // Warm the breaker under the same key a later recurring call reads
+    // (#7048); the observation-count guard mirrors its shouldCache.
+    breaker.recordSuccess(result);
     return result;
   }
 
-  return breaker.execute(async () => {
+  const result = await breaker.execute(async () => {
     const response = await client.listRadiationObservations({
       maxItems: 18,
     }, {
       signal: AbortSignal.timeout(20_000),
     });
-    const result = toResult(response);
-    latestRadiationWatchResult = result;
-    return result;
+    const liveResult = toResult(response);
+    latestRadiationWatchResult = liveResult;
+    return liveResult;
   }, emptyResult, { shouldCache: (r) => r.observations.length > 0 });
+  latestRadiationWatchResult = result;
+  return result;
 }
 
 export function getLatestRadiationWatch(): RadiationWatchResult | null {

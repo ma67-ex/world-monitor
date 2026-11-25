@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,9 +18,12 @@ import {
   countSectionScriptKeys,
   extractBundleOption,
   extractBundleSections,
+  extractRunBundleSectionSource,
+  hasNamedImportBinding,
   resolveExpr,
   stripLineComments,
 } from './helpers/bundle-section-parser.mjs';
+import { createTempDir } from './helpers/temp-dir.mjs';
 
 // ── Resolver ─────────────────────────────────────────────────────────────
 
@@ -73,7 +76,7 @@ test('resolver: follows a relative named import to a sibling module', () => {
   // that section at all. The cycle guard must key on the FILE, not its
   // directory, or importing from a sibling in the same folder looks like a
   // self-reference and resolves to null.
-  const dir = mkdtempSync(join(tmpdir(), 'wm-bundle-parser-'));
+  const dir = createTempDir('wm-bundle-parser-');
   const bundlePath = join(dir, 'seed-bundle-sample.mjs');
   writeFileSync(join(dir, 'seed-thing.mjs'), 'export const THING_TIMEOUT_MS = 300_000;\n');
   const src = "import { THING_TIMEOUT_MS } from './seed-thing.mjs';\n";
@@ -85,7 +88,7 @@ test('resolver: follows a relative named import to a sibling module', () => {
 });
 
 test('resolver: follows a renamed named import', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'wm-bundle-parser-'));
+  const dir = createTempDir('wm-bundle-parser-');
   const bundlePath = join(dir, 'seed-bundle-sample.mjs');
   writeFileSync(join(dir, 'seed-thing.mjs'), 'export const RAW_MS = 120_000;\n');
   const src = "import { RAW_MS as SECTION_MS } from './seed-thing.mjs';\n";
@@ -94,11 +97,43 @@ test('resolver: follows a renamed named import', () => {
 });
 
 test('resolver: a bare package specifier is not followed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'wm-bundle-parser-'));
+  const dir = createTempDir('wm-bundle-parser-');
   const bundlePath = join(dir, 'seed-bundle-sample.mjs');
   const src = "import { SOME_MS } from 'some-package';\n";
   writeFileSync(bundlePath, src);
   assert.equal(resolveExpr(src, 'SOME_MS', {}, { file: bundlePath }), null);
+});
+
+test('hasNamedImportBinding accepts only the exact static named import', () => {
+  const expected = {
+    moduleSpecifier: './seed-owid-energy-mix.mjs',
+    importedName: 'OWID_SOURCE_VERSION',
+  };
+  assert.equal(
+    hasNamedImportBinding(
+      "import { OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs';\n",
+      expected,
+    ),
+    true,
+  );
+
+  const impostors = [
+    `const text = "import { OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs'";
+const OWID_SOURCE_VERSION = 'hard-coded';`,
+    "// import { OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs';",
+    "/* import { OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs'; */",
+    "const text = `import { OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs'`;",
+    "import { OWID_SOURCE_VERSION } from './wrong-producer.mjs';",
+    "import { OTHER_VERSION as OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs';",
+    "import { OWID_SOURCE_VERSION as LOCAL_VERSION } from './seed-owid-energy-mix.mjs';",
+    "import OWID_SOURCE_VERSION from './seed-owid-energy-mix.mjs';",
+    "import * as OWID_SOURCE_VERSION from './seed-owid-energy-mix.mjs';",
+    "await import('./seed-owid-energy-mix.mjs');",
+    "export { OWID_SOURCE_VERSION } from './seed-owid-energy-mix.mjs';",
+  ];
+  for (const source of impostors) {
+    assert.equal(hasNamedImportBinding(source, expected), false, source);
+  }
 });
 
 // ── Comment stripping ────────────────────────────────────────────────────
@@ -149,7 +184,7 @@ test('extractBundleSections: catches sections with intervalMs and timeoutMs', ()
   const sample = `
 const HOUR = 60 * 60 * 1000;
 export const SECTIONS = [
-  { label: 'A', script: 'seed-a.mjs', intervalMs: HOUR, timeoutMs: 120_000 },
+  { label: 'A', script: 'seed-a.mjs', expectedSourceVersion: SOURCE_VERSION, intervalMs: HOUR, timeoutMs: 120_000 },
   { label: 'B', script: 'seed-b.mjs', canonicalKey: 'foo', intervalMs: 12 * HOUR, timeoutMs: 300_000 },
 ];
 `;
@@ -157,8 +192,23 @@ export const SECTIONS = [
   assert.equal(sections.length, 2);
   assert.equal(sections[0].label, 'A');
   assert.equal(sections[0].timeoutMsExpr, '120_000');
+  assert.equal(sections[0].expectedSourceVersionExpr, 'SOURCE_VERSION');
   assert.equal(sections[1].intervalMsExpr, '12 * HOUR');
+  assert.equal(sections[1].expectedSourceVersionExpr, null);
   assert.equal(countSectionAnchors(stripLineComments(sample)), 2);
+});
+
+test('a dead section outside runBundle is not treated as live configuration', () => {
+  const sample = `
+const deadSections = [
+  { label: 'OWID-Energy-Mix', script: 'seed-owid-energy-mix.mjs', expectedSourceVersion: OWID_SOURCE_VERSION, intervalMs: 1000 },
+];
+await runBundle('energy-sources', []);
+`;
+
+  const sectionSource = extractRunBundleSectionSource(sample, 'energy-sources');
+  assert.notEqual(sectionSource, null);
+  assert.equal(extractBundleSections(sectionSource).length, 0);
 });
 
 test('extractBundleSections: reports a missing timeoutMs as null, not as a default', () => {
@@ -166,6 +216,74 @@ test('extractBundleSections: reports a missing timeoutMs as null, not as a defau
   // invent a number, so callers can tell "omitted" from "declared".
   const sample = "const S = [{ label: 'A', script: 'seed-a.mjs', intervalMs: 1000 }];\n";
   assert.equal(extractBundleSections(sample)[0].timeoutMsExpr, null);
+});
+
+test('extractBundleSections: reads only an exact direct source-version property', () => {
+  const sample = `
+const S = [{
+  label: 'A',
+  script: 'seed-a.mjs',
+  retry: { expectedSourceVersion: RETRY_VERSION },
+  note: 'expectedSourceVersion: STRING_VERSION',
+  unexpectedSourceVersion: PREFIX_VERSION,
+  ['unrelatedKey']: OTHER_VERSION,
+  expectedSourceVersion: SOURCE_VERSION,
+  intervalMs: 1000,
+}];
+`;
+  assert.equal(extractBundleSections(sample)[0].expectedSourceVersionExpr, 'SOURCE_VERSION');
+
+  const unsupportedOnly = [
+    ['nested object', 'retry: { expectedSourceVersion: RETRY_VERSION },'],
+    ['prefixed key', 'unexpectedSourceVersion: PREFIX_VERSION,'],
+    ['string contents', "note: 'expectedSourceVersion: STRING_VERSION',"],
+    ['shorthand', 'expectedSourceVersion,'],
+  ];
+  for (const [description, declaration] of unsupportedOnly) {
+    const unsupportedSample = `
+const S = [{
+  label: 'A',
+  script: 'seed-a.mjs',
+  ${declaration}
+  intervalMs: 1000,
+}];
+`;
+    assert.equal(
+      extractBundleSections(unsupportedSample)[0].expectedSourceVersionExpr,
+      null,
+      description,
+    );
+  }
+});
+
+test('extractBundleSections: fails closed on direct source-version overrides', () => {
+  const overrides = [
+    'expectedSourceVersion: OTHER_VERSION,',
+    'expectedSourceVersion,',
+    "'expectedSourceVersion': OTHER_VERSION,",
+    "['expectedSourceVersion']: OTHER_VERSION,",
+    'expected\\u0053ourceVersion: OTHER_VERSION,',
+    '[RUNTIME_KEY]: OTHER_VERSION,',
+    "get expectedSourceVersion() { return OTHER_VERSION; },",
+    'expectedSourceVersion() { return OTHER_VERSION; },',
+  ];
+
+  for (const override of overrides) {
+    const sample = `
+const S = [{
+  label: 'A',
+  script: 'seed-a.mjs',
+  expectedSourceVersion: SOURCE_VERSION,
+  ${override}
+  intervalMs: 1000,
+}];
+`;
+    assert.equal(
+      extractBundleSections(sample)[0].expectedSourceVersionExpr,
+      null,
+      override,
+    );
+  }
 });
 
 test('extractBundleSections: handles sections with nested objects (Greptile P2)', () => {
@@ -273,4 +391,59 @@ test('a section declaring a nested timeoutMs is dropped rather than mis-read', (
   const stripped = stripLineComments(sample);
   assert.equal(extractBundleSections(sample).length, 0, 'ambiguous timeout must not be guessed');
   assert.equal(countSectionScriptKeys(stripped), 1, 'the count still sees the section, so the gate fails loudly');
+});
+
+// ── #6562 item 5: scanner residuals ──────────────────────────────────────
+
+test('stripLineComments: a regex literal containing // is not a line comment', () => {
+  // The exact shape from the issue: `const RE = /[//]/` used to truncate the
+  // file at the first slash pair, and the count cross-check blamed a
+  // commented-out section.
+  const src = [
+    "const RE = /[//]/;",
+    "const N = 5;",
+  ].join('\n');
+  const out = stripLineComments(src);
+  assert.match(out, /\/\[\/\/\]\//, 'the regex literal survives verbatim');
+  assert.match(out, /const N = 5;/, 'source after the regex literal survives');
+});
+
+test('stripLineComments: division and keyword-prefixed regexes stay intact', () => {
+  const src = [
+    'const half = 10 / 2 / 1;',
+    'function f(s) { return /[//]+$/g.test(s); }',
+    "const U = 'https://example.com//path';",
+  ].join('\n');
+  const out = stripLineComments(src);
+  assert.ok(out.includes('10 / 2 / 1'), 'division slashes are untouched');
+  assert.ok(out.includes('return /[//]+$/g.test(s)'), 'keyword-prefixed regex survives');
+  assert.match(out, /https:\/\/example\.com\/\/path/, 'URL in string survives');
+});
+
+test('resolver: follows a named import from a default-plus-named statement', () => {
+  // `import def, { X } from './y.mjs'` used to be invisible to the resolver.
+  const dir = createTempDir('wm-bundle-parser-');
+  const bundlePath = join(dir, 'seed-bundle-sample.mjs');
+  writeFileSync(join(dir, 'seed-thing.mjs'), 'export const THING_MS = 90_000;\n');
+  const src = "import defaultThing from './other.mjs';\nimport base, { THING_MS } from './seed-thing.mjs';\n";
+  writeFileSync(bundlePath, src);
+  assert.equal(resolveExpr(src, 'THING_MS', {}, { file: bundlePath }), 90_000);
+});
+
+test('resolver: follows an `export { X } from` re-export', () => {
+  const dir = createTempDir('wm-bundle-parser-');
+  const bundlePath = join(dir, 'seed-bundle-sample.mjs');
+  writeFileSync(join(dir, 'origin.mjs'), 'export const ORIGIN_MS = 45_000;\n');
+  writeFileSync(join(dir, 'middle.mjs'), "export { ORIGIN_MS as SHARED_MS } from './origin.mjs';\n");
+  const src = "import { SHARED_MS } from './middle.mjs';\n";
+  writeFileSync(bundlePath, src);
+  assert.equal(resolveExpr(src, 'SHARED_MS', {}, { file: bundlePath }), 45_000);
+});
+
+test('extractBundleOption requires a word boundary before the key', () => {
+  // Without the boundary, `fooMaxBundleMs:` satisfied a `maxBundleMs` lookup.
+  const sample = '], { fooMaxBundleMs: 999_000 });';
+  assert.equal(extractBundleOption(sample, 'maxBundleMs'), null);
+  const real = '], { maxBundleMs: 570_000 });';
+  assert.equal(extractBundleOption(real, 'maxBundleMs'), '570_000');
 });

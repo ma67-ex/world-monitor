@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { validateDecisionSignalProvenance } from '../shared/decision-signal-provenance';
@@ -107,6 +106,47 @@ describe('China official policy adapters (#5576)', () => {
     assert.equal(parsed.effectiveDate, '2026-08-01');
   });
 
+  it('reads NDRC publication dates from document metadata when the listing has no date column', async () => {
+    const listing = '<a href="iteminfo.jsp?id=20630">国家发展改革委等关于印发《核电厂退役准备管理暂行办法》的通知<small>(发改能源规〔2026〕582号 2026年4月23日印发)</small></a>';
+    const detail = '<meta name="PubDate" content="2026-04-24"><div class="article-content">现印发管理办法，请遵照执行。本办法自2026年7月1日起施行。</div>';
+    const requested: string[] = [];
+    const result = await fetchAgencyDocuments('NDRC', {
+      fetchImpl: async (input) => {
+        const url = String(input);
+        requested.push(url);
+        return officialResponse(url, url === CHINA_POLICY_SOURCES.NDRC.listUrl ? listing : detail);
+      },
+      sleep: async () => {},
+    });
+
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(requested, [
+      CHINA_POLICY_SOURCES.NDRC.listUrl,
+      'https://zfxxgk.ndrc.gov.cn/web/iteminfo.jsp?id=20630',
+    ]);
+    assert.equal(result.documents[0].publicationDate, '2026-04-24');
+    assert.equal(result.documents[0].effectiveDate, '2026-07-01');
+    assert.match(result.documents[0].originalText, /请遵照执行/);
+  });
+
+  it('rejects an undated NDRC document and keeps other agencies dependent on dated listings', async () => {
+    const listing = '<a href="iteminfo.jsp?id=20630">国家发展改革委关于印发管理办法的通知</a>';
+    const result = await fetchAgencyDocuments('NDRC', {
+      fetchImpl: async (input) => officialResponse(String(input),
+        String(input) === CHINA_POLICY_SOURCES.NDRC.listUrl
+          ? listing
+          : '<div class="article-content">现印发管理办法，请遵照执行。</div>'),
+      sleep: async () => {},
+    });
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.requestCount, 2);
+    assert.equal(result.documents.length, 0);
+    assert.equal(result.failures[0].reason, 'document body or date missing');
+    assert.deepEqual(parseAgencyListing('PBOC',
+      '<a href="/tiaofasi/144941/144957/123456/index.html">关于印发管理办法的通知</a>'), []);
+  });
+
   it('fetches the MIIT detail document instead of publishing its listing snippet', async () => {
     const listing = await fixture('miit.json');
     const detail = await fixture('detail.html');
@@ -162,8 +202,7 @@ describe('China official policy adapters (#5576)', () => {
     assert.equal(parsed.effectiveDate, '2026-08-01');
   });
 
-  it('parses bounded hostile markup without superlinear rescans', () => {
-    const startedAt = performance.now();
+  it('parses bounded hostile markup correctly', () => {
     assert.equal(__testing__.stripHtml('<script '.repeat(16_000)), '');
     assert.deepEqual(parseAgencyListing('CAC', '<a >'.repeat(16_000)), []);
     const nested = parsePolicyDocumentHtml(
@@ -176,9 +215,188 @@ describe('China official policy adapters (#5576)', () => {
       ).originalText,
       '',
     );
-    const elapsedMs = performance.now() - startedAt;
+  });
 
-    assert.ok(elapsedMs < 1_000, `hostile markup parsing took ${elapsedMs.toFixed(1)}ms`);
+  // Scaling, not wall-clock: an absolute millisecond ceiling measures the
+  // runner's load as much as the parser and flakes on a busy CI box while
+  // passing in isolation. `process.cpuUsage()` is the clock for the same
+  // reason — `performance.now()` includes time this process was descheduled
+  // under `test:data`'s 16-way oversubscription, which compresses a genuine
+  // quadratic toward the linear band (observed 9.5x wall-clock on a loaded
+  // GitHub runner) even though the parser's own CPU still scales ~14x.
+  // CPU time still counts this process's GC; it just stops charging the
+  // parser for a sibling worker's slice (#7238).
+  //
+  // The size step is 8x. GC noise rides along with the measurement (the
+  // larger input allocates proportionally more string, and best-of-N does not
+  // remove allocation-driven cost), so linear and quadratic need a wide gap.
+  // At the old 4x step they measured ~4x and ~14x, and a 12x gate left the
+  // quadratic control 1.2x of headroom: CI compressed it to 11.9x three times
+  // (September, #9633, #10336). At 8x they measure ~8x and ~50x, and the 24x
+  // gate keeps the linear guard's 3x headroom while the control gets 2x
+  // (measured 2026-11-09 under 40-way load on 18 cores: guard 8.0-9.2x,
+  // control median 48-59x).
+  //
+  // `test:data` runs this file at concurrency 16; a discarded warmup and the
+  // 24x gate tolerate the linear+GC inflation that load has produced.
+  // Inputs are built once per size, outside every timed call: allocating
+  // them is linear bookkeeping, not parser work, and re-allocating on each
+  // attempt would add GC noise on top of the measurement — the exact
+  // allocation-driven noise this guard is designed to filter out.
+  //
+  // Keep the ratio-of-mins guard, but time fixed batches and report per-scan
+  // CPU cost. Batching amortizes clock overhead and GC noise, and warms both
+  // input sizes before sampling without retrying until a desired result.
+  const buildFixtures = (repeat: number) => {
+    const openers = '<div class="content">'.repeat(repeat);
+    const closers = '</div>'.repeat(repeat);
+    return {
+      nested: `<body>${openers}正文内容足够长且必须保留${closers}</body>`,
+      unbalanced: `${'<div>'.repeat(repeat)}${'</span>'.repeat(repeat)}`,
+      script: '<script '.repeat(repeat),
+      anchors: '<a >'.repeat(repeat),
+    };
+  };
+
+  type ScalingFixtures = ReturnType<typeof buildFixtures>;
+
+  const SCALING_ATTEMPTS = 5;
+  const SCALING_SAMPLE_RUNS = 4;
+  const SCALING_STEP = 8;
+  const SCALING_CEILING_RATIO = 24;
+  const scalingCeilingMs = (base: number): number =>
+    base * SCALING_CEILING_RATIO + 2;
+  const rejectsScaling = ({ base, scaled }: { base: number; scaled: number }): boolean =>
+    scaled > scalingCeilingMs(base);
+  // The guard judges ratio-of-mins so a single stalled sample cannot falsely
+  // trip it (#6985 / #7102). The same min/min aggregation compresses a genuine
+  // quadratic when the scaled series draws one fast sample (11.9x on CI in
+  // September, 11.4x on PR #9633, at the old 4x step), so the positive control
+  // judges the median per-attempt ratio against the same ceiling. #8019 had folded the
+  // control back onto min/min and the flake returned.
+  const controlTripsGate = ({ medianRatio }: { medianRatio: number }): boolean =>
+    medianRatio > SCALING_CEILING_RATIO;
+  const summarizeAttempts = (attempts: Array<[baseMs: number, scaledMs: number]>) => {
+    const base = Math.min(...attempts.map(([baseMs]) => baseMs));
+    const scaled = Math.min(...attempts.map(([, scaledMs]) => scaledMs));
+    const ratios = attempts.map(([baseMs, scaledMs]) => scaledMs / baseMs).sort((a, b) => a - b);
+    return {
+      base,
+      scaled,
+      ratio: scaled / base,
+      marginMs: scaled - scalingCeilingMs(base),
+      medianRatio: ratios[Math.floor(ratios.length / 2)]!,
+    };
+  };
+
+  it('keeps the scaling predicate at 24x plus 2ms, including the control gap', () => {
+    assert.equal(rejectsScaling({ base: 10, scaled: 235 }), false);
+    assert.equal(rejectsScaling({ base: 1, scaled: 26 }), false);
+    assert.equal(rejectsScaling({ base: 10, scaled: 242 }), false);
+    assert.equal(rejectsScaling({ base: 10, scaled: 243 }), true);
+  });
+
+  it('judges the positive control on the median attempt, not ratio-of-mins', () => {
+    // Shaped like PR #9633's unit-shard (1) failure at the 8x step: one fast
+    // scaled sample puts min/min under the gate while every other attempt
+    // scaled ~52x. A quadratic must still trip the control.
+    const lucky = summarizeAttempts([
+      [16.5, 376.0], [17.0, 890.0], [17.2, 880.0], [17.1, 905.0], [16.9, 870.0],
+    ]);
+    assert.equal(rejectsScaling(lucky), false, 'min/min alone compresses this quadratic under the gate');
+    assert.equal(controlTripsGate(lucky), true);
+    // A linear scan with GC noise (~20x at worst under 16-way load) must not.
+    assert.equal(controlTripsGate(summarizeAttempts([
+      [10, 82], [10, 196], [10, 88], [10, 202], [10, 80],
+    ])), false);
+  });
+
+  const measureScaling = (
+    walk: (fixtures: ScalingFixtures) => void,
+    baseRepeat: number,
+  ): ReturnType<typeof summarizeAttempts> => {
+    const baseFixtures = buildFixtures(baseRepeat);
+    const scaledFixtures = buildFixtures(baseRepeat * SCALING_STEP);
+
+    const timeOnce = (fixtures: ScalingFixtures): number => {
+      const startedAt = process.cpuUsage();
+      for (let run = 0; run < SCALING_SAMPLE_RUNS; run += 1) walk(fixtures);
+      const used = process.cpuUsage(startedAt);
+      return (used.user + used.system) / (1000 * SCALING_SAMPLE_RUNS);
+    };
+
+    // Discarded warmup, one per size.
+    timeOnce(baseFixtures);
+    timeOnce(scaledFixtures);
+
+    // Interleaved, not sequential: timing all of base then all of scaled
+    // concentrates any transient runner stall into whichever series happens
+    // to be running, which can push the ratio over the gate on a loaded box
+    // even though neither size is actually slow. Alternating means a stall
+    // lands on both series' running minimum instead of just one (#6985).
+    const attempts: Array<[number, number]> = [];
+    for (let attempt = 0; attempt < SCALING_ATTEMPTS; attempt += 1) {
+      const baseMs = timeOnce(baseFixtures);
+      const scaledMs = timeOnce(scaledFixtures);
+      attempts.push([baseMs, scaledMs]);
+    }
+    return summarizeAttempts(attempts);
+  };
+
+  const scalingDetail = (
+    scaling: ReturnType<typeof measureScaling>,
+  ): string =>
+    `${scaling.ratio.toFixed(1)}x min/min, median attempt ${scaling.medianRatio.toFixed(1)}x ` +
+    `— linear is ~${SCALING_STEP}x, catastrophic backtracking ~${SCALING_STEP ** 2}x ` +
+    `(${scaling.base.toFixed(1)}ms → ${scaling.scaled.toFixed(1)}ms, ` +
+    `${scaling.marginMs.toFixed(1)}ms against the ceiling)`;
+
+  it('parses hostile markup without superlinear rescans', (t) => {
+    const scaling = measureScaling((fixtures) => {
+      __testing__.stripHtml(fixtures.script);
+      parseAgencyListing('CAC', fixtures.anchors);
+      parsePolicyDocumentHtml(fixtures.nested);
+      parsePolicyDocumentHtml(fixtures.unbalanced);
+    }, 4_000);
+
+    t.diagnostic(scalingDetail(scaling));
+    assert.ok(
+      !rejectsScaling(scaling),
+      `scaling the input ${SCALING_STEP}x scaled cost ${scalingDetail(scaling)}`,
+    );
+  });
+
+  it('keeps its teeth: a genuinely quadratic scan still trips the gate', (t) => {
+    // Positive control for the guard above. Every change that has made that
+    // guard quieter — the size step, the discarded warmup, the ceiling, the
+    // interleaved best-of-5 (#6985), CPU-time (#7238) — traded sensitivity
+    // for stability, and nothing in the suite has ever checked how much
+    // sensitivity was left. A guard that can no longer fail passes for the
+    // same reason a deleted one does.
+    //
+    // The control walks hostile input with the unbounded prefix rescan that
+    // parsePolicyHtmlFields' closing-tag unwind
+    // (scripts/china-policy/adapters.mjs) degenerates into once the open-tag
+    // count stops bounding it — the regression this suite exists to catch. It
+    // uses a test-only probe around that real parser path and runs at a smaller
+    // base size because a genuinely quadratic scan at the guard's 32k would
+    // dominate the file's runtime.
+    let stackComparisons = 0;
+    const scaling = measureScaling((fixtures) => {
+      stackComparisons += __testing__.runPolicyHtmlClosingTagRegressionProbe(
+        fixtures.unbalanced,
+      );
+    }, 700);
+
+    assert.ok(
+      stackComparisons > 0,
+      'the control must actually scan the parser closing-tag stack',
+    );
+    t.diagnostic(scalingDetail(scaling));
+    assert.ok(
+      controlTripsGate(scaling),
+      `the quadratic control must trip the gate, but scaled only ${scalingDetail(scaling)}`,
+    );
   });
 
   it('starts all independent agency listing requests concurrently', async () => {

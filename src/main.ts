@@ -1,17 +1,26 @@
 import './styles/base-layer.css';
 import './bootstrap/zod-csp';
+import './bootstrap/abort-signal-fallbacks';
+import './bootstrap/dom-fallbacks';
+import { initPwaInstall } from '@/services/pwa-install';
 import { SITE_VARIANT } from '@/config/variant';
 import { installLcpAttributionDebug } from '@/bootstrap/lcp-attribution';
 import { markLcpDebug } from '@/utils/lcp-debug';
+import { registerWebMcpTools, type WebMcpAppBindings } from '@/services/webmcp';
+import { safeStorageRemove } from '@/utils/safe-storage';
 import { enqueueSentryCall, installPreInitErrorQueue, scheduleSentryInit } from '@/bootstrap/sentry-defer';
+import { renderBootFailureScreen } from '@/bootstrap/boot-failure';
 import { registerClsReporting } from '@/bootstrap/cls-report';
 import { registerInpReporting } from '@/bootstrap/inp-report';
 import { registerLcpReporting } from '@/bootstrap/lcp-report';
-import { initVercelAnalytics } from '@/bootstrap/secondary-startup';
+import { initVercelAnalytics, stripSensitiveParamsFromUrl } from '@/bootstrap/secondary-startup';
 import { loadVariantThemeStylesheet } from '@/bootstrap/variant-theme';
-import { App } from './App';
 import { installUtmInterceptor } from './utils/utm';
 import { captureContentAttributionFromUrl } from '../shared/content-attribution';
+import { captureAgentRefFromSearch } from '../shared/agent-client-source';
+import { agentRefStorage } from '@/services/agent-ref';
+
+initPwaInstall();
 
 if (SITE_VARIANT === 'happy') {
   // Keeps happy-theme.css off other variants' eager CSS graph. On happy, the
@@ -198,6 +207,55 @@ function shouldSuppressCspViolation(
     (directive === 'script-src-elem' || directive === 'script-src')
     && /^https:\/\/www\.youtube\.com\/iframe_api(?:\?|$)/.test(blockedURI)
   ) return true;
+  // HeyTap Browser (the stock browser on OPPO / realme / OnePlus Android
+  // devices) injects its own chrome scripts from `dhfs.heytapimage.com` — the
+  // vendor's asset CDN — into every page it renders. The string `heytap`
+  // appears nowhere in `src/`, `pro-test/src/`, `public/`, `index.html` or
+  // `tests/`, so we never request it; the block is the browser's own injection
+  // failing against our policy, and the injected feature stays broken in that
+  // environment regardless of our code.
+  //
+  // Host-pinned rather than "any cross-origin script-src block", even though
+  // our `script-src` is `'self' 'strict-dynamic' <nonce> <hashes>` and admits
+  // no cross-origin host at all. That invariant would license the broader rule
+  // by the same argument the font-src section uses, but it must NOT be taken
+  // here: a script one of our OWN trusted scripts injects without carrying the
+  // nonce forward is also cross-origin and also blocked, and that is a real
+  // first-party defect. WORLDMONITOR-HP holds exactly that shape in its
+  // history — `clerk.worldmonitor.app/npm/@clerk/ui@1/dist/ui.browser.js` and
+  // `www.worldmonitor.app/assets/locale-zh-*.js` blocks through June/July —
+  // so the cross-origin invariant is the wrong axis and the vendor host is the
+  // right one. Exact parsed hostname (not a suffix) so a
+  // `dhfs.heytapimage.com.evil.com` lookalike still surfaces.
+  //
+  // Sizing: HP's 33k lifetime events are a fixed bug's residue. A 40-event
+  // sample taken 2026-08-29 spanned 2026-06-25 → 2026-08-27, and the only
+  // events after 2026-07-19 were 3 heytapimage blocks and 1 first-party
+  // `locale-zh` block — so this host IS the live tail, and pinning it lets the
+  // issue be resolved and act as a canary for any NEW script-src block class.
+  if (directive === 'script-src-elem' || directive === 'script-src') {
+    try {
+      const url = new URL(blockedURI);
+      if (url.protocol === 'https:' && url.hostname === 'dhfs.heytapimage.com') return true;
+    } catch { /* scheme-only values ('inline', 'eval') fall through */ }
+  }
+  // UC Browser (Alibaba's Android browser) fetches its own bottom-banner ad
+  // plugin from `uc.gre`, a pseudo-host the browser resolves internally, and
+  // reports the result to its `*.uc.cn` tracker. Both are http:, which our
+  // `connect-src 'self' https: wss: blob: data:` never admits, so no policy
+  // state of ours can reach them. `uc.cn` and `uc.gre` appear nowhere in our
+  // sources, so this is the browser's injection failing, the HeyTap case above
+  // on a different directive. The only blockedURIs WORLDMONITOR-HN has recorded
+  // since 2026-08-19 are these two (UC Browser 12.3.0 / Android 14,
+  // 2026-09-09). Exact `uc.gre`; `uc.cn` by registrable-domain suffix with a
+  // leading `.` because its tracker hosts vary, so `uc.cn.evil.com` and
+  // `notuc.cn` still surface.
+  if (directive === 'connect-src') {
+    try {
+      const host = new URL(blockedURI).hostname;
+      if (host === 'uc.gre' || host === 'uc.cn' || host.endsWith('.uc.cn')) return true;
+    } catch { /* scheme-only values fall through */ }
+  }
   // Zscaler enterprise content-filter proxy: `gateway.zscloud.net` is injected into
   // corporate users' frames by Zscaler's web filter agent. We never load it ourselves;
   // it's inserted into the host page outside our control (WORLDMONITOR-HT). Match by
@@ -233,8 +291,8 @@ function shouldSuppressCspViolation(
       // `div.show` — an origin-only frame (no path) that appears nowhere in our
       // source, repeated across many users over months. The injector is not
       // identified, but it does not need to be: frame-src is a BOUNDED
-      // allowlist — named hosts plus five vendor wildcard subdomains
-      // (*.clerk.accounts.dev, *.vercel.app, *.dodopayments.com and two more) —
+      // allowlist — named hosts plus four vendor wildcard subdomains
+      // (*.clerk.accounts.dev, *.dodopayments.com and two more) —
       // and div.show falls under none of them, so it can only have been framed
       // into the page from outside. That safety argument depends on frame-src
       // staying bounded — pinned by "CSP frame-src stays a bounded host
@@ -269,6 +327,18 @@ function shouldSuppressCspViolation(
   if (/manifest\.webmanifest$/.test(blockedURI)) return true;
   // Third-party injectors: Google Translate, Facebook Pixel.
   if (/gstatic\.com\/_\/translate/.test(blockedURI) || /facebook\.net/.test(blockedURI)) return true;
+  // Meta Pixel's form-post beacon. An injected server-side GTM tag (stape.io
+  // collect breadcrumbs) submitted a form to https://www.facebook.com/tr/
+  // (WORLDMONITOR-12G: 23 events from one user). The app ships no Meta Pixel,
+  // and the dashboard's form-action admits only 'self' and api.worldmonitor.app,
+  // so the post is never ours. Exact host, /tr path and form-action only: other
+  // facebook.com form targets and /tr under other directives still report.
+  if (directive === 'form-action') {
+    try {
+      const url = new URL(blockedURI);
+      if (url.protocol === 'https:' && url.host === 'www.facebook.com' && /^\/tr\/?$/.test(url.pathname)) return true;
+    } catch { /* scheme-only values fall through */ }
+  }
   // ---- font-src: one invariant, not a host list.
   //
   // The app ships `font-src 'self' data:` (vercel.json, the catch-all route that
@@ -337,10 +407,19 @@ function shouldSuppressCspViolation(
     try {
       const url = new URL(blockedURI);
       if (url.protocol === 'https:' && url.hostname === 'fonts.googleapis.com' && /^\/css2?$/.test(url.pathname)) return true;
+      // Google Fonts' legacy Early Access sheets (`/earlyaccess/<family>.css`),
+      // the same vendor and the same injection class. J0 round 7: Chrome desktop
+      // and Chrome iOS both loading `notosansmalayalam.css`, a family no surface
+      // of ours references.
+      if (url.protocol === 'https:' && url.hostname === 'fonts.googleapis.com' && /^\/earlyaccess\/[a-z0-9]+\.css$/.test(url.pathname)) return true;
       // Chinese-market extension CDN injecting its overlay stylesheet
       // (www.6ppn.com/ext/assets/style.<hash>.css — the /ext/ path is the
       // extension's own asset root). Exact host + .css path (WORLDMONITOR-J0).
       if (url.protocol === 'https:' && url.hostname === 'www.6ppn.com' && cssFile.test(url.pathname)) return true;
+      // Same extension asset shape from a second host
+      // (price.dianxiaobao.net/ext/assets/style.<hash>.css, WORLDMONITOR-J0
+      // round 6, the only unfiltered blockedURI in the issue's last 30 days).
+      if (url.protocol === 'https:' && url.hostname === 'price.dianxiaobao.net' && cssFile.test(url.pathname)) return true;
       // FontAwesome public CDN. The injected sheet is v4.7.0 — a 2016 release
       // this app never shipped — and our style-src is `'self' 'unsafe-inline'`
       // with no cross-origin host at all, so any use.fontawesome.com stylesheet
@@ -349,6 +428,14 @@ function shouldSuppressCspViolation(
       // script-src still surfaces.
       if (url.protocol === 'https:' && url.hostname === 'use.fontawesome.com'
           && url.pathname.startsWith('/releases/') && cssFile.test(url.pathname)) return true;
+      // Font Awesome's Kit service, the same vendor's other delivery host:
+      // `kit.fontawesome.com/<kit-id>.css`, where the hex kit ID is a per-account
+      // key. We never adopted Font Awesome, so the kit belongs to whoever
+      // injected it (WORLDMONITOR-J0 round 5, the only blockedURI since the
+      // unpkg rule shipped on 2026-08-16). Exact host + kit-ID path; the kit's
+      // JS loader under script-src still surfaces.
+      if (url.protocol === 'https:' && url.hostname === 'kit.fontawesome.com'
+          && /^\/[0-9a-f]+\.css$/.test(url.pathname)) return true;
       // Adobe Typekit / Adobe Fonts kit CSS, from both hosts it serves:
       // `use.typekit.net/<kit>.css` and the `p.typekit.net/p.css?...` tracking
       // sheet — together 17% of this issue's current volume. We self-host every
@@ -357,6 +444,28 @@ function shouldSuppressCspViolation(
       if (url.protocol === 'https:'
           && ((url.hostname === 'use.typekit.net' && /^\/[^/]+\.css$/.test(url.pathname))
             || (url.hostname === 'p.typekit.net' && url.pathname === '/p.css'))) return true;
+      // unpkg's Leaflet stylesheet. WorldMonitor renders every map with
+      // MapLibre/deck.gl and has never depended on Leaflet — the string appears
+      // nowhere in src/, api/, public/, index.html or package.json — and this
+      // page's style-src is `'self' 'unsafe-inline'` with no cross-origin host,
+      // so an unpkg sheet is injected by an extension or userscript. Round 4 of
+      // WORLDMONITOR-J0, and the only blockedURI still live: a 300-event sample
+      // taken 2026-08-16 showed every other host silent since its own rule
+      // shipped (6ppn 07-05, Google Fonts 07-20, Typekit 08-02, FontAwesome
+      // 08-07) while unpkg produced 6 events that morning across 3 builds.
+      // Exact host + `.css` path, like the 6ppn rule; unpkg under script-src
+      // still surfaces, which matters because it is a general npm CDN.
+      if (url.protocol === 'https:' && url.hostname === 'unpkg.com' && cssFile.test(url.pathname)) return true;
+      // A Bloomberg page's own stylesheet set (its font service on bwbx.io, the
+      // corporate theme on bloomberg.com, the bbthat.com frontend), all blocked
+      // within one minute of one Safari 27.2 session: a page's <link> tags
+      // copied into ours by an extension. We load no Bloomberg stylesheet;
+      // bloomberg.com appears in src/ only as an HLS manifest, which these
+      // style-src rules do not touch (WORLDMONITOR-J0 round 8, every blocked
+      // URI since round 7 apart from one first-party maplibre sheet).
+      if (url.protocol === 'https:'
+          && (url.hostname === 'assets.bwbx.io' || url.hostname === 'www.bloomberg.com' || url.hostname === 'www.bbthat.com')
+          && cssFile.test(url.pathname)) return true;
     } catch { /* unparseable values fall through */ }
     // Extension bug: a literal unsubstituted `[email]` template placeholder as
     // the stylesheet URL. Not a parseable host; can never be first-party.
@@ -456,21 +565,46 @@ window.addEventListener('securitypolicyviolation', (e) => {
   });
 });
 
-import { debugGetCells, getCellCount } from '@/services/geo-convergence';
 import { initMetaTags } from '@/services/meta-tags';
+import { installFetchFailureAttribution } from '@/services/fetch-failure-attribution';
 import { installRuntimeFetchPatch, installWebApiRedirect } from '@/services/runtime';
+import { primeBootstrapFastTier } from '@/services/bootstrap-prefetch';
+import { isDesktopRuntime } from '@/services/desktop-runtime';
 import { loadDesktopSecrets } from '@/services/runtime-config';
 import { applyStoredTheme } from '@/utils/theme-manager';
+import { applyDeviceTierClass } from '@/utils/device-tier';
 import { applyFont } from '@/services/font-settings';
 import { applyFontScale, FONT_SCALE_STORAGE_KEY } from '@/services/font-scale-settings';
-import { initAnalytics, trackContentHandoff } from '@/services/analytics';
-import { clearChunkReloadGuard, installChunkReloadGuard } from '@/bootstrap/chunk-reload';
+import { initAnalytics, rememberLandingUtm, trackContentHandoff } from '@/services/analytics';
+import { installChunkReloadGuard, readChunkModule } from '@/bootstrap/chunk-reload';
 import { initDebugBearRum } from '@/bootstrap/debugbear-rum';
 import { installStaleBundleCheck } from '@/bootstrap/stale-bundle-check';
+import { installBetaConsoleToggle } from '@/bootstrap/beta-console-toggle';
 import { installSwUpdateHandler, readServiceWorkerContainer } from '@/bootstrap/sw-update';
+import { scheduleAfterFirstPaint } from '@/utils/after-paint';
 
-// Auto-reload on stale chunk 404s after deployment (Vite fires this for modulepreload failures).
-const chunkReloadStorageKey = installChunkReloadGuard(__APP_VERSION__);
+// Auto-reload once per build on stale chunk 404s after deployment (Vite fires
+// `vite:preloadError` for failed dynamic imports and modulepreloads).
+installChunkReloadGuard(__BUILD_HASH__);
+
+// First-touch agent link (`?ref=agent-claude`). Read before App.ts referral
+// capture strips `ref` from the URL; recorded as the sign-up source on the
+// Convex user row (users.ensureRecord), which new API keys inherit.
+// Best-effort: blocked cookies mean "no attribution".
+captureAgentRefFromSearch(window.location.search, agentRefStorage());
+// First-touch channel (UTM, referrer host, landing page), stamped onto the
+// Dodo subscription at checkout. The visit is read now, before any URL
+// rewrite; the module itself loads off the main chunk (bundle budget).
+const acquisitionVisit = {
+  search: window.location.search,
+  pathname: window.location.pathname,
+  referrer: document.referrer,
+  now: Date.now(),
+};
+rememberLandingUtm(window.location.search);
+void import('../shared/acquisition-source')
+  .then((m) => { m.captureFirstTouchAcquisition(m.browserAcquisitionStorage(), acquisitionVisit); })
+  .catch(() => { /* no attribution */ });
 
 // Product analytics are secondary startup work; RUM starts once the trusted
 // dashboard entry executes so it can observe page-load vitals.
@@ -481,6 +615,9 @@ if (capturedContentAttribution) {
   // reload does not duplicate the landing handoff.
   trackContentHandoff();
 }
+// Drop unread secrets (email, license_key) from the live URL before any
+// telemetry vendor initializes.
+stripSensitiveParamsFromUrl();
 void initAnalytics();
 initVercelAnalytics();
 initDebugBearRum();
@@ -488,18 +625,28 @@ initDebugBearRum();
 // Initialize dynamic meta tags for sharing
 initMetaTags();
 
+// MUST stay first among the fetch wrappers. This one wraps native `fetch`
+// directly and sits at the BOTTOM of the delegation chain, so every request
+// that reaches the network passes through it — including the ones
+// `wmSessionFetch` early-returns past (non-API targets, credential-less public
+// data, premium paths), which is where the Umami beacon lives. Installed above
+// instead, it would miss exactly the traffic it exists to attribute.
+// Guarded by tests/fetch-attribution-install-order.test.mts. #6746.
+installFetchFailureAttribution();
 // In desktop mode, route /api/* calls to the local Tauri sidecar backend.
 installRuntimeFetchPatch();
 // In web production, route RPC calls through api.worldmonitor.app (Cloudflare edge).
 installWebApiRedirect();
-// Force-reload tabs running a stale bundle (catches the class of bug where
-// users keep a tab open across a wire-shape change). Skips when build-hash
-// is the 'dev' marker.
+// Update tabs running a stale bundle. A deploy that changes CLIENT_COMPAT
+// force-reloads them (the class of bug where users keep a tab open across a
+// wire-shape change); any other deploy waits until the tab is hidden and
+// quiet. Skips when build-hash is the 'dev' marker.
 installStaleBundleCheck();
 loadDesktopSecrets().catch(() => {});
 
 // Apply stored theme preference before app initialization (safety net for inline script)
 applyStoredTheme();
+applyDeviceTierClass(document.documentElement);
 applyFont();
 applyFontScale();
 window.addEventListener('storage', (event) => {
@@ -513,6 +660,7 @@ if (SITE_VARIANT && SITE_VARIANT !== 'full') {
   // Swap favicons to variant-specific versions before browser finishes fetching defaults
   document.querySelectorAll<HTMLLinkElement>('link[rel="icon"], link[rel="apple-touch-icon"]').forEach(link => {
     link.href = link.href
+      .replace(/\/favico\/android-chrome-96x96\.png$/, `/favico/${SITE_VARIANT}/android-chrome-192x192.png`)
       .replace(/\/favico\/favicon/g, `/favico/${SITE_VARIANT}/favicon`)
       .replace(/\/favico\/apple-touch-icon/g, `/favico/${SITE_VARIANT}/apple-touch-icon`);
   });
@@ -524,64 +672,88 @@ requestAnimationFrame(() => {
 });
 
 // Clear stale settings-open flag (survives ungraceful shutdown)
-try {
-  localStorage.removeItem('wm-settings-open');
-} catch {
-  // Storage may be unavailable (blocked cookies, sandboxed iframe). The flag is
-  // only a convenience hint, so boot must continue with the in-memory default.
-}
+safeStorageRemove('wm-settings-open');
 
 // Standalone windows: ?settings=1 = panel display settings, ?live-channels=1 = channel management
 // Both need i18n initialized so t() does not return undefined.
-const urlParams = new URL(location.href).searchParams;
+const urlParams = new URLSearchParams(location.search);
 if (urlParams.get('settings') === '1') {
-  void Promise.all([import('./services/i18n'), import('./settings-window')]).then(
+  void Promise.all([
+    readChunkModule(import('./services/i18n')),
+    readChunkModule(import('./settings-window')),
+  ]).then(
     async ([i18n, m]) => {
       await i18n.initI18n();
       m.initSettingsWindow();
     }
   );
 } else if (urlParams.get('live-channels') === '1') {
-  void Promise.all([import('./services/i18n'), import('./live-channels-window')]).then(
+  void Promise.all([
+    readChunkModule(import('./services/i18n')),
+    readChunkModule(import('./live-channels-window')),
+  ]).then(
     async ([i18n, m]) => {
       await i18n.initI18n();
       m.initLiveChannelsWindow();
     }
   );
 } else {
+  // Start the first dashboard data now instead of after the App chunk loads.
+  primeBootstrapFastTier();
   installUtmInterceptor();
-  markLcpDebug('wm:boot:app-construct');
-  const app = new App('app');
-  app
-    .init()
-    .then(() => {
-      clearChunkReloadGuard(chunkReloadStorageKey);
-    })
-    .catch(console.error);
+  let resolveBindings!: (bindings: WebMcpAppBindings) => void;
+  let rejectBindings!: (error: unknown) => void;
+  const bindings = new Promise<WebMcpAppBindings>((resolve, reject) => {
+    resolveBindings = resolve;
+    rejectBindings = reject;
+  });
+  const webMcpController = registerWebMcpTools(bindings);
+  // Import and constructor failures must reach the global startup error monitors.
+  void readChunkModule(import('./App')).then(({ App }) => {
+    markLcpDebug('wm:boot:app-construct');
+    const app = new App('app');
+    resolveBindings(app.getWebMcpBindings());
+    app
+      .init(webMcpController)
+      .catch((error: unknown) => {
+        console.error(error);
+        // A handled init rejection never reaches the global startup error
+        // monitors, so report it explicitly or boot failures stay invisible.
+        enqueueSentryCall((s) => {
+          s.captureException(error, { tags: { kind: 'boot_failure' } });
+        });
+        try {
+          // init() owns the WebMCP controller before its first await. A failed
+          // boot must run normal teardown so the browser cannot retain tools
+          // bound to an App that will never become ready.
+          app.destroy();
+        } catch (cleanupError) {
+          // Cleanup is best-effort on a partially initialised App; never replace
+          // the original boot failure with an unhandled teardown rejection.
+          console.error('[App] Failed to clean up after initialization failure:', cleanupError);
+        }
+        // After teardown, so the dead skeleton / half-rendered dashboard cannot
+        // paint over it. A render failure must not mask the boot error above.
+        try {
+          renderBootFailureScreen(error);
+        } catch (renderError) {
+          console.error('[App] Failed to render the boot-failure screen:', renderError);
+        }
+      });
+  }).catch((error: unknown) => {
+    rejectBindings(error);
+    webMcpController?.abort();
+    throw error;
+  });
 }
 
-// Debug helpers for geo-convergence testing (remove in production)
-(window as unknown as Record<string, unknown>).geoDebug = {
-  cells: debugGetCells,
-  count: getCellCount,
-};
+installBetaConsoleToggle(window);
 
-// Beta mode toggle: type `beta=true` / `beta=false` in console
-Object.defineProperty(window, 'beta', {
-  get() {
-    const on = localStorage.getItem('worldmonitor-beta-mode') === 'true';
-    console.log(`[Beta] ${on ? 'ON' : 'OFF'}`);
-    return on;
-  },
-  set(v: boolean) {
-    if (v) localStorage.setItem('worldmonitor-beta-mode', 'true');
-    else localStorage.removeItem('worldmonitor-beta-mode');
-    location.reload();
-  },
-});
-
-// Suppress native WKWebView context menu in Tauri — allows custom JS context menus
-if ('__TAURI_INTERNALS__' in window || '__TAURI__' in window) {
+// Suppress native WKWebView context menu in Tauri — allows custom JS context menus.
+// isDesktopRuntime(), not the raw bridge globals: a Tauri window can paint before
+// __TAURI_INTERNALS__ is attached, and the flag-forced desktop build has no
+// globals at all in a browser (#5912).
+if (isDesktopRuntime()) {
   document.addEventListener('contextmenu', (e) => {
     const target = e.target as HTMLElement;
     // Allow native menu on text inputs/textareas for copy/paste
@@ -594,7 +766,7 @@ if ('__TAURI_INTERNALS__' in window || '__TAURI__' in window) {
 // property exists but reading it throws SecurityError (WORLDMONITOR-Y5), which
 // at module scope aborts every top-level statement below. Read it once, safely.
 const swContainer = readServiceWorkerContainer();
-if (!('__TAURI_INTERNALS__' in window) && !('__TAURI__' in window) && swContainer) {
+if (!isDesktopRuntime() && swContainer) {
   installSwUpdateHandler({ version: __APP_VERSION__, swContainer });
 
   const SW_UPDATE_SUCCESS_INTERVAL_MS = 60 * 60 * 1000;
@@ -618,6 +790,15 @@ if (!('__TAURI_INTERNALS__' in window) && !('__TAURI__' in window) && swContaine
     } catch {}
   };
 
+  // Registration used to run here, at module evaluation. Workbox starts its
+  // precache wave the moment the SW installs, and on a slow mobile profile that
+  // wave (74 requests / 882 KB, all High priority) landed inside the paint
+  // window, taking ~4 s of bandwidth from the critical path (#5372). Defer the
+  // register() call to after load + idle so the same manifest is precached
+  // once the page has painted. Only WHEN changes: installSwUpdateHandler stays
+  // above so it still observes the early lifecycle, and the update-check chain
+  // below is unchanged.
+  const registerServiceWorker = (): void => {
   navigator.serviceWorker.register('/sw.js', { scope: '/' })
     .then((registration) => {
       console.log('[PWA] Service worker registered');
@@ -670,6 +851,9 @@ if (!('__TAURI_INTERNALS__' in window) && !('__TAURI__' in window) && swContaine
     .catch((err) => {
       console.warn('[PWA] Service worker registration failed:', err);
     });
+  };
+
+  scheduleAfterFirstPaint(registerServiceWorker);
 }
 
 // --- SW/Cache Nuke Template ---

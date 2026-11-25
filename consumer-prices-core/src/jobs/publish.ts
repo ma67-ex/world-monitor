@@ -1,6 +1,6 @@
 /**
  * Publish job: builds compact WorldMonitor snapshot payloads and writes to Redis.
- * Runs as an independent Railway cron service (02:30 UTC daily) after aggregate.
+ * Runs as an independent Railway cron service (02:30-05:30 UTC, hourly) after aggregate.
  * This is the handoff point between consumer-prices-core and WorldMonitor.
  */
 import {
@@ -10,13 +10,10 @@ import {
   buildMoversSnapshot,
   buildOverviewSnapshot,
   buildRetailerSpreadSnapshot,
+  type BasketRowLoader,
 } from '../snapshots/worldmonitor.js';
+import { type BasketRow, getBasketRows } from '../basket-observations.js';
 import { buildCoverageSnapshot } from '../snapshots/coverage.js';
-import {
-  COVERAGE_ACTIVATION_SCHEMA_VERSION,
-  coverageActivationKey,
-  isActivatingCoverage,
-} from '../ops/coverage.js';
 import { loadAllBasketConfigs, loadAllRetailerConfigs } from '../config/loader.js';
 import { closePool } from '../db/client.js';
 
@@ -45,13 +42,17 @@ function recordCount(data: unknown): number {
   return Array.isArray(arr) ? arr.length : 1;
 }
 
-async function upstashCommand(url: string, token: string, command: unknown[]): Promise<void> {
+async function upstashCommand(url: string, token: string, command: unknown[]): Promise<unknown> {
   const resp = await fetch(url, {
+    signal: AbortSignal.timeout(10_000),
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(command),
   });
   if (!resp.ok) throw new Error(`Upstash ${command[0]} failed: HTTP ${resp.status}`);
+  const body = await resp.json() as { result?: unknown; error?: string };
+  if (body.error || !Object.hasOwn(body, 'result')) throw new Error(`Upstash ${command[0]} failed`);
+  return body.result;
 }
 
 // Seed envelope shape — mirrored from scripts/_seed-envelope-source.mjs.
@@ -77,6 +78,24 @@ function buildEnvelope(data: unknown, count: number): { _seed: Record<string, un
   };
 }
 
+// Keep data and its count together. A retained-clock write compares the raw
+// metadata read below so it cannot overwrite a concurrent publisher's result.
+// JSON is encoded in JS, not Lua cjson, which changes nested empty arrays to {}.
+const PUBLISH_SNAPSHOT = `
+if ARGV[5] == 'retained' and (redis.call('GET', KEYS[2]) or '') ~= ARGV[4] then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+if ARGV[3] ~= '' then
+  if ARGV[5] == 'fresh' then
+    redis.call('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[2]) * 2)
+  else
+    redis.call('SET', KEYS[2], ARGV[3], 'XX', 'KEEPTTL')
+  end
+end
+return 1
+`;
+
 async function writeSnapshot(
   url: string,
   token: string,
@@ -99,7 +118,9 @@ async function writeSnapshot(
   // below so unmigrated readers keep working during dual-write.
   const envelope = buildEnvelope(data, count);
   const json = JSON.stringify(envelope);
-  await upstashCommand(url, token, ['SET', key, json, 'EX', ttlSeconds]);
+  const metaKey = makeKey(['seed-meta', key]);
+  let metaJson = '';
+  let retainedJson = '';
   if (advanceSeedMeta) {
     const meta: Record<string, unknown> = { fetchedAt: Date.now(), recordCount: count };
     if (coverage) {
@@ -116,14 +137,27 @@ async function writeSnapshot(
         ...(coverage.retailers ? { retailers: coverage.retailers } : {}),
       };
     }
-    await upstashCommand(url, token, [
-      'SET',
-      makeKey(['seed-meta', key]),
-      JSON.stringify(meta),
-      'EX',
-      ttlSeconds * 2,
-    ]);
+    metaJson = JSON.stringify(meta);
+  } else {
+    const retained = await upstashCommand(url, token, ['GET', metaKey]);
+    retainedJson = typeof retained === 'string' ? retained : '';
+    try {
+      const meta = JSON.parse(retainedJson);
+      if (
+        meta && !Array.isArray(meta)
+        && typeof meta.fetchedAt === 'number' && Number.isFinite(meta.fetchedAt) && meta.fetchedAt > 0
+      ) {
+        // Count describes the replacement payload; fetchedAt and TTL still
+        // describe the last publication that passed the scraper freshness gate.
+        metaJson = JSON.stringify({ ...meta, recordCount: count });
+      }
+    } catch { /* Preserve missing/unreadable metadata without inventing freshness. */ }
   }
+  const published = await upstashCommand(url, token, [
+    'EVAL', PUBLISH_SNAPSHOT, 2, key, metaKey, json, ttlSeconds,
+    metaJson, retainedJson, advanceSeedMeta ? 'fresh' : 'retained',
+  ]);
+  if (published !== 1) throw new Error(`Snapshot publication not confirmed for ${key}`);
   logger.info(`  wrote ${key} (${json.length} bytes, records=${count}, ttl=${ttlSeconds}s, meta=${advanceSeedMeta})`);
 }
 
@@ -151,6 +185,7 @@ export async function publishAll() {
     }
   }
 
+  let totalPagesFailed = 0;
   for (const marketCode of markets) {
     const freshnessSnapshot = marketFreshnessSnapshots[marketCode];
     // hasFreshData = at least one retailer scraped within last 2 hours
@@ -164,6 +199,20 @@ export async function publishAll() {
 
     let pagesOk = 0;
     let pagesFailed = 0;
+    let pagesSkipped = 0;
+    const basketRows = new Map<string, Promise<BasketRow[]>>();
+    const loadBasketRows: BasketRowLoader = (slug, market) => {
+      let rows = basketRows.get(slug);
+      if (!rows) {
+        const pending = getBasketRows(slug, market);
+        pending.catch(() => {
+          if (basketRows.get(slug) === pending) basketRows.delete(slug);
+        });
+        basketRows.set(slug, pending);
+        rows = pending;
+      }
+      return rows;
+    };
 
     try {
       const coverage = await buildCoverageSnapshot(marketCode);
@@ -185,44 +234,13 @@ export async function publishAll() {
         },
       );
       pagesOk++;
-      // #6059 activation handshake. Written AFTER the snapshot lands and only
-      // for real coverage, so WorldMonitor health leaves its bounded
-      // ROLLOUT_PENDING window for this market and becomes strict forever.
-      // Durable by design: no EX, so it outlives the 7d seed-meta TTL and a
-      // publisher that ran once and then died can never read as
-      // pending-activation again.
-      //
-      // Its own try/catch: a marker write failure must not be logged as a
-      // coverage failure (the coverage snapshot already published) and must not
-      // abort the market's remaining snapshots. The next run retries, and the
-      // compiled rollout deadline bounds the window regardless.
-      if (isActivatingCoverage(coverage)) {
-        try {
-          await upstashCommand(url, token, [
-            'SET',
-            coverageActivationKey(marketCode),
-            JSON.stringify({
-              schemaVersion: COVERAGE_ACTIVATION_SCHEMA_VERSION,
-              marketCode,
-              activatedAt: Date.now(),
-              attemptedPages: coverage.attemptedPages,
-            }),
-          ]);
-        } catch (err) {
-          logger.error(`coverage-activation:${marketCode} failed: ${err}`);
-        }
-      } else {
-        logger.warn(
-          `coverage:${marketCode} published without attempted pages — activation marker withheld`,
-        );
-      }
     } catch (err) {
       pagesFailed++;
       logger.error(`coverage:${marketCode} failed: ${err}`);
     }
 
     try {
-      const overview = await buildOverviewSnapshot(marketCode);
+      const overview = await buildOverviewSnapshot(marketCode, loadBasketRows);
       await writeSnapshot(url, token, makeKey(['consumer-prices', 'overview', marketCode]), overview, TTL, advanceSeedMeta, { pagesOk: 1, pagesFailed: 0, rejectedCount: 0 });
       pagesOk++;
     } catch (err) {
@@ -230,11 +248,20 @@ export async function publishAll() {
       logger.error(`overview:${marketCode} failed: ${err}`);
     }
 
-    for (const days of [7, 30]) {
+    for (const days of [7, 30, 90]) {
       try {
         const movers = await buildMoversSnapshot(marketCode, days);
-        await writeSnapshot(url, token, makeKey(['consumer-prices', 'movers', marketCode, `${days}d`]), movers, TTL, advanceSeedMeta, { pagesOk: 1, pagesFailed: 0, rejectedCount: 0 });
-        pagesOk++;
+        // Null is a data-quality skip, not an infrastructure failure: every
+        // candidate was gated, so the last good snapshot outlives its would-be
+        // replacement. It must not count toward pagesFailed or the whole cron
+        // exits 1 over one thin market.
+        if (movers === null) {
+          pagesSkipped++;
+          logger.warn(`movers:${marketCode}:${days}d skipped: all candidates gated as implausible`);
+        } else {
+          await writeSnapshot(url, token, makeKey(['consumer-prices', 'movers', marketCode, `${days}d`]), movers, TTL, advanceSeedMeta, { pagesOk: 1, pagesFailed: 0, rejectedCount: 0 });
+          pagesOk++;
+        }
       } catch (err) {
         pagesFailed++;
         logger.error(`movers:${marketCode}:${days}d failed: ${err}`);
@@ -265,7 +292,7 @@ export async function publishAll() {
 
     for (const basket of baskets.filter((b) => b.marketCode === marketCode)) {
       try {
-        const spread = await buildRetailerSpreadSnapshot(marketCode, basket.slug);
+        const spread = await buildRetailerSpreadSnapshot(marketCode, basket.slug, loadBasketRows);
         await writeSnapshot(
           url, token,
           makeKey(['consumer-prices', 'retailer-spread', marketCode, basket.slug]),
@@ -301,20 +328,51 @@ export async function publishAll() {
 
     const totalSnapshots = pagesOk + pagesFailed;
     const completionRatio = totalSnapshots > 0 ? Number((pagesOk / totalSnapshots).toFixed(4)) : 0;
-    logger.info(`  market ${marketCode} done: ${pagesOk}/${totalSnapshots} ok, ratio=${completionRatio}`);
+    // Skips are neither ok nor failed, so they are absent from the ratio. Say
+    // so rather than logging a clean "N/N ok, ratio=1" over withheld writes.
+    const skipNote = pagesSkipped > 0 ? `, ${pagesSkipped} skipped` : '';
+    logger.info(`  market ${marketCode} done: ${pagesOk}/${totalSnapshots} ok, ratio=${completionRatio}${skipNote}`);
+    totalPagesFailed += pagesFailed;
+  }
+
+  if (totalPagesFailed > 0) {
+    throw new Error(`${totalPagesFailed} snapshot publication${totalPagesFailed === 1 ? '' : 's'} failed`);
   }
 
   logger.info('Publish complete');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+export async function runPublishCli(): Promise<void> {
   // Terminal success marker (format mirrors runSeed() in scripts/_seed-utils.mjs) so the crash
-  // diagnostic can distinguish a clean run from a silent death. Chained BEFORE .catch so a
-  // rejection skips it. Plain console.log, not the logger, so the marker survives whatever
-  // transport/format the logger uses.
+  // diagnostic can distinguish a clean run from a silent death. Emit it only after publication
+  // resolves. Plain console.log, not the logger, so the marker survives whatever transport/format
+  // the logger uses.
   const runStartedAt = Date.now();
-  publishAll()
-    .then(() => console.log(`\n=== Done (${Date.now() - runStartedAt}ms) ===`))
-    .finally(() => closePool())
-    .catch(console.error);
+  let failure: unknown;
+  let failed = false;
+  try {
+    await publishAll();
+    console.log(`\n=== Done (${Date.now() - runStartedAt}ms) ===`);
+  } catch (err) {
+    // Mirror scrape.ts: failed publishes must fail the cron, not exit 0.
+    console.error(err);
+    process.exitCode = 1;
+    failure = err;
+    failed = true;
+  }
+
+  try {
+    await closePool();
+  } catch (err) {
+    console.error(err);
+    process.exitCode = 1;
+    if (!failed) failure = err;
+    failed = true;
+  }
+
+  if (failed) throw failure;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  void runPublishCli().catch(() => {});
 }

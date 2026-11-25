@@ -9,7 +9,6 @@ import type { NewsItem, DeductContextDetail } from '@/types';
 import { buildNewsContext } from '@/utils/news-context';
 import { getActiveFrameworkForPanel } from '@/services/analysis-framework-store';
 import { hasPremiumAccess } from '@/services/panel-gating';
-import { hasUserAiKey, generateStructuredCompletion } from '@/services/user-ai-keys';
 import { FrameworkSelector } from './FrameworkSelector';
 import { extractDeductionProbability } from './deduction-probability';
 import { IntelligenceServiceClient } from '@/services/generated-rpc-clients';
@@ -19,38 +18,30 @@ const getIntelligenceClient = createLazyClient(() => new IntelligenceServiceClie
 
 const COOLDOWN_MS = 5_000;
 
-const DEDUCTION_SYSTEM_PROMPT = `You are a geopolitical/situational analyst. Given a query about a hypothetical or current event, deduct its likely timeline and impact.
-Respond ONLY with a JSON object: { "analysis": string }. The analysis value is markdown text structured with these headers, in order: "**Bottom Line**" (one-sentence verdict), "**What We Know**" (confirmed facts), "**Most Likely Path**" (primary scenario), "**Alternative Paths**" (other plausible scenarios), "**Confidence**" (how certain, and why).
-Be specific and grounded in the given context. Never invent facts not implied by the query/context — flag genuine uncertainty instead.`;
-
-/**
- * Client-side fallback for non-premium users: generates the same
- * DeductSituationResponse shape as the server RPC, but from the user's own
- * Groq/OpenRouter key (see services/user-ai-keys.ts) instead of
- * WorldMonitor's paid backend. Throws if no user key is configured or
- * generation fails — same contract as getIntelligenceClient().deductSituation,
- * caller already wraps this in try/catch.
- */
-async function generateDeductionFromUserKey(
-  query: string,
-  geoContext: string,
-  framework: string,
-): Promise<{ analysis: string; model: string; provider: string }> {
-  const userPrompt = [
-    `Query: ${query}`,
-    geoContext ? `Context: ${geoContext}` : '',
-    framework ? `Framework: ${framework}` : '',
-  ].filter(Boolean).join('\n');
-
-  const parsed = await generateStructuredCompletion(DEDUCTION_SYSTEM_PROMPT, userPrompt) as { analysis?: string };
-  return { analysis: String(parsed.analysis ?? ''), model: '', provider: 'user-key' };
-}
+// The analysis is LLM markdown grounded on RSS headlines, so a headline that
+// smuggles markup into the model's output must not become a tracking pixel or
+// an outbound link. Text structure only: no images, anchors, or attributes
+// beyond class. Same shape as ChatAnalystPanel's ANALYST_PURIFY_CONFIG plus
+// headings and blockquotes, which the deduction prompt's sections produce.
+export const DEDUCTION_PURIFY_CONFIG = {
+  ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'br', 'hr',
+    'ul', 'ol', 'li', 'code', 'pre', 'blockquote',
+    'h1', 'h2', 'h3', 'h4',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'div', 'span'],
+  ALLOWED_ATTR: ['class'],
+  ALLOW_DATA_ATTR: false,
+  // DOMPurify keeps aria-* even when ALLOWED_ATTR omits them; an injected
+  // aria-hidden would hide the analysis from screen readers.
+  ALLOW_ARIA_ATTR: false,
+};
 
 export class DeductionPanel extends Panel {
     private formEl: HTMLFormElement;
     private inputEl: HTMLTextAreaElement;
-    private geoInputEl: HTMLInputElement;
+    private geoInputEl: HTMLTextAreaElement;
     private resultContainer: HTMLElement;
+    private contentRoot: HTMLElement;
     private submitBtn: HTMLButtonElement;
     private isSubmitting = false;
     private getLatestNews?: () => NewsItem[];
@@ -73,11 +64,11 @@ export class DeductionPanel extends Panel {
             rows: 3,
         }) as HTMLTextAreaElement;
 
-        this.geoInputEl = h('input', {
+        this.geoInputEl = h('textarea', {
             className: 'deduction-geo-input',
-            type: 'text',
+            rows: 2,
             placeholder: 'Geographic or situation context (optional)...',
-        }) as HTMLInputElement;
+        }) as HTMLTextAreaElement;
 
         this.submitBtn = h('button', {
             className: 'deduction-submit-btn',
@@ -102,6 +93,7 @@ export class DeductionPanel extends Panel {
             this.formEl,
             this.resultContainer
         );
+        this.contentRoot = container;
 
         replaceChildren(this.content, container);
 
@@ -132,6 +124,32 @@ export class DeductionPanel extends Panel {
 
         this.fwSelector = new FrameworkSelector({ panelId: 'deduction', isPremium: hasPremiumAccess(), panel: this });
         this.header.appendChild(this.fwSelector.el);
+    }
+
+    private deductionGeneration = 0;
+    private deductionAbort: AbortController | null = null;
+
+    public override clearSensitiveContent(): void {
+        this.deductionGeneration += 1;
+        // The previous account's request must not keep running (and spending
+        // its quota) after the reset; discarding its result is not enough.
+        this.deductionAbort?.abort();
+        this.deductionAbort = null;
+        this.inputEl.value = '';
+        this.geoInputEl.value = '';
+        this.resultContainer.replaceChildren();
+        this.resultContainer.className = 'deduction-result';
+        this.isSubmitting = false;
+        this.submitBtn.disabled = false;
+        super.clearSensitiveContent();
+    }
+
+    public override unlockPanel(): void {
+        super.unlockPanel();
+        if (!this.content.contains(this.contentRoot)) {
+            this.resultContainer.replaceChildren();
+            this.setContentNodes(this.contentRoot);
+        }
     }
 
     public override destroy(): void {
@@ -255,12 +273,6 @@ export class DeductionPanel extends Panel {
         const query = this.inputEl.value.trim();
         if (!query) return;
 
-        if (!hasPremiumAccess() && !hasUserAiKey()) {
-            this.resultContainer.className = 'deduction-result error';
-            this.resultContainer.textContent = 'Add your own Groq or OpenRouter key in Settings → Intelligence to use this panel.';
-            return;
-        }
-
         let geoContext = this.geoInputEl.value.trim();
 
         if (this.getLatestNews && !geoContext.includes('Recent News:')) {
@@ -272,6 +284,10 @@ export class DeductionPanel extends Panel {
 
         const fw = getActiveFrameworkForPanel('deduction');
 
+        const generation = ++this.deductionGeneration;
+        this.deductionAbort?.abort();
+        const controller = new AbortController();
+        this.deductionAbort = controller;
         this.isSubmitting = true;
         this.submitBtn.disabled = true;
 
@@ -285,25 +301,23 @@ export class DeductionPanel extends Panel {
         );
 
         try {
-            const resp = hasPremiumAccess()
-                ? await getIntelligenceClient().deductSituation({
-                    query,
-                    geoContext,
-                    framework: fw?.systemPromptAppend ?? '',
-                })
-                : await generateDeductionFromUserKey(query, geoContext, fw?.systemPromptAppend ?? '');
-            if (!this.element?.isConnected) return;
+            const resp = await getIntelligenceClient().deductSituation({
+                query,
+                geoContext,
+                framework: fw?.systemPromptAppend ?? '',
+            }, { signal: controller.signal });
+            if (generation !== this.deductionGeneration || !this.element?.isConnected) return;
 
             this.resultContainer.className = 'deduction-result';
             if (resp.analysis) {
                 const parsed = await marked.parse(resp.analysis);
-                if (!this.element?.isConnected) return;
+                if (generation !== this.deductionGeneration || !this.element?.isConnected) return;
                 // Yield so the response paint lands before the synchronous DOMPurify
                 // pass (the heavy `sanitize` chunk) — breaks the post-response long
                 // task instead of running parse+purify+innerHTML as one block (#4537).
                 await yieldToMain();
-                if (!this.element?.isConnected) return;
-                const safe = DOMPurify.sanitize(parsed);
+                if (generation !== this.deductionGeneration || !this.element?.isConnected) return;
+                const safe = DOMPurify.sanitize(parsed, DEDUCTION_PURIFY_CONFIG);
                 setTrustedHtml(this.resultContainer, trustedHtml(safe, 'legacy direct innerHTML migration'));
                 this.reformatResult(this.resultContainer);
             } else {
@@ -312,14 +326,17 @@ export class DeductionPanel extends Panel {
                     : 'No analysis available for this query.';
             }
         } catch (err) {
-            if (!this.element?.isConnected) return;
+            if (generation !== this.deductionGeneration || !this.element?.isConnected) return;
             console.error('[DeductionPanel] Error:', err);
             this.resultContainer.className = 'deduction-result error';
             this.resultContainer.textContent = 'An error occurred while analyzing the situation.';
         } finally {
-            this.isSubmitting = false;
-            if (this.element?.isConnected) {
-                setTimeout(() => { this.submitBtn.disabled = false; }, COOLDOWN_MS);
+            if (this.deductionAbort === controller) this.deductionAbort = null;
+            if (generation === this.deductionGeneration) {
+                this.isSubmitting = false;
+                if (this.element?.isConnected) {
+                    setTimeout(() => { this.submitBtn.disabled = false; }, COOLDOWN_MS);
+                }
             }
         }
     }

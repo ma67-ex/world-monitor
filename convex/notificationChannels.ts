@@ -1,14 +1,22 @@
-import { ConvexError, v } from "convex/values";
+import { assertAccountWritable } from "./accountDeletion/guard";
+import { ConvexError, v, type Infer } from "convex/values";
 import {
   internalAction,
   internalMutation,
   internalQuery,
   type MutationCtx,
-  mutation,
+  type QueryCtx,
   query,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { channelTypeValidator } from "./constants";
+import { requireVerifiedAccountEmail, lookupVerifiedAccountEmail } from "./lib/notificationEmail";
+import { deliveryResultValidator, isDeliveryError } from "./lib/notificationDelivery";
+import { sendResendEmail } from "./lib/resendEmail";
+import { EMAIL_RED, emailButton, emailCard, emailFactRow, emailFacts, emailFrame, emailHeading, emailParagraph, escapeEmailHtml } from "../shared/email-frame";
+import { assertAlertCapabilities, loadAlertCapabilities } from "./lib/alertCapabilities";
+
+type ChannelType = Infer<typeof channelTypeValidator>;
 
 // Versioned queue: old Railway relays only poll wm:events:queue and ignore
 // welcomeId. Keeping connection-scoped events on a new queue means they wait
@@ -43,35 +51,29 @@ const ENQUEUE_WELCOME_SCRIPT = [
 ].join("\n");
 
 /**
- * Notifications are a PRO feature. Enforce the entitlement at the public
- * Convex write boundary so callers cannot bypass the edge API gate.
+ * Channel creation is gated by the caller's alert-ladder capabilities
+ * (#4273): free accounts hold the free channel set (web push + email), and
+ * every other channel type throws ALERT_CHANNEL_UPGRADE_REQUIRED with an
+ * upgrade hint — enforced at the Convex write boundary so callers cannot
+ * bypass the edge API gate. The old binary PRO_REQUIRED gate survives only
+ * as the Telegram pairing flow's reason string, which is a bot-facing
+ * contract.
  */
-async function hasProEntitlement(
+async function hasChannelCapability(
   ctx: MutationCtx,
   userId: string,
+  channelType: string,
 ): Promise<boolean> {
-  const entitlement = await ctx.db
-    .query("entitlements")
-    .withIndex("by_userId", (q) => q.eq("userId", userId))
-    .first();
-  const tier =
-    entitlement && entitlement.validUntil >= Date.now()
-      ? entitlement.features.tier
-      : 0;
-  return tier >= 1;
+  return (await loadAlertCapabilities(ctx, userId)).channels.has(channelType);
 }
 
-async function assertProEntitlement(
+async function assertChannelCapability(
   ctx: MutationCtx,
   userId: string,
+  channelType: string,
 ): Promise<void> {
-  if (!(await hasProEntitlement(ctx, userId))) {
-    throw new ConvexError({
-      code: "PRO_REQUIRED",
-      message:
-        "Notifications are a PRO feature. Upgrade to enable real-time and digest alerts.",
-    });
-  }
+  const caps = await loadAlertCapabilities(ctx, userId);
+  assertAlertCapabilities(caps, { channels: [channelType] });
 }
 
 /**
@@ -185,11 +187,36 @@ export const queueChannelWelcome = internalAction({
 
 export const getChannelsByUserId = internalQuery({
   args: { userId: v.string() },
-  handler: async (ctx, args) => {
-    return await ctx.db
-      .query("notificationChannels")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .collect();
+  handler: (ctx, args) => readChannelsForDelivery(ctx, args.userId),
+});
+
+async function readChannelsForDelivery(ctx: Pick<QueryCtx, "db">, userId: string) {
+  const channels = await ctx.db
+    .query("notificationChannels")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .collect();
+  return channels.map(channel => (channel.channelType === "email" && channel.emailOwnership !== "verified_account")
+      || (channel.channelType === "telegram" && channel.telegramOwnership !== "verified_callback")
+      ? { ...channel, verified: false } : channel);
+}
+
+export const beginChannelDeliveries = internalMutation({
+  args: { userId: v.string(), channelTypes: v.array(channelTypeValidator) },
+  handler: async (ctx, { userId, channelTypes }) => {
+    const channels = await readChannelsForDelivery(ctx, userId);
+    const selected = new Set(channelTypes);
+    for (const channel of channels) {
+      if (!channel.verified || !selected.has(channel.channelType)
+        || !["webhook", "slack", "discord", "teams", "web_push"].includes(channel.channelType)) continue;
+      // An unfinished attempt may have succeeded. It cannot extend a known failure streak.
+      const deliveryFailure = !channel.deliveryAttempt || channel.deliveryAttempt.pending
+        ? undefined : channel.deliveryFailure;
+      const deliveryAttempt = { sequence: (channel.deliveryAttempt?.sequence ?? 0) + 1, pending: true };
+      await ctx.db.patch(channel._id, { deliveryAttempt, deliveryFailure });
+      channel.deliveryAttempt = deliveryAttempt;
+      channel.deliveryFailure = deliveryFailure;
+    }
+    return channels;
   },
 });
 
@@ -201,10 +228,19 @@ export const setChannelForUser = internalMutation({
     webhookEnvelope: v.optional(v.string()),
     email: v.optional(v.string()),
     webhookLabel: v.optional(v.string()),
+    // Encrypted signing-secret envelope, generated by the gateway for each
+    // webhook registration. Never accepted from a browser.
+    webhookSecret: v.optional(v.string()),
     scheduleWelcome: v.optional(v.boolean()),
+    // Internal-only: derived by the relay HTTP handler from Clerk, never the body.
+    verifiedAccountEmail: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, channelType, chatId, webhookEnvelope, email, webhookLabel } = args;
+    await assertAccountWritable(ctx, args.userId);
+    const { userId, channelType, webhookEnvelope, email, webhookLabel } = args;
+    // #4273: every branch below gates on the caller's alert-ladder channel
+    // set (free = web push + email), replacing the old email-only PRO gate.
+    await assertChannelCapability(ctx, userId, channelType);
     const existing = await ctx.db
       .query("notificationChannels")
       .withIndex("by_user_channel", (q) =>
@@ -215,20 +251,22 @@ export const setChannelForUser = internalMutation({
     let channelId = existing ? String(existing._id) : "";
     const now = Date.now();
     if (channelType === "telegram") {
-      if (!chatId) throw new ConvexError("chatId required for telegram channel");
-      const doc = { userId, channelType: "telegram" as const, chatId, verified: true, linkedAt: now };
-      if (existing) { await ctx.db.replace(existing._id, doc); } else { channelId = String(await ctx.db.insert("notificationChannels", doc)); }
+      throw new ConvexError("telegram channel must be linked through bot pairing");
     } else if (channelType === "slack") {
       if (!webhookEnvelope) throw new ConvexError("webhookEnvelope required for slack channel");
       const doc = { userId, channelType: "slack" as const, webhookEnvelope, verified: true, linkedAt: now };
       if (existing) { await ctx.db.replace(existing._id, doc); } else { channelId = String(await ctx.db.insert("notificationChannels", doc)); }
     } else if (channelType === "email") {
-      if (!email) throw new ConvexError("email required for email channel");
-      const doc = { userId, channelType: "email" as const, email, verified: true, linkedAt: now };
+      const recipient = requireVerifiedAccountEmail(email, args.verifiedAccountEmail);
+      const doc = { userId, channelType: "email" as const, email: recipient, emailOwnership: "verified_account" as const, verified: true, linkedAt: now };
       if (existing) { await ctx.db.replace(existing._id, doc); } else { channelId = String(await ctx.db.insert("notificationChannels", doc)); }
     } else if (channelType === "webhook") {
       if (!webhookEnvelope) throw new ConvexError("webhookEnvelope required for webhook channel");
-      const doc = { userId, channelType: "webhook" as const, webhookEnvelope, verified: true, linkedAt: now, webhookLabel };
+      const doc = { userId, channelType: "webhook" as const, webhookEnvelope, verified: true, linkedAt: now, webhookLabel, webhookSecret: args.webhookSecret };
+      if (existing) { await ctx.db.replace(existing._id, doc); } else { channelId = String(await ctx.db.insert("notificationChannels", doc)); }
+    } else if (channelType === "teams") {
+      if (!webhookEnvelope) throw new ConvexError("webhookEnvelope required for teams channel");
+      const doc = { userId, channelType: "teams" as const, webhookEnvelope, verified: true, linkedAt: now };
       if (existing) { await ctx.db.replace(existing._id, doc); } else { channelId = String(await ctx.db.insert("notificationChannels", doc)); }
     } else {
       throw new ConvexError("discord channel must be set via set-discord-oauth");
@@ -274,6 +312,7 @@ export const setWebPushChannelForUser = internalMutation({
     scheduleWelcome: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
     // Step 1: find the current user's row before cross-account endpoint
     // cleanup. A retry with the same endpoint must remain a re-link rather
     // than deleting its own row and appearing to be a first connection.
@@ -348,6 +387,11 @@ export const setSlackOAuthChannelForUser = internalMutation({
     slackConfigurationUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
+    // Layer-2 ladder gate (#4273): the OAuth start endpoints already deny
+    // free callers, but channel creation must not depend on an edge gate
+    // alone — and an entitlement that lapsed mid-OAuth-flow ends here.
+    await assertChannelCapability(ctx, args.userId, "slack");
     const existing = await ctx.db
       .query("notificationChannels")
       .withIndex("by_user_channel", (q) =>
@@ -382,6 +426,9 @@ export const setDiscordOAuthChannelForUser = internalMutation({
     discordChannelId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
+    // Layer-2 ladder gate (#4273) — see setSlackOAuthChannelForUser.
+    await assertChannelCapability(ctx, args.userId, "discord");
     const existing = await ctx.db
       .query("notificationChannels")
       .withIndex("by_user_channel", (q) =>
@@ -407,33 +454,63 @@ export const setDiscordOAuthChannelForUser = internalMutation({
   },
 });
 
+// Shared by the relay-facing `*ForUser` mutations and the identity-scoped
+// internal twins below. Deletion/deactivation are de-escalation: never gate
+// on Pro (#8430).
+async function deleteChannelRow(
+  ctx: MutationCtx,
+  userId: string,
+  channelType: ChannelType,
+): Promise<void> {
+  const existing = await ctx.db
+    .query("notificationChannels")
+    .withIndex("by_user_channel", (q) =>
+      q.eq("userId", userId).eq("channelType", channelType),
+    )
+    .unique();
+  if (!existing) return;
+  await ctx.db.delete(existing._id);
+  const rules = await ctx.db
+    .query("alertRules")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .collect();
+  for (const rule of rules) {
+    const filtered = rule.channels.filter((c) => c !== channelType);
+    if (filtered.length !== rule.channels.length) {
+      await ctx.db.patch(rule._id, { channels: filtered });
+    }
+  }
+}
+
+async function deactivateChannelRow(
+  ctx: MutationCtx,
+  userId: string,
+  channelType: ChannelType,
+): Promise<void> {
+  const existing = await ctx.db
+    .query("notificationChannels")
+    .withIndex("by_user_channel", (q) =>
+      q.eq("userId", userId).eq("channelType", channelType),
+    )
+    .unique();
+  if (existing) {
+    await ctx.db.patch(existing._id, { verified: false });
+  }
+}
+
+// Production delete path. The dashboard reaches this via the shared-secret
+// `/relay/notification-channels` action `delete-channel` (convex/http.ts).
 export const deleteChannelForUser = internalMutation({
   args: { userId: v.string(), channelType: channelTypeValidator },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
-      .query("notificationChannels")
-      .withIndex("by_user_channel", (q) =>
-        q.eq("userId", args.userId).eq("channelType", args.channelType),
-      )
-      .unique();
-    if (!existing) return;
-    await ctx.db.delete(existing._id);
-    const rules = await ctx.db
-      .query("alertRules")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .collect();
-    for (const rule of rules) {
-      const filtered = rule.channels.filter((c) => c !== args.channelType);
-      if (filtered.length !== rule.channels.length) {
-        await ctx.db.patch(rule._id, { channels: filtered });
-      }
-    }
+    await deleteChannelRow(ctx, args.userId, args.channelType);
   },
 });
 
 export const createPairingTokenForUser = internalMutation({
   args: { userId: v.string(), variant: v.optional(v.string()) },
   handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
     const { userId, variant } = args;
     const existing = await ctx.db
       .query("telegramPairingTokens")
@@ -459,14 +536,24 @@ export const getChannels = query({
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return [];
-    return await ctx.db
+    const channels = await ctx.db
       .query("notificationChannels")
       .withIndex("by_user", (q) => q.eq("userId", identity.subject))
       .collect();
+    return channels.map(channel => (channel.channelType === "email" && channel.emailOwnership !== "verified_account")
+      || (channel.channelType === "telegram" && channel.telegramOwnership !== "verified_callback")
+      ? { ...channel, verified: false } : channel);
   },
 });
 
-export const setChannel = mutation({
+// INTERNAL ONLY. Production writes go through api/notification-channels.ts ->
+// /relay/notification-channels -> setChannelForUser, which is where the
+// webhook SSRF check, Slack envelope encryption, email ownership proof and
+// the per-user write limit live. As a public mutation this was a second,
+// unguarded write path for webhook/slack envelopes (dead code: no client
+// called it). Kept as an identity-scoped internal, like deleteChannel below,
+// so deploy-key callers and the Sentry probe filters still resolve the name.
+export const setChannel = internalMutation({
   args: {
     channelType: channelTypeValidator,
     chatId: v.optional(v.string()),
@@ -478,7 +565,8 @@ export const setChannel = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
     const userId = identity.subject;
-    await assertProEntitlement(ctx, userId);
+    await assertAccountWritable(ctx, userId);
+    await assertChannelCapability(ctx, userId, args.channelType);
 
     const existing = await ctx.db
       .query("notificationChannels")
@@ -490,13 +578,7 @@ export const setChannel = mutation({
     const now = Date.now();
 
     if (args.channelType === "telegram") {
-      if (!args.chatId) throw new ConvexError("chatId required for telegram channel");
-      const doc = { userId, channelType: "telegram" as const, chatId: args.chatId, verified: true, linkedAt: now };
-      if (existing) {
-        await ctx.db.replace(existing._id, doc);
-      } else {
-        await ctx.db.insert("notificationChannels", doc);
-      }
+      throw new ConvexError("telegram channel must be linked through bot pairing");
     } else if (args.channelType === "slack") {
       if (!args.webhookEnvelope) throw new ConvexError("webhookEnvelope required for slack channel");
       const doc = { userId, channelType: "slack" as const, webhookEnvelope: args.webhookEnvelope, verified: true, linkedAt: now };
@@ -506,8 +588,8 @@ export const setChannel = mutation({
         await ctx.db.insert("notificationChannels", doc);
       }
     } else if (args.channelType === "email") {
-      if (!args.email) throw new ConvexError("email required for email channel");
-      const doc = { userId, channelType: "email" as const, email: args.email, verified: true, linkedAt: now };
+      const email = requireVerifiedAccountEmail(args.email, identity.emailVerified === true ? identity.email : undefined);
+      const doc = { userId, channelType: "email" as const, email, emailOwnership: "verified_account" as const, verified: true, linkedAt: now };
       if (existing) {
         await ctx.db.replace(existing._id, doc);
       } else {
@@ -521,89 +603,183 @@ export const setChannel = mutation({
       } else {
         await ctx.db.insert("notificationChannels", doc);
       }
+    } else if (args.channelType === "teams") {
+      if (!args.webhookEnvelope) throw new ConvexError("webhookEnvelope required for teams channel");
+      const doc = { userId, channelType: "teams" as const, webhookEnvelope: args.webhookEnvelope, verified: true, linkedAt: now };
+      if (existing) {
+        await ctx.db.replace(existing._id, doc);
+      } else {
+        await ctx.db.insert("notificationChannels", doc);
+      }
     } else {
       throw new ConvexError("discord channel must be set via set-discord-oauth");
     }
   },
 });
 
-export const deleteChannel = mutation({
-  args: { channelType: channelTypeValidator },
-  handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new ConvexError("UNAUTHENTICATED");
-    const userId = identity.subject;
-    await assertProEntitlement(ctx, userId);
-
-    const existing = await ctx.db
-      .query("notificationChannels")
-      .withIndex("by_user_channel", (q) =>
-        q.eq("userId", userId).eq("channelType", args.channelType),
-      )
-      .unique();
-
-    if (!existing) return;
-    await ctx.db.delete(existing._id);
-
-    // Remove this channel from all alert rules for this user
-    const rules = await ctx.db
-      .query("alertRules")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .collect();
-    for (const rule of rules) {
-      const filtered = rule.channels.filter((c) => c !== args.channelType);
-      if (filtered.length !== rule.channels.length) {
-        await ctx.db.patch(rule._id, { channels: filtered });
-      }
-    }
-  },
-});
-
 // Called by the notification relay via /relay/deactivate HTTP action
-// when Telegram returns 403 or Slack returns 404/410.
+// when Telegram returns 403 or Slack returns 404/410. Ungated by design —
+// delivery-side deactivation must work after Pro lapses (see #8430).
 export const deactivateChannelForUser = internalMutation({
   args: { userId: v.string(), channelType: channelTypeValidator },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
-      .query("notificationChannels")
-      .withIndex("by_user_channel", (q) =>
-        q.eq("userId", args.userId).eq("channelType", args.channelType),
-      )
-      .unique();
-    if (existing) {
-      await ctx.db.patch(existing._id, { verified: false });
+    await deactivateChannelRow(ctx, args.userId, args.channelType);
+  },
+});
+
+export const recordDeliveryResult = internalMutation({
+  args: { results: v.array(v.object({ userId: v.string(), channelType: channelTypeValidator, delivery: deliveryResultValidator })) },
+  handler: async (ctx, { results }) => {
+    if (results.length > 100) throw new Error("DELIVERY_BATCH_TOO_LARGE");
+    for (const result of results) await applyDeliveryResult(ctx, result);
+  },
+});
+
+async function applyDeliveryResult(ctx: MutationCtx, { userId, channelType, delivery }: {
+  userId: string; channelType: ChannelType; delivery: Infer<typeof deliveryResultValidator>;
+}) {
+  if (delivery.error !== null && !isDeliveryError(delivery.error)) throw new Error("INVALID_DELIVERY_ERROR");
+  const channel = await ctx.db.query("notificationChannels")
+    .withIndex("by_user_channel", q => q.eq("userId", userId).eq("channelType", channelType)).unique();
+  if (!channel?.verified || String(channel._id) !== delivery.channelId || channel.linkedAt !== delivery.linkedAt) return;
+  const attempt = channel.deliveryAttempt;
+  if (!attempt?.pending || delivery.sequence !== attempt.sequence) return;
+  const deliveryAttempt = { ...attempt, pending: false };
+  if (delivery.error === null) {
+    await ctx.db.patch(channel._id, { deliveryAttempt, deliveryFailure: undefined });
+    return;
+  }
+  const now = Date.now();
+  const failure = {
+    count: (channel.deliveryFailure?.count ?? 0) + 1,
+    firstFailedAt: channel.deliveryFailure?.firstFailedAt ?? now,
+    lastError: delivery.error,
+  };
+  const terminal = /^HTTP (401|403|404|410)$/.test(delivery.error);
+  const disable = terminal || (failure.count >= 10 && now - failure.firstFailedAt >= 24 * 60 * 60 * 1000);
+  await ctx.db.patch(channel._id, {
+    deliveryAttempt,
+    deliveryFailure: { ...failure, ...(disable ? { disabledAt: now } : {}) },
+    ...(disable ? { verified: false } : {}),
+  });
+  if (disable) {
+    await ctx.scheduler.runAfter(0, internal.notificationChannels.sendDisabledChannelNotice, {
+      userId, channelType, firstFailedAt: failure.firstFailedAt, error: failure.lastError,
+      noticeId: `${channel._id}-${channel.linkedAt}-${now}`,
+    });
+    console.log(JSON.stringify({ metric: "notification_channel_disabled", count: 1, channelType, errorClass: failure.lastError }));
+  }
+}
+
+const NOTIFICATION_SETTINGS_URL = "https://www.worldmonitor.app/dashboard?settings=notifications";
+
+const CHANNEL_LABELS: Record<ChannelType, string> = {
+  telegram: "Telegram", email: "Email", slack: "Slack", discord: "Discord",
+  teams: "Microsoft Teams", webhook: "Webhook", web_push: "Browser Push",
+};
+
+/**
+ * The channel-disabled notice: subject, plain text and HTML. Exported for tests.
+ *
+ * A push service answering 404/410 means the browser ended the subscription
+ * (site data cleared, permission revoked, or the browser expired it). The
+ * settings page cannot repair that row, so that case gets its own copy.
+ */
+export function disabledChannelNotice(args: { channelType: ChannelType; error: string; firstFailedAt: number }): { subject: string; text: string; html: string } {
+  const started = new Date(args.firstFailedAt).toISOString();
+  const label = CHANNEL_LABELS[args.channelType] ?? args.channelType;
+  const expiredPush = args.channelType === "web_push" && /^HTTP (404|410)$/.test(args.error);
+  const subject = expiredPush
+    ? "WorldMonitor browser notifications turned off"
+    : "WorldMonitor notification channel disabled";
+  const headline = expiredPush
+    ? "Your browser ended its notification subscription, so we stopped sending Browser Push alerts."
+    : `Your ${label} notification channel was disabled after delivery failures.`;
+  const action = expiredPush
+    ? "Open World Monitor in the browser where you want alerts and turn on Browser Push again in notification settings."
+    : "Update and save your channel to resume notifications.";
+  const heading = expiredPush ? "Browser notifications turned off" : "Notification channel disabled";
+  const button = expiredPush ? "Turn notifications back on" : "Fix your channel";
+  const text = `${headline}\n\nChannel: ${label}\nError: ${args.error}\nFailures started: ${started}\n\n${action}\n${NOTIFICATION_SETTINGS_URL}`;
+  const html = emailFrame({
+    preheader: headline,
+    kicker: "Alert settings",
+    accent: EMAIL_RED,
+    bodyHtml: `${emailHeading(heading, escapeEmailHtml(headline))}
+      ${emailCard(emailFacts(emailFactRow("Channel", escapeEmailHtml(label)) + emailFactRow("Error", escapeEmailHtml(args.error)) + emailFactRow("Failing since", escapeEmailHtml(started))), { label: "Delivery failures", color: EMAIL_RED })}
+      ${emailParagraph(escapeEmailHtml(action))}
+      ${emailButton(NOTIFICATION_SETTINGS_URL, button)}`,
+    footerNote: "You're receiving this because notifications are on for your account.",
+  });
+  return { subject, text, html };
+}
+
+export const sendDisabledChannelNotice = internalAction({
+  args: {
+    userId: v.string(), channelType: channelTypeValidator, firstFailedAt: v.number(),
+    error: v.string(), noticeId: v.string(), attempt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const attempt = args.attempt ?? 0;
+    try {
+      if (!isDeliveryError(args.error)) throw new Error("INVALID_DELIVERY_ERROR");
+      const email = await lookupVerifiedAccountEmail(args.userId, { allowMissingUser: true });
+      if (!email) return;
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) throw new Error("EMAIL_UNAVAILABLE");
+      const { subject, text, html } = disabledChannelNotice(args);
+      await sendResendEmail(ctx, {
+        apiKey, from: process.env.RESEND_FROM ?? "WorldMonitor <notifications@worldmonitor.app>",
+        to: email, subject,
+        text, html, purpose: "transactional",
+        idempotencyKey: `channel-disabled-${args.noticeId}`,
+      });
+    } catch {
+      if (attempt >= 5) {
+        throw new Error(`[notifications] Channel disable notice failed after retries (${args.channelType})`);
+      }
+      await ctx.scheduler.runAfter(60_000 * 2 ** attempt, internal.notificationChannels.sendDisabledChannelNotice, {
+        ...args, attempt: attempt + 1,
+      });
     }
   },
 });
 
-export const deactivateChannel = mutation({
+// INTERNAL ONLY — #8430. Formerly public `mutation`s with a Pro gate that
+// contradicted the ungated relay path. Kept as identity-scoped internals so
+// authenticated deploy-key callers and Sentry probe filters still resolve the
+// historical names; production traffic uses `*ForUser` above.
+export const deleteChannel = internalMutation({
   args: { channelType: channelTypeValidator },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
-    const userId = identity.subject;
-    await assertProEntitlement(ctx, userId);
-
-    const existing = await ctx.db
-      .query("notificationChannels")
-      .withIndex("by_user_channel", (q) =>
-        q.eq("userId", userId).eq("channelType", args.channelType),
-      )
-      .unique();
-
-    if (existing) {
-      await ctx.db.patch(existing._id, { verified: false });
-    }
+    await deleteChannelRow(ctx, identity.subject, args.channelType);
   },
 });
 
-export const createPairingToken = mutation({
+export const deactivateChannel = internalMutation({
+  args: { channelType: channelTypeValidator },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new ConvexError("UNAUTHENTICATED");
+    await deactivateChannelRow(ctx, identity.subject, args.channelType);
+  },
+});
+
+// INTERNAL ONLY. The client mints pairing tokens through
+// api/notification-channels.ts (create-pairing-token) -> createPairingTokenForUser.
+// Same reasoning as setChannel above.
+export const createPairingToken = internalMutation({
   args: { variant: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
     const userId = identity.subject;
-    await assertProEntitlement(ctx, userId);
+    await assertAccountWritable(ctx, userId);
+    // Telegram pairing is reachable only on plans whose ladder includes the
+    // telegram channel (#4273) — today every paid tier, no free plan.
+    await assertChannelCapability(ctx, userId, "telegram");
 
     // Invalidate any existing unused tokens for this user
     const existing = await ctx.db
@@ -636,7 +812,31 @@ export const createPairingToken = mutation({
   },
 });
 
-export const claimPairingToken = mutation({
+// Step 1 of Telegram pairing: `/start <token>` only records which chat asked.
+// The bot then shows the account and a Confirm button, so a pairing link sent
+// to someone else cannot silently bind their chat to the sender's account.
+export const stagePairingToken = internalMutation({
+  args: { token: v.string(), chatId: v.string() },
+  handler: async (ctx, args) => {
+    const record = await ctx.db
+      .query("telegramPairingTokens")
+      .withIndex("by_token", (q) => q.eq("token", args.token))
+      .unique();
+
+    if (!record) return { ok: false, reason: "NOT_FOUND" as const, userId: null };
+    await assertAccountWritable(ctx, record.userId);
+    if (record.used) return { ok: false, reason: "ALREADY_USED" as const, userId: null };
+    if (record.expiresAt < Date.now()) return { ok: false, reason: "EXPIRED" as const, userId: null };
+    if (!(await hasChannelCapability(ctx, record.userId, "telegram"))) {
+      return { ok: false, reason: "PRO_REQUIRED" as const, userId: null };
+    }
+    await ctx.db.patch(record._id, { pendingChatId: args.chatId });
+    return { ok: true, reason: null, userId: record.userId };
+  },
+});
+
+// Step 2: the Confirm button. Binds only the chat that staged the token.
+export const claimPairingToken = internalMutation({
   args: { token: v.string(), chatId: v.string() },
   handler: async (ctx, args) => {
     const record = await ctx.db
@@ -645,9 +845,11 @@ export const claimPairingToken = mutation({
       .unique();
 
     if (!record) return { ok: false, reason: "NOT_FOUND" as const };
+    await assertAccountWritable(ctx, record.userId);
     if (record.used) return { ok: false, reason: "ALREADY_USED" as const };
     if (record.expiresAt < Date.now()) return { ok: false, reason: "EXPIRED" as const };
-    if (!(await hasProEntitlement(ctx, record.userId))) {
+    if (record.pendingChatId !== args.chatId) return { ok: false, reason: "NOT_CONFIRMED" as const };
+    if (!(await hasChannelCapability(ctx, record.userId, "telegram"))) {
       return { ok: false, reason: "PRO_REQUIRED" as const };
     }
 
@@ -667,6 +869,7 @@ export const claimPairingToken = mutation({
       channelType: "telegram" as const,
       chatId: args.chatId,
       verified: true,
+      telegramOwnership: "verified_callback" as const,
       linkedAt: Date.now(),
     };
 

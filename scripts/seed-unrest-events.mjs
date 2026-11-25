@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { loadEnvFile, CHROME_UA, runSeed, httpsProxyFetchRaw, resolveProxyForConnect, describeErr, readSeedSnapshot, writeExtraKeyWithMeta, sleep } from './_seed-utils.mjs';
-import { getAcledToken } from './shared/acled-oauth.mjs';
+import { getAcledToken, hasAcledCredentials } from './shared/acled-oauth.mjs';
 import { GDELT_BULK_UNREST_KEY } from './_gdelt-bulk-contract.mjs';
+import { unrestHistoryAfterPublish } from './_intel-history-collectors.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -43,21 +44,6 @@ function classifySeverity(fatalities, eventType) {
   if (fatalities > 0 || eventType.toLowerCase().includes('riot')) return 'SEVERITY_LEVEL_HIGH';
   if (eventType.toLowerCase().includes('protest')) return 'SEVERITY_LEVEL_MEDIUM';
   return 'SEVERITY_LEVEL_LOW';
-}
-
-function classifyGdeltSeverity(count, name) {
-  const lowerName = name.toLowerCase();
-  if (count > 100 || lowerName.includes('riot') || lowerName.includes('clash')) return 'SEVERITY_LEVEL_HIGH';
-  if (count < 25) return 'SEVERITY_LEVEL_LOW';
-  return 'SEVERITY_LEVEL_MEDIUM';
-}
-
-function classifyGdeltEventType(name) {
-  const lowerName = name.toLowerCase();
-  if (lowerName.includes('riot')) return 'UNREST_EVENT_TYPE_RIOT';
-  if (lowerName.includes('strike')) return 'UNREST_EVENT_TYPE_STRIKE';
-  if (lowerName.includes('demonstration')) return 'UNREST_EVENT_TYPE_DEMONSTRATION';
-  return 'UNREST_EVENT_TYPE_PROTEST';
 }
 
 function normalizeSourceUrl(value) {
@@ -106,7 +92,7 @@ function mergeSourceUrls(...groups) {
 
 // ---------- Deduplication (from _shared.ts) ----------
 
-function deduplicateEvents(events) {
+export function deduplicateEvents(events) {
   const unique = new Map();
   for (const event of events) {
     const lat = event.location?.latitude ?? 0;
@@ -114,22 +100,17 @@ function deduplicateEvents(events) {
     const latKey = Math.round(lat * 10) / 10;
     const lonKey = Math.round(lon * 10) / 10;
     const dateKey = new Date(event.occurredAt).toISOString().split('T')[0];
-    const key = `${latKey}:${lonKey}:${dateKey}`;
+    const key = `${event.sourceType}:${latKey}:${lonKey}:${dateKey}`;
 
     const existing = unique.get(key);
     if (!existing) {
       unique.set(key, event);
-    } else if (event.sourceType === 'UNREST_SOURCE_TYPE_ACLED' && existing.sourceType !== 'UNREST_SOURCE_TYPE_ACLED') {
-      event.sources = [...new Set([...event.sources, ...existing.sources])];
-      event.sourceUrls = mergeSourceUrls(event.sourceUrls, existing.sourceUrls);
-      unique.set(key, event);
-    } else if (existing.sourceType === 'UNREST_SOURCE_TYPE_ACLED') {
-      existing.sources = [...new Set([...existing.sources, ...event.sources])];
-      existing.sourceUrls = mergeSourceUrls(existing.sourceUrls, event.sourceUrls);
     } else {
       existing.sources = [...new Set([...existing.sources, ...event.sources])];
       existing.sourceUrls = mergeSourceUrls(existing.sourceUrls, event.sourceUrls);
-      if (existing.sources.length >= 2) existing.confidence = 'CONFIDENCE_LEVEL_HIGH';
+      if (existing.sourceType === 'UNREST_SOURCE_TYPE_GDELT') {
+        existing.confidence = 'CONFIDENCE_LEVEL_LOW';
+      }
     }
   }
   return Array.from(unique.values());
@@ -194,7 +175,7 @@ async function fetchAcledProtestPage(token, params) {
   return Array.isArray(data.data) ? data.data : [];
 }
 
-function normalizeAcledProtestEvents(rawEvents) {
+export function normalizeAcledProtestEvents(rawEvents) {
   return rawEvents
     .filter((e) => {
       const lat = parseFloat(e.latitude || '');
@@ -209,6 +190,7 @@ function normalizeAcledProtestEvents(rawEvents) {
         summary: typeof e.notes === 'string' ? e.notes.substring(0, 500) : '',
         eventType: mapAcledEventType(e.event_type || '', e.sub_event_type || ''),
         city: e.location || '',
+        hasPreciseLocation: Number(e.geo_precision) === 1,
         country: e.country || '',
         region: e.admin1 || '',
         location: {
@@ -417,20 +399,20 @@ export async function fetchGdeltEvents(opts = {}) {
     events.push({
       id: `gdelt-${loc.lat.toFixed(2)}-${loc.lon.toFixed(2)}-${Date.now()}`,
       title: `${loc.name} (${loc.count} reports)`,
-      summary: '',
-      eventType: classifyGdeltEventType(loc.name),
+      summary: 'Unverified media signal. This location is mentioned in unrest-related articles; a local event is not verified.',
+      eventType: 'UNREST_EVENT_TYPE_UNSPECIFIED',
       city: loc.name.split(',')[0]?.trim() || '',
       country,
       region: '',
       location: { latitude: loc.lat, longitude: loc.lon },
       occurredAt: Date.now(),
-      severity: classifyGdeltSeverity(loc.count, loc.name),
+      severity: 'SEVERITY_LEVEL_UNSPECIFIED',
       fatalities: 0,
       sources: ['GDELT'],
       sourceType: 'UNREST_SOURCE_TYPE_GDELT',
       tags: [],
       actors: [],
-      confidence: loc.count > 20 ? 'CONFIDENCE_LEVEL_HIGH' : 'CONFIDENCE_LEVEL_MEDIUM',
+      confidence: 'CONFIDENCE_LEVEL_LOW',
       sourceUrls: loc.sourceUrls,
     });
   }
@@ -466,7 +448,16 @@ export async function readMaterializedGdeltEvents({
       + ` (${Math.round(-ageMs / 60000)}min ahead; max ${GDELT_BULK_MAX_FUTURE_SKEW_MS / 60000}min)`,
     );
   }
-  return snapshot;
+  return {
+    ...snapshot,
+    events: snapshot.events.map(event => ({
+      ...event,
+      eventType: 'UNREST_EVENT_TYPE_UNSPECIFIED',
+      severity: 'SEVERITY_LEVEL_UNSPECIFIED',
+      confidence: 'CONFIDENCE_LEVEL_LOW',
+      summary: 'Unverified media signal. This location is mentioned in unrest-related articles; a local event is not verified.',
+    })),
+  };
 }
 
 // ---------- Main Fetch ----------
@@ -526,6 +517,12 @@ export function declareRecords(data) {
   return Array.isArray(data?.events) ? data.events.length : 0;
 }
 
+// Without ACLED credentials the ACLED fetch is skipped and every row is GDELT,
+// so the seed metadata must not claim ACLED (#9266).
+export function unrestSourceVersion(env = process.env) {
+  return hasAcledCredentials(env) ? 'acled+gdelt' : 'gdelt';
+}
+
 // Gate the runSeed entry-point so this module is importable from tests
 // without triggering a real seed run. process.argv[1] is set when this file
 // is invoked as a script (`node scripts/seed-unrest-events.mjs`); under
@@ -535,11 +532,12 @@ if (isMain) {
   runSeed('unrest', 'events', CANONICAL_KEY, fetchUnrestEvents, {
     validateFn: validate,
     ttlSeconds: CACHE_TTL,
-    sourceVersion: 'acled+gdelt',
+    sourceVersion: unrestSourceVersion(),
 
     declareRecords,
     schemaVersion: 1,
     maxStaleMin: 120,
+    afterPublish: unrestHistoryAfterPublish,
   }).catch((err) => {
     const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : ''; console.error('FATAL:', (err.message || err) + _cause);
     process.exit(1);

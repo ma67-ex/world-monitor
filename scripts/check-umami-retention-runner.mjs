@@ -30,14 +30,20 @@ import {
 
 export const RETENTION_RUNNER_SERVICE = 'umami-retention';
 
-// Deep enough that ordinary push traffic cannot bury the record that decides
-// health. A cron tick does NOT create a deployment record — it re-runs the
-// active one — so the record we need is written only by a deploy or redeploy
-// and can be days old while the service is perfectly healthy. Meanwhile every
-// push to main writes a SKIPPED refusal for this service ("No changes to
-// watched files"), so refusals accumulate and the record we want sinks. Depth
-// is the only defence, and it costs the same single CLI call either way.
-export const RETENTION_HISTORY_WINDOW = 200;
+// A cron tick does NOT create a deployment record — it re-runs the active one —
+// so the record that decides health is written only by a deploy or redeploy and
+// can be weeks old while the service is perfectly healthy. Meanwhile every push
+// to main writes a SKIPPED refusal for this service ("No changes to watched
+// files"), ~30/day.
+//
+// Reading the plain history could never keep up: a 200-record window missed a
+// healthy runner on 2026-08-22, and the CLI's 1000-record maximum filled with
+// refusals on 2026-11-22 above a 24-day-old active deployment that ticked every
+// 15 minutes. scripts/read-umami-retention-deployments.mjs now excludes SKIPPED
+// on the server, so this window counts only deploys, builds and their
+// transitions. 100 of those is months of history; filling it with records that
+// never ran is a real signal, and HISTORY_WINDOW_SATURATED still says so.
+export const RETENTION_HISTORY_WINDOW = 100;
 
 export function normalizeDeploymentRows(payload) {
   if (Array.isArray(payload)) return payload;
@@ -52,7 +58,7 @@ export function normalizeDeploymentRows(payload) {
  * Fails closed: anything this cannot read, recognise, or prove is alarming.
  * A silent pass here re-creates the exact failure it exists to catch.
  */
-export function evaluateRetentionRunner(payload) {
+export function evaluateRetentionRunner(payload, historyWindow = RETENTION_HISTORY_WINDOW) {
   const rows = normalizeDeploymentRows(payload);
   if (rows === null) {
     return {
@@ -92,6 +98,32 @@ export function evaluateRetentionRunner(payload) {
 
   if (!running) {
     const refusals = ordered.filter((row) => row?.status === REJECTED_STATUS).length;
+    // Reaching the requested depth means the read was TRUNCATED: the deciding
+    // record may sit one past the edge, which is exactly what happened on
+    // 2026-08-22 (active deployment at index 206, window 200, runner healthy).
+    // A short history is the whole history, so there "nothing ever ran" is a
+    // fact about the runner rather than about how far we looked.
+    //
+    // Both stay alarming — neither observes the runner — but they demand
+    // opposite responses, so they must not share a verdict. Calling a saturated
+    // window NO_RUNNING_DEPLOYMENT sends the operator to Postgres to investigate
+    // a database that is fine.
+    const saturated = Number.isFinite(historyWindow) && ordered.length >= historyWindow;
+    if (saturated) {
+      return {
+        verdict: 'HISTORY_WINDOW_SATURATED',
+        alarming: true,
+        // Report the counted refusals rather than asserting every record is one:
+        // this branch only requires that no record REACHED a running state, and a
+        // window full of FAILED builds satisfies that too. Saying "all N were
+        // refusals" there would be false, in the one sentence an operator reads.
+        detail: `none of the ${ordered.length} records read reached a running state `
+          + `(${refusals} were ${REJECTED_STATUS} refusals) and the read filled its `
+          + `${historyWindow}-record window, so the deployment that decides health is older `
+          + 'than the window rather than absent — check for a run of failed builds, or '
+          + 'redeploy the service to mint a fresh record',
+      };
+    }
     return {
       verdict: 'NO_RUNNING_DEPLOYMENT',
       alarming: true,
@@ -190,9 +222,18 @@ async function main() {
     // expired token, an API blip, a renamed service, a status we do not model.
     // Both fail the run, but telling an operator "Postgres will fill" when the
     // truth is "the token expired" is how an alarm loses its audience.
+    const unobserved = `Could not establish whether ${RETENTION_RUNNER_SERVICE} is retiring rows, `
+      + 'so it is unobserved.';
     const consequence = result.verdict === 'CRASHED'
       ? `The ${RETENTION_RUNNER_SERVICE} cron service is failing, so Umami Postgres will fill until it is fixed.`
-      : `Could not establish whether ${RETENTION_RUNNER_SERVICE} is retiring rows, so it is unobserved.`;
+      : result.verdict === 'HISTORY_WINDOW_SATURATED'
+        // Deliberately does NOT say the runner is failing. This verdict means the
+        // read could not see far enough, and the runner is usually healthy when
+        // it fires — check the tick logs before touching Postgres.
+        ? `${unobserved} This is a read-depth limit, not evidence the runner is broken: `
+          + `confirm with \`railway logs\` on the active ${RETENTION_RUNNER_SERVICE} deployment `
+          + 'before treating it as an outage.'
+        : unobserved;
     console.error(`::error::${result.verdict}: ${result.detail}. ${consequence}`);
     process.exitCode = 1;
   }

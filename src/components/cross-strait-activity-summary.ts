@@ -28,6 +28,7 @@ export interface CrossStraitActivityPanelModel {
   heading: string;
   disclaimer: string;
   coverageLabel: string;
+  japanCoverageLabel: string | null;
   mnd: {
     publisher: string;
     reportingLabel: string;
@@ -69,11 +70,11 @@ const CATEGORY_LABELS: ReadonlyArray<[
   keyof TaiwanMndActivityCategories,
   string,
 ]> = [
-  ['plaAircraftSorties', 'PLA aircraft sorties'],
-  ['planShips', 'PLAN ships'],
-  ['officialShips', 'Official ships'],
-  ['medianLineCrossings', 'Median-line crossings'],
-  ['adizEntries', 'ADIZ entries'],
+  ['plaAircraftSorties', 'Chinese military aircraft flights'],
+  ['planShips', 'Chinese navy ships'],
+  ['officialShips', 'Other official vessels'],
+  ['medianLineCrossings', 'Taiwan Strait median-line crossings'],
+  ['adizEntries', 'Air defense identification zone entries'],
 ];
 
 const JAPAN_CATEGORY_KEYS = [
@@ -226,7 +227,7 @@ function isObservation(value: unknown): boolean {
     || !Number.isInteger(value.revision.sequence)
     || typeof value.revision.state !== 'string'
     || typeof value.revision.vintageId !== 'string'
-    || !Array.isArray(value.history)
+    || (value.history !== undefined && !Array.isArray(value.history))
     || !('provenance' in value)
     || (value.summary !== undefined && typeof value.summary !== 'string')
     || !isRecord(value.categories)
@@ -266,6 +267,7 @@ function isSourceHealth(value: unknown): boolean {
       value.transportPath === undefined
       || value.transportPath === 'direct'
       || value.transportPath === 'proxy'
+      || value.transportPath === 'x_api'
     )
     && (
       value.blockedReason === undefined
@@ -308,6 +310,13 @@ function isSourceHealth(value: unknown): boolean {
     )
     && Array.isArray(value.errorCodes)
     && value.errorCodes.every((code) => typeof code === 'string')
+    && (
+      value.refreshErrorCodes === undefined
+      || (
+        Array.isArray(value.refreshErrorCodes)
+        && value.refreshErrorCodes.every((code) => typeof code === 'string')
+      )
+    )
     && isNullableDateString(value.lastSuccessAt)
     && (
       value.admittedDocumentCount === undefined
@@ -362,15 +371,27 @@ function comparisonModel(window: CrossStraitBaselineWindow): CrossStraitComparis
   if (window.state !== 'sufficient' || window.value == null) {
     return {
       label: `${window.windowDays}-report median unavailable`,
-      coverage: `n=${window.sampleSize}/${window.requiredSampleSize}`,
+      coverage: `Reports: ${window.sampleSize}/${window.requiredSampleSize}`,
       state: 'insufficient_data',
     };
   }
   return {
     label: `${window.windowDays}-report median ${numberLabel(window.value)}`,
-    coverage: `n=${window.sampleSize}; ${window.calendarSpanDays} calendar days; ${window.missingCalendarDays} missing`,
+    coverage: `Reports: ${window.sampleSize}; ${window.calendarSpanDays} calendar days; ${window.missingCalendarDays} missing`,
     state: 'sufficient',
   };
+}
+
+const DAY_MS = 86_400_000;
+
+function shipCount(count: number, navy: string): string {
+  return `${count} ${navy} ship${count === 1 ? '' : 's'}`;
+}
+
+function contentFreshnessState(provenance: unknown): unknown {
+  if (!isRecord(provenance) || !isRecord(provenance.claims)) return undefined;
+  const claim = provenance.claims.content_freshness;
+  return isRecord(claim) && isRecord(claim.value) ? claim.value.state : undefined;
 }
 
 function safeOfficialSourceUrl(value: string): string | null {
@@ -410,21 +431,28 @@ export function buildCrossStraitActivityPanelModel(
       })
     : [];
 
-  const japan = snapshot.observations
-    .filter((row) => row.sourceId === 'japan-mod')
+  const japanObservations = snapshot.observations.filter((row) => row.sourceId === 'japan-mod');
+  const japanSource = snapshot.sources.find((source) => source.id === 'japan-mod');
+  const japanCoverageLabel = japanSource?.transportPath === 'x_api'
+    ? `Japan X discovery: last success ${japanSource.lastSuccessAt ?? 'not recorded'}.${japanSource.transportStatus === 'fresh' ? '' : ' Latest check unavailable.'} ${japanObservations.length} reviewed report${japanObservations.length === 1 ? '' : 's'} in this snapshot. New posts require review before they update these counts.`
+    : null;
+  const japan = japanObservations
     .sort((a, b) => b.reportingDay.localeCompare(a.reportingDay))
     .slice(0, 3)
     .map((row) => {
       const counts = row.categories;
       const countSummary = [
-        counts.plaAircraft != null ? `${counts.plaAircraft} PLA aircraft` : null,
-        counts.planShips != null ? `${counts.planShips} PLAN ships` : null,
-        counts.russianNavyShips != null ? `${counts.russianNavyShips} Russian Navy ships` : null,
+        counts.plaAircraft != null ? `${counts.plaAircraft} Chinese military aircraft` : null,
+        counts.planShips != null ? shipCount(counts.planShips, 'Chinese navy') : null,
+        counts.russianNavyShips != null ? shipCount(counts.russianNavyShips, 'Russian Navy') : null,
       ].filter(Boolean).join(', ');
+      const ageDays = Math.floor((Date.parse(snapshot.generatedAt) - Date.parse(row.reportingDay)) / DAY_MS);
       return {
         label: `Japan Joint Staff · ${countSummary || 'reviewed activity document'}`,
-        reportingLabel: row.reportingDay,
-        summary: row.summary ?? 'Reviewed regional augmentation; not reconciled with Taiwan MND counts.',
+        reportingLabel: contentFreshnessState(row.provenance) === 'stale'
+          ? `${row.reportingDay} · ${ageDays} days old; not current activity`
+          : row.reportingDay,
+        summary: row.summary ?? 'Reviewed regional augmentation; not reconciled with Taiwan Ministry of National Defense counts.',
         sourceUrl: safeOfficialSourceUrl(row.sourceUrl) ?? '',
       };
     });
@@ -458,7 +486,7 @@ export function buildCrossStraitActivityPanelModel(
     : null;
   return {
     heading: 'Official activity claims',
-    disclaimer: 'Publisher claim · category counts are kept separate and are not ADS-B or AIS tracks.',
+    disclaimer: 'Publisher claim · category counts are kept separate and are not aircraft or ship transponder tracks.',
     coverageLabel: snapshot.coverage.backfillComplete
       ? `${progress} · source backfill complete`
       : `${progress} · backfill in progress`,
@@ -471,6 +499,7 @@ export function buildCrossStraitActivityPanelModel(
         }
       : null,
     japan,
+    japanCoverageLabel,
     sourceHealth,
   };
 }

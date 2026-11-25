@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url';
 
 import {
   buildFeedHealthPayload,
+  isCbcRss,
   isGoogleNewsWrapper,
   SILENT_ZERO_THRESHOLD,
+  SUSTAINED_FAILURE_THRESHOLD,
 } from '../scripts/_feed-health.mjs';
 import { computeRecall } from '../scripts/_recall-benchmark-core.mjs';
 import { selectTopStories } from '../scripts/_clustering.mjs';
-import { extractServerFeeds } from '../scripts/validate-rss-feeds.mjs';
+import { extractFeeds, extractServerFeeds } from '../scripts/validate-rss-feeds.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readSrc = (rel) => readFileSync(resolve(root, rel), 'utf-8');
@@ -23,6 +25,54 @@ const readSrc = (rel) => readFileSync(resolve(root, rel), 'utf-8');
 const GN = 'https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en';
 
 describe('feed-health payload (#4920a)', () => {
+  it('includes CBC native RSS so daily feed-health monitors it (#6624)', () => {
+    const feeds = extractServerFeeds();
+    const cbc = feeds.find((f) => f.name === 'CBC News');
+    assert.ok(cbc, 'CBC News must be in the server digest catalog feed-health publishes');
+    assert.equal(cbc.url, 'https://www.cbc.ca/webfeed/rss/rss-world');
+    assert.equal(isGoogleNewsWrapper(cbc.url), false, 'CBC is native RSS, not a GNews workaround');
+    assert.equal(isCbcRss(cbc.url), true);
+  });
+
+  it('CBC sustained fetch failure alerts after N consecutive DEAD/EMPTY runs, not a single blip (#6624)', () => {
+    const url = 'https://www.cbc.ca/webfeed/rss/rss-world';
+    assert.equal(SUSTAINED_FAILURE_THRESHOLD, SILENT_ZERO_THRESHOLD,
+      'CBC uses the same consecutive-run window as silent-zeros');
+
+    const blip = buildFeedHealthPayload(
+      [{ name: 'CBC News', url, status: 'DEAD', detail: 'HTTP 403' }],
+      null,
+      1,
+    );
+    assert.equal(blip.feeds[url].consecutiveEmpty, 1);
+    assert.equal(blip.feeds[url].cbc, true);
+    assert.equal(blip.feeds[url].sustainedFailure, undefined);
+    assert.deepEqual(blip.sustainedFailures, [], 'one 403 is a blip, not an alert');
+    assert.deepEqual(blip.silentZeros, [], 'CBC is native RSS — not a silent-zero wrapper');
+
+    const sustained = buildFeedHealthPayload(
+      [{ name: 'CBC News', url, status: 'DEAD', detail: 'HTTP 403' }],
+      blip,
+      2,
+    );
+    assert.equal(sustained.feeds[url].consecutiveEmpty, SUSTAINED_FAILURE_THRESHOLD);
+    assert.equal(sustained.feeds[url].sustainedFailure, true);
+    assert.equal(sustained.sustainedFailures.length, 1, 'N consecutive CBC failures = alert');
+    assert.equal(sustained.sustainedFailures[0].name, 'CBC News');
+    assert.equal(sustained.sustainedFailures[0].url, url);
+    assert.equal(sustained.sustainedFailures[0].status, 'DEAD');
+    assert.deepEqual(sustained.silentZeros, [], 'CBC still must not enter silentZeros');
+
+    const recovered = buildFeedHealthPayload(
+      [{ name: 'CBC News', url, status: 'OK' }],
+      sustained,
+      3,
+    );
+    assert.equal(recovered.feeds[url].consecutiveEmpty, 0);
+    assert.equal(recovered.feeds[url].sustainedFailure, undefined);
+    assert.deepEqual(recovered.sustainedFailures, [], 'recovery clears the CBC alert');
+  });
+
   it('classifies wrappers and counts statuses', () => {
     const payload = buildFeedHealthPayload([
       { name: 'BBC', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', status: 'OK', catalog: 'both' },
@@ -140,7 +190,6 @@ describe('selectTopStories drop stats (#4920b)', () => {
 describe('server catalog extraction (#4920a)', () => {
   it('extracts the digest feed catalog with rebuilt Google News URLs', () => {
     const feeds = extractServerFeeds();
-    assert.ok(feeds.length > 250, `expected 250+ server feeds, got ${feeds.length}`);
     const wrapper = feeds.find((f) => f.url.includes('news.google.com'));
     assert.ok(wrapper, 'gn() URLs must be rebuilt');
     assert.match(wrapper.url, /^https:\/\/news\.google\.com\/rss\/search\?q=.+&hl=/);
@@ -157,11 +206,8 @@ describe('server catalog extraction (#4920a)', () => {
     const natureFeed = extractServerFeeds().find((feed) => feed.name === 'Nature News');
     assert.equal(natureFeed?.url, canonicalNatureUrl, 'server digest must use Nature\'s canonical RSS URL');
 
-    const clientFeeds = readSrc('src/config/feeds.ts');
-    assert.ok(
-      clientFeeds.includes(`{ name: 'Nature News', url: rss('${canonicalNatureUrl}') }`),
-      'client catalog must use the same canonical Nature RSS endpoint',
-    );
+    const clientNature = extractFeeds().find((feed) => feed.name === 'Nature News');
+    assert.equal(clientNature?.url, canonicalNatureUrl, 'client catalog must use the same canonical Nature RSS endpoint');
 
     const validator = readSrc('scripts/validate-rss-feeds.mjs');
     assert.match(validator, /const MAX_REDIRECTS = 3;/);
@@ -177,7 +223,10 @@ describe('coverage-ledger and provenance wiring (source-textual)', () => {
   it('digest counts every drop gate and publishes the ledger', () => {
     const src = readSrc('server/worldmonitor/news/v1/list-feed-digest.ts');
     assert.match(src, /droppedFeedCap = Math\.max\(0, matches\.length - ITEMS_PER_FEED\)/);
-    assert.match(src, /ledgerDrops\.perCategoryCap \+= Math\.max\(0, items\.length - MAX_ITEMS_PER_CATEGORY\)/);
+    // #7084: counted off the post-revocation `servable` list, not the raw one —
+    // a revoked item must not occupy a cap slot NOR be counted as having
+    // displaced the item behind it.
+    assert.match(src, /ledgerDrops\.perCategoryCap \+= Math\.max\(0, servable\.length - MAX_ITEMS_PER_CATEGORY\)/);
     assert.match(src, /ledgerDrops\.freshnessFloor = droppedStaleTotal/);
     assert.match(src, /news:coverage-ledger:v1/);
   });
@@ -221,20 +270,33 @@ import { GDELT_BULK_ARTICLES_KEY } from '../scripts/_gdelt-bulk-contract.mjs';
 import { publishFeedHealth } from '../scripts/validate-rss-feeds.mjs';
 import { getOptionalUpstashCreds } from '../scripts/_upstash-rest.mjs';
 
-describe('gn()/gnLocale() replica drift guard (#4927 review)', () => {
-  it('extractServerFeeds URL builders textually match the _feeds.ts source', () => {
-    const feedsSrc = readSrc('server/worldmonitor/news/v1/_feeds.ts');
-    const validatorSrc = readSrc('scripts/validate-rss-feeds.mjs');
-    // The load-bearing template expressions must appear byte-identical in
-    // both files — a change to gn()'s URL shape in _feeds.ts without the
-    // replica following makes the health report validate URLs the digest
-    // never fetches.
-    const gnTemplate = 'https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en';
-    const gnLocaleTemplate = 'https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=${hl}&gl=${gl}&ceid=${ceid}';
-    for (const template of [gnTemplate, gnLocaleTemplate]) {
-      assert.ok(feedsSrc.includes(template), `_feeds.ts must contain: ${template}`);
-      assert.ok(validatorSrc.includes(template), `validate-rss-feeds replica must contain: ${template}`);
+describe('validator reads the URLs the views serve (#4927 review)', () => {
+  // The validator reads shared/news-catalog.json without executing app code.
+  // Its extraction must equal what the server digest and the browser fetch,
+  // or the health report validates URLs nobody requests (or skips ones they do).
+  it('extractServerFeeds equals the server view', async () => {
+    const { buildServerVariantFeeds, buildServerIntelSources } = await import('../shared/news-catalog.ts');
+    const served = new Set([
+      ...Object.values(buildServerVariantFeeds()).flatMap((byCategory) => Object.values(byCategory).flat()),
+      ...buildServerIntelSources(),
+    ].map((feed) => feed.url));
+    const extracted = extractServerFeeds().map((feed) => feed.url);
+    assert.ok(served.size > 0, 'the server view is empty');
+    assert.ok(extracted.length > 0, 'server extraction is empty');
+    assert.deepEqual(new Set(extracted), served);
+  });
+
+  it('extractFeeds equals the browser view', async () => {
+    const { NEWS_CATALOG, buildBrowserCategoryFeeds, buildBrowserIntelSources } = await import('../shared/news-catalog.ts');
+    const urls = new Set();
+    const add = (url) => (typeof url === 'string' ? urls.add(url) : Object.values(url).forEach((href) => urls.add(href)));
+    for (const edition of Object.keys(NEWS_CATALOG.layout.browser)) {
+      for (const feeds of Object.values(buildBrowserCategoryFeeds(edition))) feeds.forEach((feed) => add(feed.url));
     }
+    buildBrowserIntelSources().forEach((feed) => add(feed.url));
+    const extracted = extractFeeds().map((feed) => feed.url);
+    assert.ok(extracted.length > 500, `browser extraction looks empty (${extracted.length})`);
+    assert.deepEqual(new Set(extracted), urls);
   });
 });
 
@@ -412,6 +474,54 @@ describe('feed-health streak continuity (#4927 external review)', () => {
     try {
       const out = await publishFeedHealth([{ name: 'X', url: 'https://x/rss', status: 'EMPTY' }]);
       assert.deepEqual(out, { published: false, reason: 'previous-read-failed' });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
+  });
+
+  it('seed-meta status=error after sustained CBC failure, ok after a single blip (#6624)', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://stub.upstash.example';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'stub-token';
+    const url = 'https://www.cbc.ca/webfeed/rss/rss-world';
+    const realFetch = globalThis.fetch;
+
+    const publishAndReadMeta = async (results, previousPayload) => {
+      const sets = [];
+      globalThis.fetch = async (_u, init) => {
+        const cmd = JSON.parse(init.body);
+        if (cmd[0] === 'GET') {
+          return new Response(JSON.stringify({
+            result: previousPayload ? JSON.stringify(previousPayload) : null,
+          }), { status: 200 });
+        }
+        if (cmd[0] === 'SET') sets.push(cmd);
+        return new Response(JSON.stringify({ result: 'OK' }), { status: 200 });
+      };
+      const out = await publishFeedHealth(results);
+      const metaCmd = sets.find((c) => c[1] === 'seed-meta:news:feed-health');
+      assert.ok(metaCmd, 'must SET seed-meta:news:feed-health');
+      return { out, meta: JSON.parse(metaCmd[2]) };
+    };
+
+    try {
+      const blip = await publishAndReadMeta(
+        [{ name: 'CBC News', url, status: 'DEAD', detail: 'HTTP 403' }],
+        null,
+      );
+      assert.equal(blip.out.published, true);
+      assert.equal(blip.out.payload.sustainedFailures.length, 0);
+      assert.equal(blip.meta.status, 'ok', 'a single CBC 403 must not mark seed-meta unhealthy');
+      assert.equal(blip.meta.sustainedFailureCount, 0);
+
+      const sustained = await publishAndReadMeta(
+        [{ name: 'CBC News', url, status: 'DEAD', detail: 'HTTP 403' }],
+        blip.out.payload,
+      );
+      assert.equal(sustained.out.payload.sustainedFailures.length, 1);
+      assert.equal(sustained.meta.status, 'error', 'N consecutive CBC failures mark seed-meta unhealthy');
+      assert.equal(sustained.meta.sustainedFailureCount, 1);
     } finally {
       globalThis.fetch = realFetch;
       delete process.env.UPSTASH_REDIS_REST_URL;

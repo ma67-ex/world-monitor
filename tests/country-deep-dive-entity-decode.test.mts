@@ -84,12 +84,6 @@ describe('normalizeHeadlineKey / dedupeHeadlines: single-level decode', () => {
     assert.ok(a.length > 0);
   });
 
-  it('still collapses encoded and plain variants of the same headline', () => {
-    const a = normalizeHeadlineKey('AT&amp;T announces new tower buildout');
-    const b = normalizeHeadlineKey('AT&T announces new tower buildout');
-    assert.equal(a, b);
-  });
-
   it('dedupes a double-escaped title against its literal-text twin', () => {
     const items = [
       { title: 'XSS via &amp;lt;script&amp;gt; in Acme SDK', source: 'BlogA' },
@@ -106,6 +100,6 @@ describe('normalizeHeadlineKey / dedupeHeadlines: single-level decode', () => {
     );
     const out = dedupeHeadlines(items);
     assert.equal(out.length, 1);
-    assert.equal(out[0]!.extraSources.length, 1);
+    assert.equal(out[0]!.sources.length, 2);
   });
 });

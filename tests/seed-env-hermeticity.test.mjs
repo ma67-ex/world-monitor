@@ -18,7 +18,8 @@
 //      the loader opts out of 1 and 2 silently, which is exactly how the second
 //      instance of this bug survived in fetch-pizzint-bases.mjs.
 //
-// 1 and 2 are exercised against the REAL scripts/_seed-utils.mjs through a
+// 1 and 2 are exercised against the REAL scripts/_env-file.mjs (via its
+// _seed-utils.mjs re-export) through a
 // fixture checkout in a temp dir, so the assertions are meaningful in CI (which
 // has no .env.local) as well as on developer machines. Deliberately no real
 // seeder is imported — that is its own repo landmine (top-level execution) — so
@@ -34,7 +35,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -42,6 +43,7 @@ import { glob } from 'node:fs/promises';
 
 import { isTestRuntime } from '../scripts/_seed-utils.mjs';
 import { stripJsComments } from '../scripts/lib/js-source-structure.mjs';
+import { createTempDir } from './helpers/temp-dir.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SEED_UTILS_URL = pathToFileURL(join(REPO_ROOT, 'scripts', '_seed-utils.mjs')).href;
@@ -60,7 +62,7 @@ const envFileBody = (url) => `# fixture\nUPSTASH_REDIS_REST_URL=${url}\nUPSTASH_
  * list reached for.
  */
 function makeFixtureCheckout({ withLocalEnvFile, nested = false, only = null }) {
-  const outer = mkdtempSync(join(tmpdir(), 'wm-seed-env-'));
+  const outer = createTempDir('wm-seed-env-');
   // The fixture checkout sits INSIDE a temp dir that also holds a .env.local,
   // so every case doubles as a check that resolution stops at the checkout
   // boundary. `loadEnvFile` used to probe `<checkout>/../.env.local` and really
@@ -204,7 +206,8 @@ const ENV_PARSER_ALLOWLIST = new Set([
   // top-level IIFE with no direct-run guard, so importing it loaded credentials
   // at module scope with no isTestRuntime() check. It now takes the shared
   // helper's `only` option instead, which keeps its 2-key narrowing.
-  'scripts/_seed-utils.mjs',
+  // _seed-utils.mjs re-exports this loader for the 149 seeders.
+  'scripts/_env-file.mjs',
 ]);
 
 // Every way a script can get at a `.env` file's contents.
@@ -463,39 +466,23 @@ describe('seeder env hermeticity (#5767)', () => {
       // Negative: nothing here reaches for a home directory.
       assert.deepEqual(findHomeDirReferences(`join(__dirname, '..', '.env.local')`), []);
     });
+  });
 
-    it('no source bakes a home path into the repo', async () => {
-      const offenders = [];
-      let scanned = 0;
-      for await (const [entry, source] of scanSources()) {
-        scanned += 1;
-        const found = findCheckoutEscapingEnvPaths(source);
-        if (found.length > 0) offenders.push(`${entry}: ${found.join(', ')}`);
-      }
-      assert.ok(scanned > 100, `expected to scan the seeder fleet, scanned ${scanned}`);
-      assert.deepEqual(offenders, [], `sources with a hardcoded home path:\n${offenders.join('\n')}`);
-    });
-
-    it('no env-loading source reaches for a home directory', async () => {
-      // Gated on accessesEnvFileItself, NOT on the write-half predicate this
-      // used to use. Under the old gating, escaping the parser check also
-      // switched this one off — so a file doing plain `homedir()` +
-      // `process.loadEnvFile()` passed BOTH sweeps with a working leak. The
-      // read-half gate has no such bypass: naming a `.env` file (or a loader)
-      // is unavoidable, so anything reaching for $HOME to find one lands here.
-      const offenders = [];
-      for await (const [entry, source] of scanSources()) {
-        if (!accessesEnvFileItself(source)) continue;
-        const found = findHomeDirReferences(stripJsComments(source));
-        if (found.length > 0) offenders.push(`${entry}: ${found.join(', ')}`);
-      }
-      assert.deepEqual(
-        offenders,
-        [],
-        `these resolve credentials from the home directory, defeating worktree ` +
-          `isolation:\n${offenders.join('\n')}`,
-      );
-    });
+  it('checks credential paths and env loaders across the seeder fleet', async () => {
+    const violations = { checkoutEscapes: [], homeDirectoryLoaders: [], unapprovedLoaders: [] };
+    let scanned = 0;
+    for await (const [entry, source] of scanSources()) {
+      scanned += 1;
+      const escapes = findCheckoutEscapingEnvPaths(source);
+      if (escapes.length) violations.checkoutEscapes.push(`${entry}: ${escapes.join(', ')}`);
+      if (!accessesEnvFileItself(source)) continue;
+      // Approved loaders must also resolve credentials inside the checkout.
+      const home = findHomeDirReferences(stripJsComments(source));
+      if (home.length) violations.homeDirectoryLoaders.push(`${entry}: ${home.join(', ')}`);
+      if (!ENV_PARSER_ALLOWLIST.has(entry)) violations.unapprovedLoaders.push(entry);
+    }
+    assert.ok(scanned > 100, `expected to scan the seeder fleet, scanned ${scanned}`);
+    assert.deepEqual(violations, { checkoutEscapes: [], homeDirectoryLoaders: [], unapprovedLoaders: [] });
   });
 
   describe('only the shared helper reads .env files', () => {
@@ -533,20 +520,6 @@ describe('seeder env hermeticity (#5767)', () => {
         accessesEnvFileItself(`const body = readFileSync('.env.local', 'utf8');\nreturn findSecrets(body);`),
         false,
         'auditing an env file is not loading it',
-      );
-    });
-
-    it('no source outside the allowlist reads a .env file', async () => {
-      const offenders = [];
-      for await (const [entry, source] of scanSources()) {
-        if (ENV_PARSER_ALLOWLIST.has(entry)) continue;
-        if (accessesEnvFileItself(source)) offenders.push(entry);
-      }
-      assert.deepEqual(
-        offenders,
-        [],
-        `these read .env themselves instead of calling loadEnvFile(), so they bypass the ` +
-          `test-runtime guard entirely:\n${offenders.join('\n')}`,
       );
     });
 

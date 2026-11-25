@@ -1,7 +1,10 @@
 import { fetchFlightStatus, fetchAirportOpsSummary, fetchFlightPrices, fetchAviationNews, fetchGoogleFlights } from '@/services/aviation';
+import { safeStorageSet } from '@/utils/safe-storage';
 import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
 import { MONITORED_AIRPORTS } from '@/config/airports';
-import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { isImeEnter, setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { createFocusTrap, type FocusTrap } from '@/utils/focus-trap';
+import { declareOverlay } from '@/utils/open-modal';
 
 
 // ---- Intent types ----
@@ -130,9 +133,10 @@ async function executeIntent(intent: Intent): Promise<CommandResult> {
                 : s.severity === 'minor' ? '#f59e0b'
                 : '#ef4444';
             const sevLabel = s.severity === 'unknown' ? 'NO DATA' : s.severity.toUpperCase();
+            // A NOTAM-sourced row only knows the airport is open, not its delays.
             const suffix = s.severity === 'unknown'
                 ? ''
-                : `<span>${s.avgDelayMinutes > 0 ? `+${s.avgDelayMinutes}m delay` : 'Normal ops'}</span>`;
+                : `<span>${s.avgDelayMinutes > 0 ? `+${s.avgDelayMinutes}m delay` : s.source === 'notam' ? 'Open' : 'Normal ops'}</span>`;
             return `
       <div class="cmd-row">
         <strong>${escapeHtml(s.iata)}</strong>
@@ -290,6 +294,7 @@ const MAX_HISTORY = 20;
 
 export class AviationCommandBar {
     private overlay: HTMLElement | null = null;
+    private focusTrap: FocusTrap | null = null;
     private boundKeydown: (e: KeyboardEvent) => void;
 
     constructor() {
@@ -315,13 +320,17 @@ export class AviationCommandBar {
 
         this.overlay = document.createElement('div');
         this.overlay.id = 'aviation-cmd-overlay';
+        this.overlay.setAttribute('role', 'dialog');
+        this.overlay.setAttribute('aria-modal', 'true');
+        declareOverlay(this.overlay, { reload: 'blocking' });
+        this.overlay.setAttribute('aria-label', 'Aviation Command');
         setTrustedHtml(this.overlay, trustedHtml(`
       <div id="aviation-cmd-box">
         <div id="aviation-cmd-header">
           <span>✈️ Aviation Command</span>
-          <button id="aviation-cmd-close">×</button>
+          <button id="aviation-cmd-close" aria-label="Close">×</button>
         </div>
-        <input id="aviation-cmd-input" type="text" placeholder="ops Dubai  ·  flight EK3  ·  fly London Dubai  ·  brief" autocomplete="off" spellcheck="false">
+        <input id="aviation-cmd-input" type="text" placeholder="ops Dubai  ·  flight EK3  ·  fly London Dubai  ·  brief" aria-label="Aviation command" autocomplete="off" spellcheck="false">
         <div id="aviation-cmd-suggestions"></div>
         <div id="aviation-cmd-result"></div>
         <div id="aviation-cmd-history-list"></div>
@@ -329,6 +338,11 @@ export class AviationCommandBar {
       </div>`, "legacy direct innerHTML migration"));
 
         document.body.appendChild(this.overlay);
+        this.focusTrap = createFocusTrap(this.overlay, {
+            onEscape: () => this.close(),
+            initialFocus: () => this.overlay?.querySelector<HTMLInputElement>('#aviation-cmd-input') ?? null,
+        });
+        this.focusTrap.activate();
 
         this.overlay.addEventListener('click', (e) => {
             if (e.target === this.overlay) { this.close(); return; }
@@ -345,7 +359,7 @@ export class AviationCommandBar {
         const input = this.overlay.querySelector('#aviation-cmd-input') as HTMLInputElement;
         input?.addEventListener('keydown', async (e) => {
             if (e.key === 'Escape') { this.close(); return; }
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !isImeEnter(e)) {
                 const val = input.value.trim();
                 if (!val) return;
                 this.addToHistory(val);
@@ -364,6 +378,8 @@ export class AviationCommandBar {
     }
 
     private close(): void {
+        this.focusTrap?.deactivate();
+        this.focusTrap = null;
         this.overlay?.remove();
         this.overlay = null;
     }
@@ -389,7 +405,7 @@ export class AviationCommandBar {
     private addToHistory(cmd: string): void {
         const h = this.getHistory().filter(h => h !== cmd);
         h.unshift(cmd);
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0, MAX_HISTORY)));
+        safeStorageSet(HISTORY_KEY, JSON.stringify(h.slice(0, MAX_HISTORY)));
         this.renderHistory();
     }
 

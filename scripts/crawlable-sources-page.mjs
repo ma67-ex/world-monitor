@@ -2,11 +2,26 @@
 // This stays separate from the shared corpus generator so the large page-specific
 // template does not obscure the corpus orchestration and other page families.
 
+import { createHash } from 'node:crypto';
+import { sourcesBookmarkScript, sourcesSearchScript } from './crawlable-sources-search.mjs';
+
+import {
+  catalogCoverageCountryOptions,
+  catalogCountryOptions,
+  resolveSourceOrigin,
+  sourceOriginFilterValue,
+  sourceOriginLabel,
+} from './source-origin.mjs';
+import {
+  isSyndicationTransportEntry,
+  uniqueSorted,
+} from './source-catalog-identity.mjs';
+
 // Hand-authored marketing copy for the /sources/ catalog page. Domains and
 // their docs anchors mirror docs/data-sources.mdx section headings; the
 // aggregate counts are computed from the committed attribution manifest, so
 // the page cannot drift from the tracked inventory.
-const SOURCE_DOMAINS = [
+export const SOURCE_DOMAINS = [
   {
     id: 'geopolitics',
     name: 'Geopolitics & Conflict',
@@ -18,15 +33,15 @@ const SOURCE_DOMAINS = [
     id: 'military',
     name: 'Military & Strategic',
     anchor: 'military-%26-strategic',
-    blurb: '226 military bases, live ADS-B military flights, naval activity, ~100 tracked satellites, and GPS jamming detected from transponder anomalies.',
+    blurb: 'Military bases, live ADS-B military flights, naval activity, tracked satellites, and GPS jamming detected from transponder anomalies.',
     providers: ['adsb.lol', 'Wingbits', 'CelesTrak', 'gpsjam.org', 'LiveUAMap'],
   },
   {
     id: 'news',
     name: 'News & OSINT',
     anchor: 'news-%26-osint',
-    blurb: 'Hundreds of tiered news feeds across six variants, a 56-channel Telegram OSINT lane, live TV, and webcam grids — every source disclosed and bias-tagged.',
-    providers: ['Reuters', 'BBC', 'AP', 'Al Jazeera', 'Bellingcat', 'ISW'],
+    blurb: 'Tiered news feeds across every product variant, a curated Telegram OSINT lane with public trust badges, live TV, and webcam grids — every source disclosed and bias-tagged.',
+    providers: ['Reuters', 'BBC', 'AP', 'Al Jazeera', 'Bellingcat', 'ISW', 'Telegram OSINT'],
   },
   {
     id: 'finance',
@@ -46,7 +61,7 @@ const SOURCE_DOMAINS = [
     id: 'infrastructure',
     name: 'Infrastructure & Cyber',
     anchor: 'infrastructure-%26-cyber',
-    blurb: 'Undersea cables, pipelines, 62 strategic ports, AI datacenters, internet outages, and six live threat-intelligence feeds.',
+    blurb: 'Undersea cables, pipelines, strategic ports, AI datacenters, internet outages, and live threat-intelligence feeds.',
     providers: ['Cloudflare Radar', 'Submarine Cable Map', 'abuse.ch', 'AbuseIPDB', 'Epoch AI'],
   },
   {
@@ -67,7 +82,7 @@ const SOURCE_DOMAINS = [
     id: 'china',
     name: 'China Coverage',
     anchor: 'china-coverage',
-    blurb: 'Source-attributed official lanes: NBS and SAFE macro, policy documents from six ministries, exchange disclosures, and cross-strait activity claims.',
+    blurb: 'Source-attributed official lanes: NBS and SAFE macro, ministry policy documents, exchange disclosures, and cross-strait activity claims.',
     providers: ['NBS', 'SAFE', "People's Bank of China", 'SSE / SZSE', 'Taiwan MND'],
   },
   {
@@ -75,7 +90,7 @@ const SOURCE_DOMAINS = [
     name: 'Tech Ecosystem',
     anchor: 'tech-ecosystem',
     blurb: 'Company HQs, startup hubs, cloud regions, accelerators, and research signals from repository analytics to conference calendars.',
-    providers: ['Crunchbase News', 'GitHub', 'OSS Insight', 'Product Hunt'],
+    providers: ['Crunchbase News', 'GitHub', 'Product Hunt'],
   },
 ];
 
@@ -84,30 +99,63 @@ const SOURCE_DOMAIN_MATCHERS = [
   ['military', /military|defen[cs]e|gpsjam|wingbits|oref|pizzint|mirta|airplanes\.live|adsb\.lol|celestrak/],
   ['aviation', /aviation|airline|airspace|airport|flight|notam|opensky|travelpayouts/],
   ['environment', /climate|natural|earthquake|wildfire|fire-detection|weather|cyclone|disaster|air-quality|radiation|disease|eonet|firms/],
-  ['energy', /energy|fuel|gas-storage|petroleum|oil-stock|electricity|gold|commodity|mineral|jodi|eia\.gov|gie\.eu|ember|low-carbon|power-reliability|fossil/],
+  ['energy', /energy|fuel|gas-storage|petroleum|oil-stock|electricity|gold|commodity|mineral|jodi|eia\.gov|gie\.eu|ember|low-carbon|power-reliability|grid-clock|fossil/],
   ['infrastructure', /infrastructure|cyber|cable|cloudflare|service-status|pipeline|internet-outage|portwatch|chokepoint|maritime|navigational-warning|abuseipdb|abuse\.ch/],
-  ['finance', /econom|market|finance|stock|crypto|coin|exchange-rate|\bfx\b|yield|central-bank|trade|supply-chain|grocery|bigmac|debt|bis-|ecb-|eurostat|world-bank|comtrade|fao-food|treasury|fiscaldata/],
-  ['technology', /research|company|github|agentskills|technology|regulatory|tender|patent|startup|product-hunt|ossinsight|exa\.ai|firecrawl/],
-  ['geopolitics', /conflict|unrest|acled|ucdp|gdelt|security-advisor|sanction|travel-advisor|displacement|resilience|country-fact|prediction-market|forecast-market|hapi/],
+  ['finance', /econom|market|finance|stock|crypto|coin|exchange-rate|\bfx\b|yield|central-bank|trade|supply-chain|grocery|food-prices|bigmac|debt|bis-|ecb-|eurostat|world-bank|comtrade|fao-food|treasury|fiscaldata|world-cpi|oecd|e-stat|abs\.gov\.au/],
+  ['technology', /research|company|github|agentskills|technology|regulatory|tender|patent|startup|product-hunt|exa\.ai|firecrawl/],
+  ['geopolitics', /conflict|unrest|acled|ucdp|gdelt|security-advisor|sanction|travel-advisor|displacement|cross-border|resilience|country-fact|prediction-market|forecast-market|hapi/],
 ];
 
 // The manifest records providers and code references, not a marketing domain.
 // Keep ambiguous structured providers explicit so a new unmatched provider
 // fails the build instead of silently becoming "geopolitics".
 const SOURCE_DOMAIN_OVERRIDES = new Map([
-  // Barchart's only remaining reference (scripts/seed-fear-greed.mjs) has
-  // nothing in its path/provider/host text that matches a domain pattern
-  // below -- surfaced by market-breadth's own Barchart usage being removed
-  // (2026-09-29, AWS WAF blocked it), which was the reference that used to
-  // make this entry classify via a "market"-ish path match.
-  ['Barchart', 'finance'],
+  ['fawazahmed0 currency-api', 'finance'],
+  ['ammancity.gov.jo', 'finance'],
+  ['data.1212.mn', 'finance'],
+  ['madr.gov.dz', 'finance'],
+  ['api.siat.stat.uz', 'finance'],
+  ['precios.maga.gob.gt', 'finance'],
+  ['simaniger.net', 'finance'],
+  ['stat.gov.kg', 'finance'],
+  ['stat.gov.kz', 'finance'],
+  ['stat.uz', 'finance'],
+  ['tcb.gov.bd', 'finance'],
+  ['ugandacoffee.go.ug', 'finance'],
+  ['www.nabc.go.th', 'finance'],
+  ['www.ocpv-ci.com', 'finance'],
+  ['www.viwanda.go.tz', 'finance'],
+  ['www.bi.go.id', 'finance'],
+  ['www.cbsl.gov.lk', 'finance'],
+  ['www.da.gov.ph', 'finance'],
+  ['www.economia-sniim.gob.mx', 'finance'],
+  ['www.onagri.nat.tn', 'finance'],
+  ['www.pbs.gov.pk', 'finance'],
+  ['hormuz.data-tracking.net', 'infrastructure'],
+  // NGA broadcast warnings feed chokepoint status and cable health from server/_shared.
+  ['msi.nga.mil', 'infrastructure'],
+  ['Alberta Emergency Alert', 'environment'],
+  ['B.C. Evacuation Orders and Alerts', 'environment'],
+  ['SaskAlert', 'environment'],
   ['Hyperliquid', 'finance'],
-  // God's Eye View map tiles/terrain (src/components/GodsEyeView.ts).
-  ['services.arcgisonline.com', 'environment'],
-  ['terrain.reearth.land', 'environment'],
-  ['tile.openstreetmap.org', 'environment'],
+  ['Barchart', 'finance'],
+  // ICESat-2 ATL13 granule search and subsetting for Strategic Water Levels.
+  ['NASA Earthdata CMR', 'environment'],
+  ['SlideRule Earth', 'environment'],
+  ['TradingView', 'finance'],
   ['api.rainviewer.com', 'environment'],
-  ['apewisdom.io', 'finance'],
+  // #6229: NVD CVE reference store for the cyber surface (scripts/seed-cve-reference.mjs).
+  ['NVD (NIST)', 'infrastructure'],
+  // #6153: Moscow Exchange ISS serves the RU country stock index (scripts/_country-stock-index-moex.mjs).
+  ['iss.moex.com', 'finance'],
+  // #9094: locates published fact-checks for /verify and verify_claim.
+  ['factchecktools.googleapis.com', 'news'],
+  // BestTime live busyness is the fallback feed for the PizzINT (Pentagon pizza) panel.
+  ['besttime.app', 'military'],
+  // Turkey's crude imports by origin for the energy shock model.
+  ['www.epdk.gov.tr', 'energy'],
+  // UN M49 region table behind media-perspective outlet_regions (build-time only).
+  ['unstats.un.org', 'news'],
   ['api.scrapecreators.com', 'news'],
   ['lemmy.world', 'news'],
   ['api.telegram.org', 'news'],
@@ -116,27 +164,49 @@ const SOURCE_DOMAIN_OVERRIDES = new Map([
   ['api.usaspending.gov', 'finance'],
   ['api.windy.com', 'environment'],
   ['archive-api.open-meteo.com', 'environment'],
+  ['open-meteo.caseyjhand.com', 'environment'],
+  ['identity.dataspace.copernicus.eu', 'environment'],
+  ['sh.dataspace.copernicus.eu', 'environment'],
+  ['planetarycomputer.microsoft.com', 'environment'],
   ['British Geological Survey World Mineral Statistics', 'energy'],
+  ['Bank of Canada', 'finance'],
   ['bothsidesofthetable.com', 'technology'],
+  ['City of Toronto Open Data', 'infrastructure'],
+  ['Toronto Police Service Open Data', 'geopolitics'],
+  ['GTA Update', 'geopolitics'],
   ['contxto.com', 'technology'],
   ['corridorrisk.io', 'infrastructure'],
+  ['CWFIS / CWFIF (NRCan)', 'environment'],
+  ['BC Wildfire Service (OpenMaps)', 'environment'],
   ['data.ecb.europa.eu', 'finance'],
+  ['fred.stlouisfed.org', 'finance'],
   ['SEC EDGAR', 'finance'],
   ['datalab.wto.org', 'finance'],
   ['disrupt-africa.com', 'technology'],
   ['Element84 Earth Search STAC', 'environment'],
+  ['Microsoft Planetary Computer', 'environment'],
+  ['NASA GIBS', 'environment'],
+  ['EUMETSAT EUMETView', 'environment'],
+  ['Earthquakes Canada (NRCan)', 'environment'],
+  ['en.sge.com.cn', 'finance'],
+  ['Environment and Climate Change Canada (ECCC)', 'environment'],
   ['SEC EDGAR Full-Text Search', 'finance'],
   ['fc.yahoo.com', 'finance'],
   ['gml.noaa.gov', 'environment'],
   ['kr-asia.com', 'news'],
   ['lavca.org', 'technology'],
   ['news.usni.org', 'military'],
+  ['Ontario 511', 'infrastructure'],
+  ['Alberta 511', 'infrastructure'],
+  ['Manitoba 511', 'infrastructure'],
+  ['BC Open511', 'infrastructure'],
   ['oauth.reddit.com', 'news'],
   ['overpass-api.de', 'military'],
   ['pitchbook.com', 'technology'],
   ['production.dataviz.cnn.io', 'finance'],
   ['ix.cnn.io', 'news'],
   ['schema.org', 'technology'],
+  ['Statistics Canada', 'finance'],
   ['wabi-europe-north-b-api.analysis.windows.net', 'infrastructure'],
   ['web.archive.org', 'geopolitics'],
   ['www.aaii.com', 'finance'],
@@ -144,13 +214,21 @@ const SOURCE_DOMAIN_OVERRIDES = new Map([
   ['www.cbr.ru', 'finance'],
   ['www.googleapis.com', 'news'],
   ['Financial Action Task Force (FATF)', 'geopolitics'],
+  ['Global Affairs Canada (SEMA consolidated sanctions)', 'geopolitics'],
   ['www.fwdstart.me', 'technology'],
   ['International Forum of Sovereign Wealth Funds', 'finance'],
+  ['ILOSTAT', 'finance'],
   ['www.newyorkfed.org', 'finance'],
   ['www.nfx.com', 'technology'],
   ['www.reddit.com', 'news'],
+  ['www.sequoiacap.com', 'technology'],
   ['SWF Institute', 'finance'],
+  ['Toronto Transit Commission (TTC) GTFS-RT', 'infrastructure'],
+  ['Toronto Fire Services', 'environment'],
+  ['Toronto Police Service', 'environment'],
+  ['United Nations Population Division', 'finance'],
   ['USGS ScienceBase (Mineral Commodity Summaries)', 'energy'],
+  ['VIA Rail Tracker (unofficial)', 'infrastructure'],
   ['www.techstars.com', 'technology'],
   ['www.windy.com', 'environment'],
   ['your-app.convex.site', 'infrastructure'],
@@ -161,7 +239,9 @@ const SOURCE_DOMAIN_OVERRIDES = new Map([
 // Keep the hostname as the traceability link, but never make it do double duty
 // as the visible provider title.
 const SOURCE_NAME_OVERRIDES = new Map([
+  ['hormuz.data-tracking.net', 'UK Maritime Trade Operations (UKMTO) via hormuz.data-tracking.net'],
   ['acleddata.com', 'ACLED'],
+  ['factchecktools.googleapis.com', 'Google Fact Check Tools API'],
   ['adsb.lol', 'ADSB.lol'],
   ['aerotime.aero', 'AeroTime'],
   ['agentskills.io', 'Agent Skills'],
@@ -179,24 +259,30 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['api.fiscaldata.treasury.gov', 'U.S. Treasury Fiscal Data'],
   ['api.gdeltproject.org', 'GDELT'],
   ['api.iea.org', 'International Energy Agency (IEA)'],
+  ['api.imd.gov.in', 'India Meteorological Department'],
   ['api.imf.org', 'International Monetary Fund (IMF)'],
-  ['api.ossinsight.io', 'OSS Insight'],
+  ['en.sge.com.cn', 'Shanghai Gold Exchange (SGE)'],
   ['api.planespotters.net', 'Planespotters.net'],
   ['api.sam.gov', 'SAM.gov'],
   ['api.spdrgoldshares.com', 'SPDR Gold Shares'],
   ['api.stlouisfed.org', 'Federal Reserve Economic Data (FRED)'],
+  ['fred.stlouisfed.org', 'Federal Reserve Economic Data (FRED)'],
   ['api.ted.europa.eu', 'Tenders Electronic Daily (TED)'],
   ['api.tzevaadom.co.il', 'Tzeva Adom'],
   ['www.tzevaadom.co.il', 'Tzeva Adom'],
   ['api.unhcr.org', 'UNHCR'],
+  ['data.unhcr.org', 'UNHCR Operational Data Portal'],
   ['api.usaspending.gov', 'USAspending.gov'],
+  ['api.weather.gc.ca', 'Environment and Climate Change Canada (ECCC)'],
   ['api.weather.gov', 'U.S. National Weather Service'],
+  ['severeweather.wmo.int', 'WMO Severe Weather Information Centre'],
   ['api.worldbank.org', 'World Bank'],
   ['api.wto.org', 'World Trade Organization (WTO)'],
   ['arxiv.org', 'arXiv'],
   ['auth.opensky-network.org', 'OpenSky Network'],
   ['budgetlab.yale.edu', 'The Budget Lab at Yale'],
   ['celestrak.org', 'CelesTrak'],
+  ['planetarycomputer.microsoft.com', 'Microsoft Planetary Computer'],
   ['comtradeapi.un.org', 'UN Comtrade'],
   ['customer-api.wingbits.com', 'Wingbits'],
   ['data-api.ecb.europa.eu', 'European Central Bank (ECB)'],
@@ -233,6 +319,8 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['feodotracker.abuse.ch', 'Feodo Tracker'],
   ['finance.yahoo.com', 'Yahoo Finance'],
   ['firms.modaps.eosdis.nasa.gov', 'NASA FIRMS'],
+  ['identity.dataspace.copernicus.eu', 'Copernicus Data Space Ecosystem (identity)'],
+  ['sh.dataspace.copernicus.eu', 'Copernicus Sentinel Hub (Sentinel-5P TROPOMI)'],
   ['gain.nd.edu', 'Notre Dame Global Adaptation Initiative'],
   ['gamma-api.polymarket.com', 'Polymarket'],
   ['geospatial-usace.opendata.arcgis.com', 'U.S. Army Corps of Engineers'],
@@ -243,12 +331,60 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['hapi.humdata.org', 'UN OCHA Humanitarian API (HAPI)'],
   ['health.aws.amazon.com', 'AWS Health'],
   ['hnrss.org', 'Hacker News RSS'],
+  ['mausam.imd.gov.in', 'India Meteorological Department'],
   ['mapservices.weather.noaa.gov', 'NOAA Weather'],
   ['moxie.foxnews.com', 'Fox News'],
   ['msi.nga.mil', 'NGA Maritime Safety Information'],
   ['nasstatus.faa.gov', 'Federal Aviation Administration (FAA)'],
   ['news.crunchbase.com', 'Crunchbase News'],
   ['news.google.com', 'Google News'],
+  ['apnews.com', 'AP News'],
+  ['arabianbusiness.com', 'Arabian Business'],
+  ['arabnews.com', 'Arab News'],
+  ['arctictoday.com', 'Arctic Today'],
+  ['armscontrol.org', 'Arms Control Association'],
+  ['asianews.it', 'AsiaNews'],
+  ['bangkokpost.com', 'Bangkok Post'],
+  ['bihus.info', 'Bihus.Info'],
+  ['citinewsroom.com', 'Citi Newsroom'],
+  ['cp24.com', 'CP24'],
+  ['ctvnews.ca', 'CTV News'],
+  ['dlnews.com', 'DL News'],
+  ['euromaidanpress.com', 'Euromaidan Press'],
+  ['focustaiwan.tw', 'Focus Taiwan'],
+  ['gmfus.org', 'German Marshall Fund'],
+  ['hiiraan.com', 'Hiiraan Online'],
+  ['hirado.hu', 'Híradó'],
+  ['iranintl.com', 'Iran International'],
+  ['iseas.edu.sg', 'ISEAS – Yusof Ishak Institute'],
+  ['iss.europa.eu', 'EU Institute for Security Studies'],
+  ['justice.gov', 'U.S. Department of Justice'],
+  ['kyivindependent.com', 'Kyiv Independent'],
+  ['lowyinstitute.org', 'Lowy Institute'],
+  ['marketwatch.com', 'MarketWatch'],
+  ['miningweekly.com', 'Mining Weekly'],
+  ['montrealgazette.com', 'Montreal Gazette'],
+  ['oglobo.globo.com', 'O Globo'],
+  ['pravda.com.ua', 'Ukrainska Pravda'],
+  ['rferl.org', 'RFE/RL'],
+  ['rieti.go.jp', 'RIETI'],
+  ['spglobal.com', 'S&P Global'],
+  ['state.gov', 'U.S. Department of State'],
+  ['taipeitimes.com', 'Taipei Times'],
+  ['taiwannews.com.tw', 'Taiwan News'],
+  ['theblock.co', 'The Block'],
+  ['thebulletin.org', 'Bulletin of the Atomic Scientists'],
+  ['theinformation.com', 'The Information'],
+  ['thejakartapost.com', 'The Jakarta Post'],
+  ['thenextweb.com', 'The Next Web'],
+  ['thestar.com.my', 'The Star (Malaysia)'],
+  ['understandingwar.org', 'Institute for the Study of War'],
+  ['unhcr.org', 'UNHCR'],
+  ['whitehouse.gov', 'The White House'],
+  ['wilsoncenter.org', 'Wilson Center'],
+  ['wublockchain.com', 'Wu Blockchain'],
+  ['xinhuanet.com', 'Xinhua'],
+  ['zn.ua', 'ZN.UA'],
   ['news.mit.edu', 'MIT News'],
   ['news.un.org', 'UN News'],
   ['news.usni.org', 'USNI News'],
@@ -270,6 +406,7 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['query.wikidata.org', 'Wikidata'],
   ['query1.finance.yahoo.com', 'Yahoo Finance'],
   ['raw.githubusercontent.com', 'GitHub'],
+  ['rsmcnewdelhi.imd.gov.in', 'India Meteorological Department'],
   ['rss.art19.com', 'ART19-hosted podcasts'],
   ['rss.dw.com', 'Deutsche Welle'],
   ['rss.libsyn.com', 'Libsyn-hosted podcasts'],
@@ -286,11 +423,44 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['urlhaus-api.abuse.ch', 'URLhaus'],
   ['wabi-europe-north-b-api.analysis.windows.net', 'Microsoft Power BI'],
   ['web.archive.org', 'Internet Archive'],
+  ['ammancity.gov.jo', 'Greater Amman Municipality Central Market'],
+  ['data.1212.mn', 'National Statistics Office of Mongolia'],
+  ['fdw.fews.net', 'FEWS NET Data Warehouse'],
+  ['data.moa.gov.tw', 'Taiwan Ministry of Agriculture'],
+  ['www.geostat.ge', 'National Statistics Office of Georgia'],
+  ['storage.data.gov.my', 'Malaysia KPDN PriceCatcher'],
+  ['mercadocentral.gob.ar', 'Mercado Central de Buenos Aires'],
+  ['ws.cso.ie', 'Central Statistics Office of Ireland'],
+  ['lustat.statec.lu', 'STATEC Luxembourg'],
+  ['agriculture.ld.admin.ch', 'Swiss FOAG linked data'],
+  ['lindas.cz-aws.net', 'Swiss FOAG on LINDAS'],
+  ['data.stat.gov.lv', 'Central Statistical Bureau of Latvia'],
+  ['makstat.stat.gov.mk', 'North Macedonia MakStat'],
+  ['madr.gov.dz', 'Algeria Ministry of Agriculture (MADR)'],
+  ['api.siat.stat.uz', 'Uzbekistan Statistics Agency'],
+  ['precios.maga.gob.gt', 'Guatemala Ministry of Agriculture (MAGA)'],
+  ['simaniger.net', 'SIMA Niger'],
+  ['stat.gov.kg', 'National Statistical Committee of Kyrgyzstan'],
+  ['stat.gov.kz', 'Kazakhstan Bureau of National Statistics'],
+  ['stat.uz', 'Uzbekistan Statistics Agency'],
+  ['tcb.gov.bd', 'Trading Corporation of Bangladesh'],
+  ['ugandacoffee.go.ug', 'Uganda Coffee Development Authority'],
+  ['www.nabc.go.th', 'Thailand National Agricultural Big Data Center'],
+  ['www.ocpv-ci.com', "Côte d'Ivoire OCPV"],
+  ['www.viwanda.go.tz', 'Tanzania Ministry of Industry and Trade'],
+  ['www.bi.go.id', 'Bank Indonesia PIHPS'],
+  ['www.cbsl.gov.lk', 'Central Bank of Sri Lanka'],
+  ['www.da.gov.ph', 'Philippines Department of Agriculture'],
+  ['www.economia-sniim.gob.mx', 'Mexico SNIIM'],
+  ['www.onagri.nat.tn', 'Tunisia ONAGRI'],
+  ['www.pbs.gov.pk', 'Pakistan Bureau of Statistics'],
   ['www.cbr.ru', 'Bank of Russia'],
   ['www.contractsfinder.service.gov.uk', 'UK Contracts Finder'],
+  ['www.cidrap.umn.edu', 'Center for Infectious Disease Research and Policy (CIDRAP)'],
   ['www.ecb.europa.eu', 'European Central Bank (ECB)'],
   ['www.ecdc.europa.eu', 'European Centre for Disease Prevention and Control'],
   ['www.eia.gov', 'U.S. Energy Information Administration (EIA)'],
+  ['www.epdk.gov.tr', 'Energy Market Regulatory Authority of Türkiye (EPDK)'],
   ['www.fao.org', 'UN Food and Agriculture Organization (FAO)'],
   ['www.federalreserve.gov', 'U.S. Federal Reserve'],
   ['www.gdacs.org', 'Global Disaster Alert and Coordination System (GDACS)'],
@@ -300,7 +470,7 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['www.iea.org', 'International Energy Agency (IEA)'],
   ['www.jodidata.org', 'Joint Organisations Data Initiative (JODI)'],
   ['www.gets.govt.nz', 'New Zealand Government Electronic Tenders Service'],
-  ['www.mbie.govt.nz', 'New Zealand Ministry of Business, Innovation and Employment'],
+  ['www.comcom.govt.nz', 'New Zealand Commerce Commission'],
   ['www.mnd.gov.tw', 'Taiwan Ministry of National Defense'],
   ['www.mod.go.jp', 'Japan Ministry of Defense'],
   ['www.ncei.noaa.gov', 'NOAA National Centers for Environmental Information'],
@@ -314,6 +484,7 @@ const SOURCE_NAME_OVERRIDES = new Map([
   ['www.stats.gov.cn', 'National Bureau of Statistics of China'],
   ['www.szse.cn', 'Shenzhen Stock Exchange'],
   ['www.unep.org', 'UN Environment Programme (UNEP)'],
+  ['www.unognewsroom.org', 'UN Geneva Newsroom'],
   ['www.war.gov', 'Pentagon'],
   ['www.weather.gov.hk', 'Hong Kong Observatory'],
   ['www.whitehouse.gov', 'The White House'],
@@ -329,14 +500,20 @@ const US_EMBASSY_COUNTRIES = new Map([
   ['co', 'Colombia'],
   ['de', 'Germany'],
   ['do', 'the Dominican Republic'],
+  ['id', 'Indonesia'],
   ['in', 'India'],
   ['it', 'Italy'],
+  ['kh', 'Cambodia'],
   ['mm', 'Myanmar'],
   ['mx', 'Mexico'],
+  ['my', 'Malaysia'],
+  ['ph', 'the Philippines'],
   ['pk', 'Pakistan'],
   ['pl', 'Poland'],
+  ['sg', 'Singapore'],
   ['th', 'Thailand'],
   ['ua', 'Ukraine'],
+  ['vn', 'Vietnam'],
 ]);
 
 const BRAND_TOKEN_OVERRIDES = new Map([
@@ -438,7 +615,6 @@ const BRAND_TOKEN_OVERRIDES = new Map([
   ['opensky-network', 'OpenSky Network'],
   ['optimistdaily', 'The Optimist Daily'],
   ['oryxspioenkop', 'Oryx'],
-  ['outbreaknewstoday', 'Outbreak News Today'],
   ['pitchbook', 'PitchBook'],
   ['polsatnews', 'Polsat News'],
   ['premiumtimesng', 'Premium Times'],
@@ -510,7 +686,9 @@ const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
 function hostnameBrandToken(host) {
   const labels = host.toLowerCase().split('.');
   const suffix = labels.slice(-2).join('.');
-  const offset = MULTI_LABEL_PUBLIC_SUFFIXES.has(suffix) ? 3 : 2;
+  const countrySecondLevel = labels.at(-1)?.length === 2
+    && /^(?:ac|co|com|edu|gov|net|org)$/.test(labels.at(-2) || '');
+  const offset = MULTI_LABEL_PUBLIC_SUFFIXES.has(suffix) || countrySecondLevel ? 3 : 2;
   return labels.at(-offset) || labels[0] || host;
 }
 
@@ -566,35 +744,183 @@ function sourceDomainIdForEntries(entries) {
   }
   return match[0];
 }
-export function buildSourceCatalog(entries) {
+
+export function buildSourceCatalog(entries, { logicalProviders = [] } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('Source catalog cannot be empty');
+  }
   const entriesByProvider = new Map();
   for (const entry of entries) {
+    if (isSyndicationTransportEntry(entry)) continue;
     const providerEntries = entriesByProvider.get(entry.provider) || [];
     providerEntries.push(entry);
     entriesByProvider.set(entry.provider, providerEntries);
   }
 
-  return [...entriesByProvider.entries()]
-    .map(([provider, providerEntries]) => {
-      const hosts = [...new Set(providerEntries.map((entry) => entry.host))].sort();
-      return {
-        provider,
-        displayName: sourceProviderDisplayName(provider, hosts),
-        domainId: sourceDomainIdForEntries(providerEntries),
-        hosts,
-        kinds: [...new Set(providerEntries.flatMap((entry) => entry.kind.split('+')))].sort(),
-      };
-    })
-    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'en', { sensitivity: 'base' }));
+  const catalog = [...entriesByProvider.entries()].map(([provider, providerEntries]) => {
+    const hosts = uniqueSorted(providerEntries.map((entry) => entry.host));
+    return {
+      provider,
+      displayName: sourceProviderDisplayName(provider, hosts),
+      domainId: sourceDomainIdForEntries(providerEntries),
+      originCountry: resolveSourceOrigin({ provider, hosts }),
+      hosts,
+      kinds: uniqueSorted(providerEntries.flatMap((entry) => String(entry.kind || '').split('+'))),
+      coveredCountries: [],
+      transportHosts: [],
+    };
+  });
+
+  for (const logical of logicalProviders) {
+    if (!logical?.provider || entriesByProvider.has(logical.provider)) continue;
+    const hosts = uniqueSorted([
+      ...(logical.editorialHosts || []),
+      ...(logical.transportHosts || []),
+    ]);
+    catalog.push({
+      provider: logical.provider,
+      displayName: logical.provider,
+      domainId: 'news',
+      originCountry: logical.originCountry ?? resolveSourceOrigin({
+        provider: logical.provider,
+        hosts: logical.editorialHosts || [],
+      }),
+      hosts,
+      kinds: ['feed'],
+      coveredCountries: uniqueSorted(logical.coveredCountries),
+      transportHosts: uniqueSorted(logical.transportHosts),
+    });
+  }
+
+  if (catalog.length === 0) {
+    throw new Error('Source catalog cannot be empty');
+  }
+
+  return catalog.sort((left, right) => left.displayName.localeCompare(right.displayName, 'en', { sensitivity: 'base' }));
 }
 
-export function renderSourcesIndex({ sourceStats, sourceCatalog, baseUrl, lastmod, helpers }) {
-  const { absoluteUrl, breadcrumbLd, escapeHtml, pageDocument, withUtmSource } = helpers;
-  const path = '/sources/';
-  const description = `Explore ${sourceStats.providerCount} active providers and ${sourceStats.activeHosts} upstream hosts across World Monitor's global intelligence, markets, energy, cyber, aviation, climate and news coverage.`;
-  // Query precedes the fragment — withUtmSource() would append after the
-  // anchor and push the query into the fragment, so build these by hand.
-  const docsHref = (anchor) => `/docs/data-sources?utm_source=seo-sources${anchor ? `#${anchor}` : ''}`;
+/**
+ * Stable per-provider fragment ids for the catalog cards (#7869).
+ *
+ * Round 7 of the GEO audit found the page's `ItemList` announcing 748 elements
+ * as bare strings, 43 of the names repeated. The repeats are not duplicates:
+ * they are one publisher reached through several hosts (Yahoo Finance through
+ * three, Euronews through eight language editions), each its own catalog entry.
+ * A name alone cannot tell them apart, so every card gets an id and every
+ * `ListItem` a url pointing at it — which is also what makes the count
+ * `numberOfItems` publishes a count of things a reader can go and look at.
+ *
+ * Keyed on `provider`, the catalog's own unique key, not on the display name,
+ * and every anchor carries a digest of that key. The digest is unconditional on
+ * purpose. Two earlier shapes were tried and both leak the rest of the catalog
+ * into an individual anchor:
+ *
+ *   - An arrival-ordered counter (`-2`, `-3`) depends on iteration order, and
+ *     the catalog is sorted by displayName, so renaming any provider could
+ *     reshuffle which collider owned the bare id.
+ *   - Suffixing only when a base has more than one claimant still depends on
+ *     catalog membership: publish `a.b` alone and it gets the bare
+ *     `provider-a-b`; add `a-b` later and the first one's anchor changes.
+ *
+ * Both silently repoint a citation that has already been crawled and stored.
+ * These fragments are published data — one per ListItem url — so an anchor has
+ * to be a pure function of its own provider key and nothing else.
+ *
+ * A third shape got most of the way there and kept one channel open: it fell
+ * back to an arrival-ordered `-2` when two keys produced the same anchor, so a
+ * digest collision reintroduced the ordering dependence it existed to remove.
+ * That was reachable, not theoretical — `a-b-c-d-e-f.g.h-i-j-k-l-m-n-o-p-com`
+ * and `a.b-c.d-e-f-g-h.i.j.k-l-m-n-o-p-com` share both a slug and a 24-bit
+ * SHA-1 prefix, and reversing them swapped which one owned the bare anchor.
+ * So there is no fallback here any more: the digest is 64 bits, and a genuine
+ * collision between two DIFFERENT catalog keys throws instead of renumbering. A
+ * loud build failure is the right answer to a 2^-64 event; silently handing one
+ * provider's published citation to another is not. `seen` below only detects
+ * that case — it is never an input to the anchor's value — and it compares the
+ * RAW catalog key, not the normalised one, so two entries that normalise alike
+ * (`null` and `undefined` both coerce to the empty string) are caught rather
+ * than quietly rendering one id on two cards.
+ *
+ * The character class reduces every key to `[a-z0-9-]`, which is what lets the
+ * caller interpolate the id into the card markup and the JSON-LD url without
+ * escaping either; tests/crawlable-corpus.test.mjs pins that class so a future
+ * relaxation cannot quietly remove the guarantee.
+ *
+ * An anchor that resolves is not yet an anchor a reader can see, which is why
+ * `.provider-card` carries `scroll-margin-top`. Two sticky bars sit above the
+ * grid — the page header (top: 0, 146px) and .catalog-controls (top: 68px,
+ * bottom 167px) — and a card is 180px tall, so without the offset a
+ * `#provider-*` fragment parks 167 of those 180px under chrome. Measured in
+ * Chromium against the generated page before the offset landed: the card
+ * arrived at viewport y = -0.06. Below 720px .catalog-controls goes static and
+ * only the header stickies, so 176px is generous there rather than wrong.
+ *
+ * The slug transform is spelled out here rather than imported from
+ * build-crawlable-corpus.mjs's exported `slugify`: that module imports THIS one,
+ * so the import would close a cycle. A local slug helper is also what the other
+ * generators in scripts/ do.
+ */
+export function sourceCardAnchors(sourceCatalog) {
+  const slugBase = (key) => String(key ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'source';
+
+  const anchors = new Map();
+  const seen = new Map();
+  for (const provider of sourceCatalog) {
+    const key = String(provider.provider ?? '');
+    const anchor = `provider-${slugBase(key)}-${createHash('sha1').update(key).digest('hex').slice(0, 16)}`;
+    if (seen.has(anchor) && seen.get(anchor) !== provider.provider) {
+      throw new Error(
+        `Source card anchor collision: ${JSON.stringify(seen.get(anchor))} and ${JSON.stringify(provider.provider)} both map to #${anchor}`,
+      );
+    }
+    seen.set(anchor, provider.provider);
+    anchors.set(provider.provider, anchor);
+  }
+  return anchors;
+}
+
+export function buildSourcePages(sourceCatalog) {
+  return SOURCE_DOMAINS.flatMap((domain) => {
+    const providers = sourceCatalog.filter((provider) => provider.domainId === domain.id);
+    const pages = [];
+    for (let offset = 0; offset < providers.length; offset += 60) {
+      const number = offset / 60 + 1;
+      pages.push({
+        path: `/sources/${domain.id}/${number === 1 ? '' : `page/${number}/`}`,
+        name: `${domain.name}${number === 1 ? '' : ` — page ${number}`}`,
+        domainId: domain.id,
+        providers: providers.slice(offset, offset + 60),
+      });
+    }
+    return pages;
+  });
+}
+
+function sourceCategoryDocumentTitle(name) {
+  const longTitle = `${name}: Data Sources and Providers | World Monitor`;
+  const title = [...longTitle].length > 60
+    ? `${name} Data Sources | World Monitor`
+    : longTitle;
+  if ([...title].length > 60) {
+    throw new Error(`${name} document title is ${[...title].length} characters: ${title}`);
+  }
+  return title;
+}
+
+export function renderSourcesIndex({ sourceStats, sourceCatalog, catalogDatasets = [], baseUrl, lastmod, helpers, directoryPages = null, sourcePage = null, catalogAnchors = sourceCardAnchors(sourceCatalog), siblingPages = [] }) {
+  const { absoluteUrl, breadcrumbLd, dataCatalogLd, escapeHtml, pageDocument } = helpers;
+  const path = sourcePage?.path || '/sources/';
+  const pageUrl = absoluteUrl(baseUrl, path);
+  const description = sourcePage
+    ? `Browse ${sourceCatalog.length} providers in ${sourcePage.name}, with source hosts, origins and coverage. Part of World Monitor's complete source catalog.`
+    : `Explore ${sourceStats.providerCount} active providers and ${sourceStats.activeHosts} source hosts across World Monitor's global intelligence, markets, energy, cyber, aviation, climate and news coverage.`;
+  const docsHref = (anchor) => `/docs/data-sources${anchor ? `#${anchor}` : ''}`;
   const domainCounts = new Map(SOURCE_DOMAINS.map((domain) => [domain.id, 0]));
   for (const provider of sourceCatalog) {
     domainCounts.set(provider.domainId, (domainCounts.get(provider.domainId) || 0) + 1);
@@ -605,28 +931,38 @@ export function renderSourcesIndex({ sourceStats, sourceCatalog, baseUrl, lastmo
     structured: 'Structured data',
     'operational-status': 'Operational status',
   };
-  const domainCards = SOURCE_DOMAINS.map((domain, index) => `        <article class="source-domain-card">
-          <button type="button" data-source-filter="${domain.id}" aria-controls="source-catalog" aria-pressed="false">
+  const domainCards = SOURCE_DOMAINS.filter((domain) => !directoryPages || domainCounts.get(domain.id) > 0).map((domain, index) => `        <article class="source-domain-card">
+          ${directoryPages ? `<a class="domain-browse" href="/sources/${domain.id}/">` : `<button type="button" data-source-filter="${domain.id}" aria-controls="source-catalog" aria-pressed="false">`}
             <span class="domain-index">${String(index + 1).padStart(2, '0')}</span>
             <span class="domain-count">${domainCounts.get(domain.id)} providers</span>
             <strong>${escapeHtml(domain.name)}</strong>
             <span class="domain-blurb">${escapeHtml(domain.blurb)}</span>
             <span class="domain-examples">${domain.providers.slice(0, 4).map((provider) => `<span>${escapeHtml(provider)}</span>`).join('')}</span>
-          </button>
+          ${directoryPages ? '</a>' : '</button>'}
           <a class="domain-docs" href="${docsHref(domain.anchor)}">Methodology &amp; coverage <span aria-hidden="true">↗</span></a>
         </article>`).join('\n');
-  const providerCards = sourceCatalog.map((provider) => {
+  const countryOptions = catalogCountryOptions(sourceCatalog);
+  const coverageOptions = catalogCoverageCountryOptions(sourceCatalog);
+  const cardAnchors = catalogAnchors;
+  const providerCards = (directoryPages ? [] : sourceCatalog).map((provider) => {
     const domain = domainById.get(provider.domainId);
+    const countryLabel = sourceOriginLabel(provider.originCountry);
+    const countryFilter = sourceOriginFilterValue(provider.originCountry);
+    const coveredCountries = provider.coveredCountries || [];
+    const coverageFilter = coveredCountries.map((code) => sourceOriginFilterValue(code)).join(' ');
+    const coverageLabel = coveredCountries.map((code) => sourceOriginLabel(code)).join(', ');
     const hostLinks = provider.hosts.map((host) => (
       `<a href="https://${escapeHtml(host)}/" target="_blank" rel="noreferrer">${escapeHtml(host)}</a>`
     )).join('');
     const kindBadges = provider.kinds.map((kind) => (
       `<span class="kind-badge">${escapeHtml(kindLabels[kind] || kind)}</span>`
     )).join('');
-    return `        <article class="provider-card" data-provider="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(provider.displayName)}" data-source-domain="${provider.domainId}" data-source-kind="${provider.kinds.join(' ')}">
+    return `        <article class="provider-card" id="${cardAnchors.get(provider.provider)}" data-provider="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(provider.displayName)}" data-source-domain="${provider.domainId}" data-source-kind="${provider.kinds.join(' ')}" data-source-country="${countryFilter}" data-source-coverage="${escapeHtml(coverageFilter)}">
           <div class="provider-heading">
             <span class="provider-domain">${escapeHtml(domain.name)}</span>
             <h3>${escapeHtml(provider.displayName)}</h3>
+            <span class="provider-country">Origin: ${escapeHtml(countryLabel)}</span>
+            ${coverageLabel ? `<span class="provider-coverage">Covers: ${escapeHtml(coverageLabel)}</span>` : ''}
           </div>
           <div class="kind-badges">${kindBadges}</div>
           <div class="provider-hosts" aria-label="Provider hosts">${hostLinks}</div>
@@ -638,32 +974,37 @@ export function renderSourcesIndex({ sourceStats, sourceCatalog, baseUrl, lastmo
         </a>
         <span class="source-nav-links">
           <a href="/sources/" aria-current="page">Sources</a>
+          <a href="/reference/coverage/">Coverage</a>
           <a href="/blog/">Blog</a>
-          <a href="/docs">Docs</a>
+          <a href="/docs/documentation">Docs</a>
           <a href="https://github.com/koala73/worldmonitor" target="_blank" rel="noreferrer">GitHub</a>
         </span>
-        <a class="source-nav-cta" href="${withUtmSource('/dashboard', 'sources-nav')}">Launch dashboard <span aria-hidden="true">→</span></a>`;
+        <a class="source-nav-cta" href="/dashboard">Launch dashboard <span aria-hidden="true">→</span></a>`;
   const sourceFooter = `<div class="source-footer-inner">
       <span><strong>WORLD MONITOR</strong><small>Open-source global intelligence</small></span>
-      <span class="source-footer-links"><a href="/sources/">Sources</a><a href="${docsHref('')}">Data docs</a><a href="${withUtmSource('/docs/source-attribution', 'seo-sources')}">Attribution ledger</a><a href="/docs/terms">Terms</a></span>
+      <span class="source-footer-links"><a href="/sources/">Sources</a><a href="${docsHref('')}">Data docs</a><a href="/docs/source-attribution">Attribution ledger</a><a href="/docs/terms">Terms</a></span>
     </div>`;
+  const catalogNavigation = directoryPages
+    ? `<ul class="source-pages source-directory">${directoryPages.map((page) => `<li><a href="${page.path}">${escapeHtml(page.name)}</a> (${page.providers.length} providers)</li>`).join('')}</ul>`
+    : `<nav class="source-pages" aria-label="Source catalog pages">${siblingPages.map((page) => `<a href="${page.path}"${page.path === path ? ' aria-current="page"' : ''}>${escapeHtml(page.name)}</a>`).join(' ')}</nav>`;
   const body = `      <section class="sources-hero">
         <div class="hero-copy">
           <p class="eyebrow"><span></span> Live provider inventory</p>
-          <h1>See every source behind World Monitor.</h1>
-          <p class="lede">The map is only as useful as the signals behind it. World Monitor combines ${sourceStats.providerCount} active providers across ${sourceStats.activeHosts} observed upstream hosts spanning news, conflict, markets, military, climate, aviation, infrastructure and technology — with every provider listed below.</p>
+          <h1>${sourcePage ? escapeHtml(sourcePage.name) : 'See every source behind World Monitor.'}</h1>
+          <p class="lede">The map is only as useful as the signals behind it. World Monitor combines ${sourceStats.providerCount} active providers across ${sourceStats.activeHosts} observed source hosts spanning news, conflict, markets, military, climate, aviation, infrastructure and technology. ${sourcePage ? 'This page lists ' + sourceCatalog.length + ' providers. <a href="/sources/#catalog">Search all providers</a> or browse the pages below.' : 'Browse providers by domain, or search the full inventory below.'}</p>
           <div class="hero-actions">
-            <a class="cta" href="#catalog">Browse all ${sourceStats.providerCount} providers <span aria-hidden="true">↓</span></a>
-            <a class="secondary-cta" href="${withUtmSource('/dashboard', 'sources-hero')}">Open the live dashboard <span aria-hidden="true">→</span></a>
+            <a class="cta" href="#catalog">${sourcePage ? 'Browse this page' : 'Find a provider'} <span aria-hidden="true">↓</span></a>
+            <a class="secondary-cta" href="/dashboard">Open the live dashboard <span aria-hidden="true">→</span></a>
           </div>
           <p class="trust-line"><span>Manifest-derived</span><span>Build-checked</span><span>Source-attributed</span></p>
+          <p class="catalog-updated">Catalog last updated ${escapeHtml(lastmod)} · ${sourceStats.providerCount} active providers across ${sourceStats.activeHosts} source hosts</p>
         </div>
         <div class="signal-console" aria-label="Source inventory summary">
           <div class="console-bar"><span><i></i><i></i><i></i></span><strong>source_graph.live</strong><em>ACTIVE</em></div>
           <div class="console-map" aria-hidden="true"><span class="orbit one"></span><span class="orbit two"></span><span class="pulse p1"></span><span class="pulse p2"></span><span class="pulse p3"></span><span class="pulse p4"></span><span class="pulse p5"></span></div>
           <div class="console-stats">
             <span><strong>${sourceStats.providerCount}</strong><small>active providers</small></span>
-            <span><strong>${sourceStats.activeHosts}</strong><small>upstream hosts</small></span>
+            <span><strong>${sourceStats.activeHosts}</strong><small>source hosts</small></span>
             <span><strong>${SOURCE_DOMAINS.length}</strong><small>signal domains</small></span>
           </div>
           <p><span></span> Inventory reconciled with the URLs used by the codebase</p>
@@ -671,11 +1012,11 @@ export function renderSourcesIndex({ sourceStats, sourceCatalog, baseUrl, lastmo
       </section>
       <section class="proof-rail" aria-label="Source types">
         <span><strong>${sourceStats.providerCount}</strong><small>Active providers</small></span>
-        <span><strong>${sourceStats.activeHosts}</strong><small>Upstream hosts</small></span>
+        <span><strong>${sourceStats.activeHosts}</strong><small>Source hosts</small></span>
         <span><strong>${sourceStats.structuredHosts}</strong><small>Structured endpoints</small></span>
         <span><strong>${sourceStats.feedHosts}</strong><small>News &amp; OSINT feeds</small></span>
       </section>
-      <section class="domain-section" aria-labelledby="domains-heading">
+      ${sourcePage ? '' : `<section class="domain-section" aria-labelledby="domains-heading">
         <div class="section-heading">
           <p class="eyebrow">Coverage architecture</p>
           <h2 id="domains-heading">Ten domains. One operating picture.</h2>
@@ -684,38 +1025,51 @@ export function renderSourcesIndex({ sourceStats, sourceCatalog, baseUrl, lastmo
         <div class="source-domains">
 ${domainCards}
         </div>
-      </section>
+      </section>`}
       <section class="trust-section" aria-labelledby="trust-heading">
         <div><p class="eyebrow">Trust through traceability</p><h2 id="trust-heading">The count follows the code.</h2></div>
         <div>
           <p>This inventory is generated from the source-attribution manifest and checked against the external URLs that World Monitor uses. Adding or removing a source changes this page at build time.</p>
-          <p>An active listing confirms use and attribution tracking. It does not claim that a provider's redistribution terms have completed review. The <a href="${withUtmSource('/docs/source-attribution', 'seo-sources')}">attribution ledger</a> records that posture, and the <a href="${docsHref('source-credibility-%26-feed-tiering')}">credibility methodology</a> explains feed tiers and bias metadata.</p>
+          <p>An active listing confirms use and attribution tracking. It does not claim that a provider's redistribution terms have completed review. The <a href="/docs/source-attribution">attribution ledger</a> records that posture, and the <a href="${docsHref('source-credibility-%26-feed-tiering')}">credibility methodology</a> explains feed tiers and bias metadata.</p>
+        </div>
+      </section>
+      <section class="provenance-section" aria-labelledby="provenance-heading">
+        <div class="section-heading">
+          <p class="eyebrow">Provenance</p>
+          <h2 id="provenance-heading">Where does World Monitor get its data?</h2>
+          <p>World Monitor fuses licensed data feeds, official statistics, open-source intelligence, and live sensor networks into one operating picture. Every listed provider is named, attributed, and reconciled against the code that queries it, so models and analysts can verify each claim. Counts update at build time from the tracked inventory.</p>
         </div>
       </section>
       <section class="catalog-section" id="catalog" aria-labelledby="catalog-heading">
         <div class="section-heading catalog-heading">
           <p class="eyebrow">Complete catalog</p>
-          <h2 id="catalog-heading">All ${sourceStats.providerCount} active providers.</h2>
-          <p>Search by provider or host. Filter by signal domain or source type. Every provider remains in the static HTML for people, search engines and no-script browsers.</p>
+          <h2 id="catalog-heading">${sourcePage ? escapeHtml(sourcePage.name) : `Search all ${sourceStats.providerCount} providers.`}</h2>
+          <p>${directoryPages ? 'Search by provider or host, with filters for domain, type, origin and coverage. Open a result for its full source details. You can also browse every provider on the linked domain pages without JavaScript.' : 'Filter the providers on this page. For the complete inventory, <a href="/sources/#catalog">search all providers</a>. Every provider on this page is included in the static HTML.'}</p>
         </div>
+        ${directoryPages ? '' : catalogNavigation}
         <div class="catalog-controls">
           <label class="search-control" for="source-search"><span>Search providers</span><input id="source-search" type="search" placeholder="Reuters, USGS, coingecko…" autocomplete="off"></label>
           <label for="source-domain"><span>Domain</span><select id="source-domain"><option value="all">All domains</option>${SOURCE_DOMAINS.map((domain) => `<option value="${domain.id}">${escapeHtml(domain.name)}</option>`).join('')}</select></label>
           <label for="source-kind"><span>Source type</span><select id="source-kind"><option value="all">All types</option><option value="structured">Structured data</option><option value="feed">News / feed</option><option value="operational-status">Operational status</option></select></label>
+          <label for="source-country"><span>Country of origin</span><select id="source-country"><option value="all">All origins</option>${countryOptions.map((country) => `<option value="${country.code}">${escapeHtml(country.name)}</option>`).join('')}</select></label>
+          <label for="source-coverage"><span>Country covered</span><select id="source-coverage"><option value="all">All coverage</option>${coverageOptions.map((country) => `<option value="${country.code}">${escapeHtml(country.name)}</option>`).join('')}</select></label>
           <button type="button" class="reset-filter" data-source-filter="all">Reset</button>
         </div>
-        <div class="catalog-meta"><p id="source-results" aria-live="polite">${sourceStats.providerCount} providers shown</p><a href="${withUtmSource('/docs/source-attribution', 'seo-sources')}">Open the host-by-host ledger <span aria-hidden="true">↗</span></a></div>
+        <div class="catalog-meta"><p id="source-results" aria-live="polite">${directoryPages ? 'Choose a filter or enter a provider name.' : `${sourceCatalog.length} providers shown`}</p><a href="/docs/source-attribution">Open the host-by-host ledger <span aria-hidden="true">↗</span></a></div>
+        <p class="catalog-country-note" id="source-country-note" aria-live="polite" hidden></p>
         <div class="provider-grid" id="source-catalog" data-source-catalog>
 ${providerCards}
         </div>
         <p class="no-results" id="source-no-results" hidden>No providers match those filters.</p>
-        <noscript><p class="noscript-note">Filtering needs JavaScript. The complete catalog is already shown above.</p></noscript>
+        ${directoryPages ? '<button type="button" class="reset-filter" id="source-more" hidden>Show next results</button>' : ''}
+        <noscript><p class="noscript-note">Filtering needs JavaScript. Use the catalog page links to browse every provider.</p></noscript>
+        ${directoryPages ? '<h3>Browse every source by domain</h3>' + catalogNavigation : ''}
       </section>
       <section class="sources-final-cta">
         <p class="eyebrow">From source to signal</p>
         <h2>Now watch the signals converge.</h2>
         <p>Open the live map to follow the providers above as one real-time global operating picture.</p>
-        <a class="cta" href="${withUtmSource('/dashboard', 'sources-footer')}">Launch World Monitor <span aria-hidden="true">→</span></a>
+        <a class="cta" href="/dashboard">Launch World Monitor <span aria-hidden="true">→</span></a>
       </section>`;
   const extraStyles = `      .sources-page { --bg: #030504; --panel: #090d0b; --panel-2: #0d1410; --text: #f1f7f2; --muted: #8e9b92; --line: #1d2921; --accent: #4ade80; background: radial-gradient(circle at 50% 0, rgba(74,222,128,.09), transparent 27rem), var(--bg); }
       .sources-page header, .sources-page main, .sources-page footer { max-width: none; padding-left: 0; padding-right: 0; }
@@ -777,7 +1131,14 @@ ${providerCards}
       .section-heading > p:last-child { margin: 20px 0 0; font-size: 16px; line-height: 1.7; }
       .source-domains { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
       .source-domain-card { position: relative; min-width: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(9,13,11,.55); }
-      .source-domain-card button { width: 100%; min-height: 260px; padding: 20px; display: flex; flex-direction: column; align-items: flex-start; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+      .source-domain-card button, .domain-browse { width: 100%; min-height: 260px; padding: 20px; display: flex; flex-direction: column; align-items: flex-start; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+      .source-pages { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+      .source-pages a { padding: 8px; border: 1px solid var(--line); }
+      .source-directory { list-style: none; padding: 0; }
+      .source-directory a { display: inline-block; }
+      .source-pages [aria-current="page"] { color: var(--accent); }
+      .source-result { padding: 16px; border: 1px solid var(--line); overflow-wrap: anywhere; }
+      .source-result small { display: block; color: var(--muted); }
       .source-domain-card:hover, .source-domain-card:has(button[aria-pressed="true"]) { z-index: 1; background: var(--panel-2); box-shadow: inset 0 0 0 1px rgba(74,222,128,.5); }
       .domain-index, .domain-count { color: #526057; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
       .domain-count { margin: -13px 0 24px auto; color: var(--accent); }
@@ -789,9 +1150,9 @@ ${providerCards}
       .domain-docs:hover { color: var(--accent); text-decoration: none; }
       .trust-section { margin: 0; padding: 100px max(24px, calc((100% - 1192px)/2)); display: grid; grid-template-columns: .8fr 1.2fr; gap: 90px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: linear-gradient(100deg, rgba(74,222,128,.045), transparent 55%); }
       .trust-section p { margin-top: 0; font-size: 15px; line-height: 1.75; }
-      .catalog-section { padding-bottom: 100px; }
+      .catalog-section { padding-bottom: 100px; scroll-margin-top: 146px; }
       .catalog-heading { max-width: 790px; }
-      .catalog-controls { position: sticky; top: 68px; z-index: 10; margin-bottom: 0; padding: 18px; display: grid; grid-template-columns: minmax(260px, 1fr) 220px 210px auto; gap: 12px; align-items: end; border: 1px solid var(--line); background: rgba(6,9,7,.94); backdrop-filter: blur(18px); }
+      .catalog-controls { position: sticky; top: 68px; z-index: 10; margin-bottom: 0; padding: 18px; display: grid; grid-template-columns: minmax(200px, 1.2fr) minmax(150px, .8fr) minmax(140px, .7fr) minmax(160px, .85fr) minmax(160px, .85fr) auto; gap: 12px; align-items: end; border: 1px solid var(--line); background: rgba(6,9,7,.94); backdrop-filter: blur(18px); }
       .catalog-controls label { display: grid; gap: 7px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
       .catalog-controls input, .catalog-controls select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid #2a372f; border-radius: 2px; background: #0b100d; color: var(--text); font: 13px ui-sans-serif, system-ui, sans-serif; }
       .catalog-controls input:focus, .catalog-controls select:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
@@ -800,11 +1161,13 @@ ${providerCards}
       .catalog-meta { padding: 15px 2px; display: flex; justify-content: space-between; gap: 20px; align-items: center; }
       .catalog-meta p { margin: 0; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; text-transform: uppercase; }
       .catalog-meta a { font-size: 12px; }
+      .catalog-country-note { margin: 0 2px 15px; color: var(--muted); font-size: 13px; line-height: 1.6; }
       .provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
-      .provider-card { min-width: 0; min-height: 180px; padding: 18px; display: flex; flex-direction: column; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(9,13,11,.48); }
+      .provider-card { min-width: 0; min-height: 180px; padding: 18px; scroll-margin-top: 176px; display: flex; flex-direction: column; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(9,13,11,.48); }
       .provider-card:hover { background: var(--panel-2); }
       .provider-domain { color: var(--accent); font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
       .provider-card h3 { margin: 8px 0 0; font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+      .provider-country, .provider-coverage { margin-top: 6px; color: var(--muted); font: 11px ui-sans-serif, system-ui, sans-serif; }
       .kind-badges { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 5px; }
       .provider-hosts { margin-top: auto; padding-top: 18px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
       .provider-hosts a { color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
@@ -820,6 +1183,7 @@ ${providerCards}
       .source-footer-inner small { margin-top: 3px; color: var(--muted); }
       .source-footer-links { display: flex; flex-wrap: wrap; gap: 18px; }
       .source-footer-links a { color: var(--muted); }
+      @media (max-width: 1100px) { .catalog-controls { grid-template-columns: 1fr 1fr 1fr auto; } .search-control { grid-column: 1 / -1; } }
       @media (max-width: 1000px) { .sources-hero { grid-template-columns: 1fr; gap: 50px; } .signal-console { max-width: 650px; } .source-domains { grid-template-columns: repeat(2, minmax(0, 1fr)); } .catalog-controls { grid-template-columns: 1fr 1fr; } .search-control { grid-column: 1 / -1; } .provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
       @media (max-width: 720px) { .source-nav-links { display: none; } .sources-page nav { padding: 0 16px; gap: 10px; } .source-nav-cta { padding: 9px 10px; font-size: 9px; } .sources-hero { min-height: 0; padding: 80px 20px 60px; } .sources-page h1 { font-size: clamp(46px, 15vw, 66px); } .sources-hero .lede { font-size: 16px; } .proof-rail { margin: 0 20px; grid-template-columns: repeat(2, 1fr); } .proof-rail > span:nth-child(2) { border-right: 0; } .proof-rail > span:nth-child(-n+2) { border-bottom: 1px solid var(--line); } .domain-section, .catalog-section { padding: 90px 20px; } .source-domains { grid-template-columns: 1fr; } .source-domain-card button { min-height: 225px; } .trust-section { padding: 80px 20px; grid-template-columns: 1fr; gap: 36px; } .catalog-controls { position: static; grid-template-columns: 1fr; } .search-control { grid-column: auto; } .provider-grid { grid-template-columns: 1fr; } .catalog-meta, .source-footer-inner { align-items: flex-start; flex-direction: column; } .sources-final-cta { padding: 90px 20px; } }
       @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }`;
@@ -827,14 +1191,19 @@ ${providerCards}
       const search = document.getElementById('source-search');
       const domain = document.getElementById('source-domain');
       const kind = document.getElementById('source-kind');
+      const country = document.getElementById('source-country');
+      const coverage = document.getElementById('source-coverage');
       const cards = [...document.querySelectorAll('.provider-card')].map((card) => ({
         card,
         searchText: card.textContent.toLowerCase(),
         domain: card.dataset.sourceDomain,
         kinds: new Set(card.dataset.sourceKind.split(' ')),
+        country: card.dataset.sourceCountry,
+        coverage: new Set((card.dataset.sourceCoverage || '').split(' ').filter(Boolean)),
       }));
       const filterButtons = [...document.querySelectorAll('[data-source-filter]')];
       const results = document.getElementById('source-results');
+      const countryNote = document.getElementById('source-country-note');
       const noResults = document.getElementById('source-no-results');
       const applyFilters = () => {
         const query = search.value.trim().toLowerCase();
@@ -844,10 +1213,18 @@ ${providerCards}
           const matchesSearch = !query || entry.searchText.includes(query);
           const matchesDomain = domain.value === 'all' || entry.domain === domain.value;
           const matchesKind = kind.value === 'all' || entry.kinds.has(kind.value);
-          card.hidden = !(matchesSearch && matchesDomain && matchesKind);
+          const matchesCountry = country.value === 'all' || entry.country === country.value;
+          const matchesCoverage = coverage.value === 'all' || entry.coverage.has(coverage.value);
+          card.hidden = !(matchesSearch && matchesDomain && matchesKind && matchesCountry && matchesCoverage);
           if (!card.hidden) visible += 1;
         }
         results.textContent = visible + (visible === 1 ? ' provider shown' : ' providers shown');
+        const showCountryNote = country.value !== 'all' && country.value !== 'intl';
+        const nextCountryNote = showCountryNote
+          ? 'This list shows monitored sources based in the selected country or region. Sources based elsewhere also cover it.'
+          : '';
+        if (countryNote.textContent !== nextCountryNote) countryNote.textContent = nextCountryNote;
+        if (countryNote.hidden === showCountryNote) countryNote.hidden = !showCountryNote;
         noResults.hidden = visible !== 0;
         for (const button of filterButtons) {
           const selected = button.dataset.sourceFilter !== 'all' && button.dataset.sourceFilter === domain.value;
@@ -857,9 +1234,13 @@ ${providerCards}
       search.addEventListener('input', applyFilters);
       domain.addEventListener('change', applyFilters);
       kind.addEventListener('change', applyFilters);
+      country.addEventListener('change', applyFilters);
+      coverage.addEventListener('change', applyFilters);
       for (const button of filterButtons) button.addEventListener('click', () => {
         search.value = '';
         kind.value = 'all';
+        country.value = 'all';
+        coverage.value = 'all';
         domain.value = button.dataset.sourceFilter;
         applyFilters();
         if (button.dataset.sourceFilter !== 'all') {
@@ -867,34 +1248,58 @@ ${providerCards}
         }
       });
     })();`;
+  const catalogBase = dataCatalogLd(baseUrl);
+  const catalogLd = {
+    ...catalogBase,
+    dateModified: lastmod,
+    variableMeasured: {
+      '@type': 'PropertyValue',
+      name: 'Active providers',
+      value: sourceStats.providerCount,
+    },
+    dataset: catalogDatasets,
+  };
   return pageDocument({
     baseUrl,
     path,
-    title: 'Data Source Catalog | World Monitor',
+    title: sourcePage ? sourceCategoryDocumentTitle(sourcePage.name) : 'Global Data Sources: OSINT, Markets, Energy | World Monitor',
     description,
     lastmod,
-    jsonLd: {
-      '@context': 'https://schema.org',
-      '@type': 'CollectionPage',
-      name: 'World Monitor data source catalog',
-      description,
-      url: absoluteUrl(baseUrl, path),
-      inLanguage: 'en-US',
-      mainEntity: {
-        '@type': 'ItemList',
-        numberOfItems: sourceCatalog.length,
+    jsonLd: [
+      {
+        '@context': 'https://schema.org',
+        '@type': 'CollectionPage',
+        name: 'World Monitor data source catalog',
+        description,
+        url: pageUrl,
+        inLanguage: 'en-US',
+        mainEntity: {
+          '@type': 'ItemList',
+          numberOfItems: directoryPages ? directoryPages.length : sourceCatalog.length,
+          itemListOrder: 'https://schema.org/ItemListUnordered',
+          itemListElement: directoryPages ? directoryPages.map((page, index) => ({
+            '@type': 'ListItem', position: index + 1, name: page.name, url: absoluteUrl(baseUrl, page.path),
+          })) : sourceCatalog.map((provider, index) => ({
+            '@type': 'ListItem',
+            position: index + 1,
+            name: provider.displayName,
+            url: `${pageUrl}#${cardAnchors.get(provider.provider)}`,
+          })),
+        },
       },
-    },
+      ...(sourcePage ? [] : [catalogLd]),
+    ],
     breadcrumbs: breadcrumbLd(baseUrl, [
       { name: 'Home', path: '/' },
-      { name: 'Sources', path },
+      { name: 'Sources', path: '/sources/' },
+      ...(sourcePage ? [{ name: sourcePage.name, path }] : []),
     ]),
     body,
     bodyClass: 'sources-page',
     headerNav: sourceNav,
     footerBody: sourceFooter,
     extraStyles,
-    inlineScript,
+    inlineScript: directoryPages ? sourcesSearchScript : inlineScript + sourcesBookmarkScript,
     ogType: 'website',
   });
 }

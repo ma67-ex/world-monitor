@@ -6,14 +6,14 @@ keywords: "global intelligence dashboard, real-time intelligence platform, OSINT
 audience: "General tech audience, OSINT researchers, analysts, journalists"
 heroImage: "/blog/images/blog/what-is-worldmonitor-real-time-global-intelligence.jpg"
 pubDate: "2026-02-10"
-modifiedDate: "2026-08-05"
+modifiedDate: "2026-10-26"
 ---
 
 World Monitor is a **free, open-source, real-time global intelligence dashboard** that correlates conflicts, markets, shipping, aviation, infrastructure, cyber threats, natural hazards, and live news on one map. The public dashboard requires no signup; paid Pro, API, and Enterprise plans add analyst, automation, programmatic, and team workflows.
 
 ## What Does World Monitor Do?
 
-World Monitor turns many public signals into one situational-awareness view. Instead of reading a conflict map, ship tracker, market terminal, disaster feed, and news dashboard separately, an analyst can inspect where those signals overlap and then follow the underlying sources.
+World Monitor turns many public signals into one situational-awareness view. Instead of reading a [conflict map](/blog/posts/track-global-conflicts-in-real-time/), ship tracker, market terminal, disaster feed, and [news dashboard](/blog/posts/five-dashboards-one-platform-worldmonitor-variants/) separately, an analyst can inspect where those signals overlap and then follow the underlying sources.
 
 | Signal family | What World Monitor shows | Example primary sources |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ World Monitor turns many public signals into one situational-awareness view. Ins
 | Natural hazards | Earthquakes, fires, volcanoes, floods, weather, and radiation signals | [USGS](https://earthquake.usgs.gov/), [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/), and official alert feeds |
 | Cyber and infrastructure | Outages, malicious infrastructure, datacenters, nuclear sites, and dependency cascades | Cloudflare Radar, abuse.ch feeds, and public infrastructure datasets |
 
-The [data-source catalog](https://www.worldmonitor.app/docs/data-sources) documents provider, cadence, license posture, and provenance details for 552+ observed upstream hosts. A source being present does not make every observation equally fresh or authoritative; each feed retains its own reporting delay and revision policy.
+The [data-source catalog](https://www.worldmonitor.app/docs/data-sources) documents provider, cadence, license posture, and provenance details for 1358 attributed providers across 1381 observed source hosts. A source being present does not make every observation equally fresh or authoritative; each feed retains its own reporting delay and revision policy.
 
 ## How Is It Different From a News Dashboard?
 
@@ -34,23 +34,23 @@ That correlation layer is the product's central idea: separate weak signals beco
 
 ## What Is Included in the Free Dashboard?
 
-The public dashboard exposes 58 map-layer types, 500+ curated news feeds backed by 552+ observed upstream hosts, country briefs, instability scores, chokepoints, infrastructure, markets, disasters, and watchlists. Every layer is available on the free plan, and the dashboard can be opened without an account.
+The public dashboard exposes a shared map-layer catalog, curated news feeds backed by observed upstream hosts, [country briefs](/countries/), [instability scores](/country-instability-index/), [chokepoints](/chokepoints/), infrastructure, markets, disasters, and watchlists. Every layer except the Resilience layer is available on the free plan, and the dashboard can be opened without an account.
 
 World Monitor currently maintains:
 
-- **31 Tier-1 countries** in the high-frequency Country Instability Index
-- A **196-country** public Country Resilience Index universe
-- **29 stock exchanges** and **14 central-bank or supranational institutions** in the generated market catalog
-- **28 interface languages**, including right-to-left Arabic
-- **Six dashboard variants**: World, Tech, Finance, Commodity, Happy, and Energy Monitor
+- The Tier-1 country registry in the high-frequency Country [Instability Index](/blog/posts/country-instability-index-methodology-explained/)
+- The public Country [Resilience Index](/blog/posts/country-resilience-index-methodology-explained/) universe
+- Stock exchanges and central-bank or supranational institutions in the generated market catalog
+- Interface languages, including right-to-left Arabic
+- Dashboard variants (registry keys): `full`, `tech`, `finance`, `commodity`, `happy`, and `energy`
 
 These counts are generated from the repository rather than estimated in editorial copy. The current plans, limits, and capability summary are also published in [machine-readable pricing](https://www.worldmonitor.app/pricing.md).
 
 ## How Do the Country Risk Scores Work?
 
-The **Country Instability Index (CII)** is a high-frequency 0–100 score for 31 Tier-1 countries. It blends a curated editorial baseline with live event pressure from unrest, conflict, security, and information signals, and publishes a signed 24-hour movement delta. It is a triage signal, not a probability or a substitute for source review.
+The **Country Instability Index (CII)** is a high-frequency 0–100 score for the Tier-1 country registry. It blends a curated editorial baseline with live event pressure from unrest, conflict, security, and information signals, and publishes a signed 24-hour movement delta. It is a triage signal, not a probability or a substitute for source review.
 
-The **Country Resilience Index (CRI)** measures a different question: how well a country can absorb and recover from shocks. It covers 72 indicators across 21 active dimensions and six weighted domains for a fixed 196-country rankable universe, with coverage and imputation provenance exposed alongside the score. Read the [CII methodology](https://www.worldmonitor.app/docs/country-instability-index) and [CRI methodology](https://www.worldmonitor.app/docs/methodology/country-resilience-index) before using either index in a decision workflow.
+The **Country Resilience Index (CRI)** measures a different question: how well a country can absorb and recover from shocks. It covers 72 indicators across 21 active dimensions and six weighted domains for the public rankable universe, with coverage and imputation provenance exposed alongside the score. Read the [CII methodology](https://www.worldmonitor.app/docs/country-instability-index) and [CRI methodology](https://www.worldmonitor.app/docs/methodology/country-resilience-index) before using either index in a decision workflow.
 
 ## Who Uses World Monitor?
 
@@ -67,7 +67,7 @@ The dashboard supports triage and context. It does not replace a licensed termin
 
 ## Can Developers and AI Agents Use the Data?
 
-Yes. World Monitor's public interface is generated from 298 Protocol Buffer definitions into 36 REST service specifications, alongside a Model Context Protocol server with 63 live tools. Public metadata and discovery surfaces are open; data-bearing API, MCP tool, and resource calls require the appropriate Pro/API OAuth session or API key.
+Yes. World Monitor's public interface is generated from Protocol Buffer definitions into REST service specifications, alongside a Model Context Protocol server with a live tool registry. Public metadata and discovery surfaces are open; data-bearing API, MCP tool, and resource calls require the appropriate Pro/API OAuth session or API key.
 
 Developers can start with the [API reference](https://www.worldmonitor.app/docs/api-reference), [MCP quickstart](https://www.worldmonitor.app/docs/mcp-quickstart), or [OpenAPI specification](https://www.worldmonitor.app/openapi.json). AI agents can also read the concise [agent briefing](https://www.worldmonitor.app/llms.txt) and the fuller [platform reference](https://www.worldmonitor.app/llms-full.txt).
 
@@ -76,6 +76,8 @@ Developers can start with the [API reference](https://www.worldmonitor.app/docs/
 Yes. The platform source is published under AGPL-3.0 on [GitHub](https://github.com/koala73/worldmonitor). The web app uses Preact, TypeScript, and Vite; the desktop shell uses Tauri with a Node.js sidecar. The hosted service also offers paid Pro, API, and Enterprise plans with separate subscription-license terms.
 
 Open source makes the implementation inspectable, but it does not eliminate source limitations. Public feeds can be delayed, revised, rate-limited, unavailable, or wrong. World Monitor preserves timestamps and provenance so users can distinguish an observed fact from an analytical inference and return to the original publisher.
+
+The inputs do not all share one clock. Read [what real-time means in an intelligence dashboard](/blog/posts/real-time-intelligence-data-freshness/) to distinguish observation age from screen refresh.
 
 ## Frequently Asked Questions
 

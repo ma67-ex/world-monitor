@@ -10,10 +10,8 @@ import type {
   ListCryptoSectorsRequest,
   ListCryptoSectorsResponse,
 } from '../../../../src/generated/server/worldmonitor/market/v1/service_server';
-import { getCachedJson, cachedFetchJson } from '../../../_shared/redis';
+import { getCachedJson } from '../../../_shared/redis';
 import { markNoStoreFallbackResponse } from '../../../_shared/response-headers';
-import { fetchCryptoMarkets } from './_shared';
-import sectorsConfig from '../../../../shared/crypto-sectors.json';
 
 const SEED_CACHE_KEY = 'market:crypto-sectors:v1';
 const LIVE_CACHE_KEY = 'market:crypto-sectors:live:v1';
@@ -46,10 +44,11 @@ export async function listCryptoSectors(
   _req: ListCryptoSectorsRequest,
 ): Promise<ListCryptoSectorsResponse> {
   try {
-    const seedData = await getCachedJson(SEED_CACHE_KEY, true) as { sectors: SectorRow[] } | null;
-    if (seedData?.sectors?.length) return { sectors: seedData.sectors };
+    const seedData = await getCachedJson(SEED_CACHE_KEY, true) as { sectors: Array<{ id: string; name: string; change: number }> } | null;
+    if (!Array.isArray(seedData?.sectors)) return markNoStoreFallbackResponse(ctx.request, { sectors: [] });
+    return { sectors: seedData.sectors };
   } catch {
-    // sentry-coverage-ok: a seed read failure falls through to the live fetch below.
+    return markNoStoreFallbackResponse(ctx.request, { sectors: [] });
   }
 
   try {

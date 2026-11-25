@@ -5,7 +5,7 @@ import { MAX_INSTRUCTIONS_LEN } from '../../shared/analysis-framework-limits';
 const LIBRARY_KEY = 'wm-analysis-frameworks';
 const PANEL_KEY = 'wm-panel-frameworks';
 const FRAMEWORK_CHANGED_EVENT = 'wm-framework-changed';
-const MAX_IMPORTED = 20;
+export const MAX_IMPORTED = 20;
 
 export type AnalysisPanelId =
   | 'insights'
@@ -107,6 +107,10 @@ Close with: a one-sentence devil's advocate verdict — what is the most importa
 ];
 
 const _activeCache = new Map<AnalysisPanelId, AnalysisFramework | null>();
+
+export function invalidateFrameworkCache(): void {
+  _activeCache.clear();
+}
 
 export function loadFrameworkLibrary(): AnalysisFramework[] {
   const imported = loadFromStorage<AnalysisFramework[]>(LIBRARY_KEY, []);

@@ -10,123 +10,56 @@ import {
   __setR2S3TimeoutForTests,
 } from '../scripts/_r2-storage.mjs';
 
-describe('resolveR2StorageConfig Backblaze B2 (default profile)', () => {
-  it('prefers Backblaze env vars over Cloudflare R2 ones when both are set', () => {
+describe('resolveR2StorageConfig default profile', () => {
+  it('resolves CLOUDFLARE_R2_* S3 credentials and derives the R2 endpoint and trace prefix', () => {
     const config = resolveR2StorageConfig({
-      BACKBLAZE_B2_ENDPOINT: 'https://s3.us-east-005.backblazeb2.com',
-      BACKBLAZE_B2_BUCKET: 'worldmonitor-storage',
-      BACKBLAZE_B2_ACCESS_KEY_ID: '005e547f3ff5c620000000002',
-      BACKBLAZE_B2_SECRET_ACCESS_KEY: 'K005test',
-      BACKBLAZE_B2_REGION: 'us-east-005',
-      CLOUDFLARE_R2_ACCOUNT_ID: 'legacy-account',
-      CLOUDFLARE_R2_TRACE_BUCKET: 'legacy-bucket',
-      CLOUDFLARE_R2_ACCESS_KEY_ID: 'legacy-key',
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'legacy-secret',
+      CLOUDFLARE_R2_ACCOUNT_ID: 'r2-account',
+      CLOUDFLARE_R2_TRACE_BUCKET: 'worldmonitor-data',
+      CLOUDFLARE_R2_ACCESS_KEY_ID: 'r2-key',
+      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'r2-secret',
     });
 
     assert.deepEqual(config, {
       mode: 's3',
-      // accountId is cosmetic here — it's read straight from
-      // CLOUDFLARE_R2_ACCOUNT_ID unconditionally (nothing downstream reads
-      // it) and does NOT mean Cloudflare served this request: endpoint,
-      // bucket, and credentials below are all Backblaze's.
-      accountId: 'legacy-account',
-      bucket: 'worldmonitor-storage',
-      endpoint: 'https://s3.us-east-005.backblazeb2.com',
-      region: 'us-east-005',
-      credentials: { accessKeyId: '005e547f3ff5c620000000002', secretAccessKey: 'K005test' },
-      forcePathStyle: false,
+      accountId: 'r2-account',
+      bucket: 'worldmonitor-data',
+      endpoint: 'https://r2-account.r2.cloudflarestorage.com',
+      region: 'auto',
+      credentials: {
+        accessKeyId: 'r2-key',
+        secretAccessKey: 'r2-secret',
+      },
+      forcePathStyle: true,
       basePrefix: 'seed-data/forecast-traces',
     });
   });
 
-  it('resolves with no Cloudflare account id at all — endpoint alone is sufficient', () => {
+  it('honors optional CLOUDFLARE_R2_ENDPOINT and CLOUDFLARE_R2_TRACE_PREFIX', () => {
     const config = resolveR2StorageConfig({
-      BACKBLAZE_B2_ENDPOINT: 'https://s3.us-east-005.backblazeb2.com',
-      BACKBLAZE_B2_BUCKET: 'worldmonitor-storage',
-      BACKBLAZE_B2_ACCESS_KEY_ID: 'k',
-      BACKBLAZE_B2_SECRET_ACCESS_KEY: 's',
+      CLOUDFLARE_R2_ACCOUNT_ID: 'r2-account',
+      CLOUDFLARE_R2_ENDPOINT: 'https://r2.example.test',
+      CLOUDFLARE_R2_BUCKET: 'worldmonitor-data',
+      CLOUDFLARE_R2_ACCESS_KEY_ID: 'r2-key',
+      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'r2-secret',
+      CLOUDFLARE_R2_TRACE_PREFIX: '/custom/traces/',
     });
-    assert.notEqual(config, null);
-    assert.equal(config.forcePathStyle, false);
-  });
-
-  it('an explicit BACKBLAZE_B2_FORCE_PATH_STYLE override still wins over the B2 default', () => {
-    const config = resolveR2StorageConfig({
-      BACKBLAZE_B2_ENDPOINT: 'https://s3.us-east-005.backblazeb2.com',
-      BACKBLAZE_B2_BUCKET: 'worldmonitor-storage',
-      BACKBLAZE_B2_ACCESS_KEY_ID: 'k',
-      BACKBLAZE_B2_SECRET_ACCESS_KEY: 's',
-      BACKBLAZE_B2_FORCE_PATH_STYLE: 'true',
-    });
-    assert.equal(config.forcePathStyle, true);
-  });
-
-  it('still defaults forcePathStyle to true for plain Cloudflare R2 config (no regression)', () => {
-    const config = resolveR2StorageConfig({
-      CLOUDFLARE_R2_ACCOUNT_ID: 'acct123',
-      CLOUDFLARE_R2_TRACE_BUCKET: 'trace-bucket',
-      CLOUDFLARE_R2_ACCESS_KEY_ID: 'abc',
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'def',
-    });
-    assert.equal(config.forcePathStyle, true);
-  });
-});
-
-describe('resolveR2StorageConfig bootstrap profile', () => {
-  it('uses only the dedicated bootstrap credentials and derives the R2 endpoint', () => {
-    const config = resolveR2StorageConfig({
-      R2_ACCOUNT_ID: 'bootstrap-account',
-      R2_BOOTSTRAP_BUCKET: 'bootstrap-origin',
-      R2_BOOTSTRAP_ACCESS_KEY_ID: 'bootstrap-key',
-      R2_BOOTSTRAP_SECRET_ACCESS_KEY: 'bootstrap-secret',
-      CLOUDFLARE_R2_ACCOUNT_ID: 'legacy-account',
-      CLOUDFLARE_R2_BUCKET: 'legacy-bucket',
-      CLOUDFLARE_R2_ACCESS_KEY_ID: 'legacy-key',
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'legacy-secret',
-      CLOUDFLARE_API_TOKEN: 'generic-token',
-    }, { profile: 'bootstrap' });
-
-    assert.deepEqual(config, {
-      mode: 's3',
-      accountId: 'bootstrap-account',
-      bucket: 'bootstrap-origin',
-      endpoint: 'https://bootstrap-account.r2.cloudflarestorage.com',
-      region: 'auto',
-      credentials: {
-        accessKeyId: 'bootstrap-key',
-        secretAccessKey: 'bootstrap-secret',
-      },
-      forcePathStyle: true,
-      basePrefix: '',
-    });
-  });
-
-  it('honors the optional dedicated endpoint', () => {
-    const config = resolveR2StorageConfig({
-      R2_ACCOUNT_ID: 'bootstrap-account',
-      R2_ENDPOINT: 'https://r2.example.test',
-      R2_BOOTSTRAP_BUCKET: 'bootstrap-origin',
-      R2_BOOTSTRAP_ACCESS_KEY_ID: 'bootstrap-key',
-      R2_BOOTSTRAP_SECRET_ACCESS_KEY: 'bootstrap-secret',
-    }, { profile: 'bootstrap' });
 
     assert.equal(config?.endpoint, 'https://r2.example.test');
+    assert.equal(config?.basePrefix, 'custom/traces');
   });
 
-  it('does not fall back to legacy credentials or generic API tokens', () => {
-    const config = resolveR2StorageConfig({
-      R2_ACCOUNT_ID: 'bootstrap-account',
-      R2_BOOTSTRAP_BUCKET: 'bootstrap-origin',
-      CLOUDFLARE_R2_ACCOUNT_ID: 'legacy-account',
-      CLOUDFLARE_R2_BUCKET: 'legacy-bucket',
-      CLOUDFLARE_R2_ACCESS_KEY_ID: 'legacy-key',
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: 'legacy-secret',
-      CLOUDFLARE_R2_TOKEN: 'legacy-r2-token',
-      CLOUDFLARE_API_TOKEN: 'generic-token',
-    }, { profile: 'bootstrap' });
-
-    assert.equal(config, null);
+  it('returns null when required S3/API credentials are missing and rejects the retired bootstrap profile', () => {
+    assert.equal(
+      resolveR2StorageConfig({
+        CLOUDFLARE_R2_ACCOUNT_ID: 'r2-account',
+        CLOUDFLARE_R2_BUCKET: 'worldmonitor-data',
+      }),
+      null,
+    );
+    assert.throws(
+      () => resolveR2StorageConfig({}, { profile: 'bootstrap' }),
+      /Unknown R2 storage profile: bootstrap/,
+    );
   });
 });
 
@@ -203,4 +136,23 @@ describe('putR2JsonObject s3-mode does not hang on a stalled write', () => {
     assert.equal(res.bucket, 'test-bucket');
     assert.ok(res.bytes > 0);
   });
+});
+
+it('retries SDK transient codes and nested causes under the single outer budget', async t => {
+  const timer = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => ms <= 1_000
+    ? timer(callback, 0, ...args) : timer(callback, ms, ...args));
+  for (const error of [
+    Object.assign(new Error('connect failed'), { code: 'ECONNREFUSED' }),
+    Object.assign(new Error('write failed'), { code: 'EPIPE' }),
+    new Error('wrapped', { cause: Object.assign(new Error('connect failed'), { code: 'ETIMEDOUT' }) }),
+  ]) {
+    let calls = 0;
+    __setS3ClientForTests({ send: async () => {
+      if (++calls === 1) throw error;
+      return {};
+    } });
+    await putR2JsonObject(S3_CONFIG, 'fixture.json', { ok: true });
+    assert.equal(calls, 2);
+  }
 });

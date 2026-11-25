@@ -245,7 +245,10 @@ test('session usage telemetry records verified Cloudflare client attribution and
   forged.headers.set('x-real-ip', '192.0.2.5');
   forged.headers.set('x-vercel-ip-country', 'ZA');
   const forgedCtx = makeWaitUntilCtx();
-  assert.equal((await handler(forged, forgedCtx.ctx)).status, 200);
+  // IP-scoped session minting fails closed on unproven cf-connecting-ip (#8402).
+  const forgedResp = await handler(forged, forgedCtx.ctx);
+  assert.equal(forgedResp.status, 403);
+  assert.equal(forgedResp.headers.get('X-RateLimit-Mode'), 'edge-proof');
   await forgedCtx.settle();
 
   const tor = makeReq('POST', { origin: 'https://worldmonitor.app' });
@@ -284,7 +287,7 @@ test('OPTIONS preflight returns 204 with CORS', async () => {
   __resetRateLimitForTest();
   const resp = await handler(makeReq('OPTIONS', { origin: 'https://worldmonitor.app' }));
   assert.equal(resp.status, 204);
-  assert.equal(resp.headers.get('access-control-allow-methods'), 'POST, OPTIONS');
+  assert.equal(resp.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS');
   assert.equal(resp.headers.get('access-control-allow-credentials'), 'true');
 });
 
@@ -305,14 +308,143 @@ test('POST fail-closed limiter receives Vercel ctx for degraded telemetry', () =
   assert.match(opts, /window:\s*SESSION_RATE_LIMIT_WINDOW/, 'must use production window constant');
 });
 
-test('GET method is rejected with 405', async () => {
-  const resp = await handler(makeReq('GET', { origin: 'https://worldmonitor.app' }));
-  assert.equal(resp.status, 405);
+test('unsupported methods are rejected with 405', async () => {
+  for (const method of ['PUT', 'DELETE', 'PATCH']) {
+    const resp = await handler(makeReq(method, { origin: 'https://worldmonitor.app' }));
+    assert.equal(resp.status, 405, method);
+  }
+});
+
+function makeStatusReq({ cookie, origin = 'https://worldmonitor.app' } = {}) {
+  const headers = new Headers();
+  if (origin) headers.set('origin', origin);
+  if (cookie) headers.set('cookie', cookie);
+  return new Request('https://api.worldmonitor.app/api/wm-session', { method: 'GET', headers });
+}
+
+async function readStatus(resp) {
+  const text = await resp.text();
+  return { text, body: JSON.parse(text) };
+}
+
+test('GET reports no valid key session when the request carries no cookies', async () => {
+  const resp = await handler(makeStatusReq());
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get('cache-control'), 'no-store');
+  assert.equal(resp.headers.get('access-control-allow-credentials'), 'true');
+  assert.equal(resp.headers.get('access-control-allow-origin'), 'https://worldmonitor.app');
+  assert.deepEqual(setCookies(resp), [], 'a status read never sets or clears cookies');
+  const { body } = await readStatus(resp);
+  assert.deepEqual(body, { widget: false, pro: false });
+});
+
+test('GET reports a valid HttpOnly pro session as a boolean and never echoes the key', async () => {
+  const resp = await handler(makeStatusReq({ cookie: '__Host-wm-pro-key=pro-secret' }));
+  assert.equal(resp.status, 200);
+  const { text, body } = await readStatus(resp);
+  assert.deepEqual(body, { widget: false, pro: true });
+  assert.equal(text.includes('pro-secret'), false);
+});
+
+test('GET judges widget and pro sessions independently and accepts enterprise keys', async () => {
+  const resp = await handler(makeStatusReq({
+    cookie: '__Host-wm-widget-key=enterprise-secret; __Host-wm-pro-key=not-a-real-key',
+  }));
+  const { text, body } = await readStatus(resp);
+  assert.deepEqual(body, { widget: true, pro: false });
+  assert.equal(text.includes('enterprise-secret'), false);
+  assert.equal(text.includes('not-a-real-key'), false);
+});
+
+test('GET reports an invalid or cross-scope cookie as false without echoing it', async () => {
+  for (const cookie of [
+    '__Host-wm-pro-key=wrong-key',
+    '__Host-wm-pro-key=widget-secret',
+    '__Host-wm-widget-key=pro-secret',
+    'wm-pro-key=pro-secret; wm-widget-key=widget-secret',
+    `__Host-wm-pro-key=${'p'.repeat(513)}`,
+    '__Host-wm-pro-key=',
+  ]) {
+    const resp = await handler(makeStatusReq({ cookie }));
+    assert.equal(resp.status, 200, cookie);
+    const { text, body } = await readStatus(resp);
+    assert.deepEqual(body, { widget: false, pro: false }, cookie);
+    for (const secret of ['wrong-key', 'widget-secret', 'pro-secret']) {
+      assert.equal(text.includes(secret), false, `${cookie} echoed ${secret}`);
+    }
+  }
+});
+
+test('GET does not depend on the session-mint secret', async () => {
+  delete process.env.WM_SESSION_SECRET;
+  const resp = await handler(makeStatusReq({ cookie: '__Host-wm-pro-key=pro-secret' }));
+  assert.equal(resp.status, 200);
+  assert.deepEqual((await readStatus(resp)).body, { widget: false, pro: true });
+});
+
+test('GET from a disallowed origin is refused', async () => {
+  const resp = await handler(makeStatusReq({ cookie: '__Host-wm-pro-key=pro-secret', origin: 'https://evil.example.com' }));
+  assert.equal(resp.status, 403);
+  assert.equal((await resp.text()).includes('pro-secret'), false);
+});
+
+test('GET is rate limited under its own scope and fails closed', async () => {
+  mockUpstashRateLimit({ remaining: -1, limit: 30 });
+  const limited = await handler(makeStatusReq({ cookie: '__Host-wm-pro-key=pro-secret' }));
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.text()).includes('pro-secret'), false);
+
+  delete process.env.UPSTASH_REDIS_REST_URL;
+  delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  __resetRateLimitForTest();
+  const degraded = await handler(makeStatusReq({ cookie: '__Host-wm-pro-key=pro-secret' }));
+  assert.equal(degraded.status, 503);
+
+  const src = readFileSync(new URL('./wm-session.js', import.meta.url), 'utf8');
+  assert.match(src, /scope:\s*STATUS_RATE_LIMIT_SCOPE/);
+});
+
+test('Disallowed origin OPTIONS preflight succeeds with echoed Origin (#6411)', async () => {
+  const origin = 'https://evil.example.com';
+  const resp = await handler(makeReq('OPTIONS', { origin }));
+  assert.equal(resp.status, 204);
+  assert.equal(resp.headers.get('access-control-allow-origin'), origin);
+  assert.equal(resp.headers.get('access-control-allow-credentials'), 'true');
 });
 
 test('Disallowed origin gets 403', async () => {
   const resp = await handler(makeReq('POST', { origin: 'https://evil.example.com' }));
   assert.equal(resp.status, 403);
+});
+
+test('Disallowed origin 403 echoes the request Origin so the client can read it (#6411)', async () => {
+  const origin = 'https://evil.example.com';
+  const resp = await handler(makeReq('POST', { origin }));
+  assert.equal(resp.status, 403);
+  assert.equal(resp.headers.get('access-control-allow-origin'), origin);
+  assert.equal(resp.headers.get('access-control-allow-credentials'), 'true');
+  assert.equal(await resp.text(), 'Forbidden');
+});
+
+test('Google Translate proxy origin can mint an anonymous session (#6411)', async () => {
+  const origin = 'https://www-worldmonitor-app.translate.goog';
+  const resp = await handler(makeReq('POST', { origin }));
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get('access-control-allow-origin'), origin);
+  const body = await resp.json();
+  assert.equal(body.ok, true);
+  assert.match(body.token, /^wms_/);
+  assert.equal(typeof body.exp, 'number');
+});
+
+test('Trailing-dot FQDN first-party origin can mint a session (#6411)', async () => {
+  const origin = 'https://tech.worldmonitor.app.';
+  const resp = await handler(makeReq('POST', { origin }));
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get('access-control-allow-origin'), origin);
+  const body = await resp.json();
+  assert.equal(body.ok, true);
+  assert.match(body.token, /^wms_/);
 });
 
 test('No origin (curl) is allowed (rate limit + token TTL are the throttles)', async () => {
@@ -468,8 +600,10 @@ test('no-key session refresh preserves existing HttpOnly key cookies', async () 
   assert.equal(resp.status, 200);
   const cookies = setCookies(resp);
   assert.ok(cookies.some((cookie) => cookie.startsWith('wm-session=')));
-  assert.equal(cookies.some((cookie) => cookie.startsWith('wm-widget-key=')), false);
-  assert.equal(cookies.some((cookie) => cookie.startsWith('wm-pro-key=')), false);
+  assert.ok(cookies.filter(c => c.startsWith('wm-widget-key=')).every(c => c.includes('Max-Age=0')));
+  assert.equal(cookies.some(c => c.startsWith('__Host-wm-widget-key=')), false);
+  assert.ok(cookies.filter(c => c.startsWith('wm-pro-key=')).every(c => c.includes('Max-Age=0')));
+  assert.equal(cookies.some(c => c.startsWith('__Host-wm-pro-key=')), false);
 });
 
 test('legacy widget/pro keys are moved into short-lived HttpOnly cookies', async () => {
@@ -485,10 +619,10 @@ test('legacy widget/pro keys are moved into short-lived HttpOnly cookies', async
   assert.equal(resp.status, 200);
   const cookies = setCookies(resp);
   const joined = cookies.join('\n');
-  assert.match(joined, /wm-widget-key=widget-secret;.*HttpOnly/);
-  assert.match(joined, /wm-pro-key=pro-secret;.*HttpOnly/);
-  assert.match(joined, /wm-widget-key=widget-secret;.*Domain=\.worldmonitor\.app/);
-  assert.match(joined, /wm-pro-key=pro-secret;.*Domain=\.worldmonitor\.app/);
+  assert.match(joined, /__Host-wm-widget-key=widget-secret;.*HttpOnly/);
+  assert.match(joined, /__Host-wm-pro-key=pro-secret;.*HttpOnly/);
+  assert.ok(cookies.filter(c => c.startsWith('__Host-')).every(c => !/domain=/i.test(c)));
+
   assert.match(joined, /Max-Age=43200/);
 });
 
@@ -504,7 +638,7 @@ test('enterprise key can be exchanged into a short-lived HttpOnly pro cookie', a
   const resp = await handler(req);
   assert.equal(resp.status, 200);
   const cookies = setCookies(resp);
-  assert.match(cookies.join('\n'), /wm-pro-key=enterprise-secret;.*HttpOnly/);
+  assert.match(cookies.join('\n'), /__Host-wm-pro-key=enterprise-secret;.*HttpOnly/);
 });
 
 test('legacy widget/pro secret checks reject prefix and length mismatches', async () => {
@@ -622,8 +756,8 @@ test('legacy cookie tombstones do not delete replacement HttpOnly key cookies', 
   const resp = await handler(req);
   assert.equal(resp.status, 200);
   const jar = finalCookieJar(setCookies(resp));
-  assert.equal(jar.get('wm-widget-key;.worldmonitor.app;/'), 'widget-secret');
-  assert.equal(jar.get('wm-pro-key;.worldmonitor.app;/'), 'pro-secret');
+  assert.equal(jar.get('__Host-wm-widget-key;api.worldmonitor.app;/'), 'widget-secret');
+  assert.equal(jar.get('__Host-wm-pro-key;api.worldmonitor.app;/'), 'pro-secret');
 });
 
 test('Returns 503 when WM_SESSION_SECRET is missing', async () => {
@@ -691,4 +825,74 @@ test('mint still succeeds when the cookie header is malformed', async () => {
   const body = await resp.json();
   assert.equal(body.hadSession, false);
   assert.match(cookieValue(setCookies(resp), 'wm-session'), /^wms_/);
+});
+
+test('vendor origins cannot mint a session even with a valid privileged cookie', async () => {
+  for (const origin of ['https://clerk.worldmonitor.app', 'https://abacus.worldmonitor.app']) {
+    const response = await handler(new Request('https://api.worldmonitor.app/api/wm-session', {
+      method: 'POST',
+      headers: { origin, cookie: '__Host-wm-pro-key=enterprise-secret' },
+    }));
+    assert.equal(response.status, 403, origin);
+    assert.equal(setCookies(response).length, 0);
+    // The denial remains readable; echoing a refusal is not an origin grant.
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), origin);
+  }
+});
+
+test('refresh expires old broad and host cookies even without a replacement key', async () => {
+  const response = await handler(makeReqWithCookie('wm-pro-key=enterprise-secret; wm-widget-key=widget-secret'));
+  assert.equal(response.status, 200);
+  for (const name of ['wm-pro-key', 'wm-widget-key']) {
+    const tombstones = setCookies(response).filter(c => c.startsWith(`${name}=`));
+    assert.equal(tombstones.length, 2);
+    assert.ok(tombstones.every(c => c.includes('Max-Age=0')));
+    assert.ok(tombstones.some(c => c.includes('Domain=.worldmonitor.app')));
+    assert.ok(tombstones.some(c => !c.includes('Domain=')));
+  }
+  assert.equal(setCookies(response).some(c => c.startsWith('__Host-')), false);
+});
+
+test('exchange, authenticate, preserve, clear, and reject stale domain names', async () => {
+  const { validateApiKey } = await import('./_api-key.js');
+  const exchange = (body) => handler(new Request('https://api.worldmonitor.app/api/wm-session', {
+    method: 'POST',
+    headers: { origin: 'https://worldmonitor.app', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }));
+  const issued = await exchange({ proKey: 'enterprise-secret' });
+  const newCookie = setCookies(issued).find(c => c.startsWith('__Host-wm-pro-key='));
+  assert.ok(newCookie);
+  assert.doesNotMatch(newCookie, /Domain=/i);
+  const auth = async (cookie) => validateApiKey(new Request('https://api.worldmonitor.app/api/test', {
+    headers: { cookie },
+  }), { forceKey: true });
+  assert.equal((await auth(newCookie.split(';')[0])).valid, true);
+  assert.equal((await auth(`wm-pro-key=stale; ${newCookie.split(';')[0]}`)).valid, true);
+  assert.equal((await auth('wm-pro-key=enterprise-secret; wm-widget-key=enterprise-secret')).valid, false);
+  const refresh = await exchange({});
+  assert.equal(setCookies(refresh).some(c => c.startsWith('__Host-wm-pro-key=')), false);
+  const cleared = await exchange({ proKey: '' });
+  const jar = finalCookieJar([...setCookies(issued), ...setCookies(cleared)]);
+  assert.equal(jar.has('__Host-wm-pro-key;api.worldmonitor.app;/'), false);
+  const remaining = [...jar].map(([key, value]) => `${key.split(';')[0]}=${encodeURIComponent(value)}`).join('; ');
+  assert.equal((await auth(remaining)).valid, false);
+});
+
+test('desktop legacy exchange uses host-only cookies and enterprise headers remain supported', async () => {
+  const { validateApiKey } = await import('./_api-key.js');
+  const response = await handler(new Request('https://api.worldmonitor.app/api/wm-session', {
+    method: 'POST',
+    headers: { origin: 'tauri://localhost', 'content-type': 'application/json' },
+    body: JSON.stringify({ widgetKey: 'widget-secret', proKey: 'enterprise-secret' }),
+  }));
+  assert.equal(response.status, 200);
+  const keys = setCookies(response).filter(c => c.startsWith('__Host-'));
+  assert.equal(keys.length, 2);
+  assert.ok(keys.every(c => !/Domain=/i.test(c)));
+  const auth = await validateApiKey(new Request('https://api.worldmonitor.app/api/test', {
+    headers: { origin: 'tauri://localhost', 'X-WorldMonitor-Key': 'enterprise-secret' },
+  }));
+  assert.equal(auth.valid, true);
+  assert.equal(auth.kind, 'enterprise');
 });

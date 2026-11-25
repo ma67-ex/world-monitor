@@ -1,31 +1,27 @@
-function sanitizeJsonValue(value, depth = 0) {
-  if (depth > 20) return '[truncated]';
+const TEXT_ENCODER = new TextEncoder();
 
-  if (value instanceof Error) {
-    return { error: value.message };
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(item => sanitizeJsonValue(item, depth + 1));
-  }
-
-  if (value && typeof value === 'object') {
-    const clone = {};
-    for (const [key, nested] of Object.entries(value)) {
-      if (key === 'stack' || key === 'stackTrace' || key === 'cause') continue;
-      clone[key] = sanitizeJsonValue(nested, depth + 1);
-    }
-    return clone;
-  }
-
-  return value;
+function replaceError(key, value) {
+  // JSON.stringify calls toJSON before the replacer. Read the original value
+  // from its holder so an Error cannot expose stack/cause through a custom
+  // toJSON implementation. Plain JSON properties with those names remain
+  // ordinary protocol data.
+  const original = this[key];
+  return original instanceof Error ? { error: original.message } : value;
 }
 
 export function jsonResponse(body, status, headers = {}) {
-  return new Response(JSON.stringify(sanitizeJsonValue(body)), {
+  const json = JSON.stringify(body, replaceError);
+
+  // Encode once: the same bytes give the exact Content-Length (#8403) and
+  // go straight into the Response without a second encode.
+  // Callers that already set Content-Length keep their value (spread wins).
+  const bytes = TEXT_ENCODER.encode(json);
+
+  return new Response(bytes, {
     status,
     headers: {
       'Content-Type': 'application/json',
+      'Content-Length': String(bytes.byteLength),
       ...headers,
     },
   });

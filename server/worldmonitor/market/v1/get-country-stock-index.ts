@@ -8,6 +8,8 @@ import type {
   GetCountryStockIndexRequest,
   GetCountryStockIndexResponse,
 } from '../../../../src/generated/server/worldmonitor/market/v1/service_server';
+import { ValidationError } from '../../../../src/generated/server/worldmonitor/market/v1/service_server';
+import { isAssignedCountryCode } from '../../../../shared/country-code-resolve';
 import filterParamContracts from '../../../../shared/openapi-filter-param-contracts.json';
 import { UPSTREAM_TIMEOUT_MS, type YahooChartResponse } from './_shared';
 import { CHROME_UA, yahooGate } from '../../../_shared/constants';
@@ -17,7 +19,25 @@ import { cachedFetchJson, getCachedJson } from '../../../_shared/redis';
 // Country-to-index mapping
 // ========================================================================
 
-const COUNTRY_INDEX = filterParamContracts.marketCountryStockIndexes as Record<string, { symbol: string; name: string }>;
+interface CountryIndexDefinition {
+  symbol: string;
+  name: string;
+  /**
+   * Set when the declared symbol is one Yahoo cannot serve (#6240). The
+   * country stays in the public enum so existing callers keep a stable
+   * contract, but the handler answers `available: false` without spending a
+   * Yahoo request, and the seeder skips it. `checked` dates the evidence.
+   */
+  unavailable?: { checked: string; reason: string };
+  /**
+   * Set when a provider other than Yahoo serves the index (#6153: `moex-iss`
+   * for RU). Railway seeds it from that provider; the Yahoo live fallback
+   * below cannot help, so a missing seed row answers `available: false`.
+   */
+  source?: string;
+}
+
+const COUNTRY_INDEX = filterParamContracts.marketCountryStockIndexes as Record<string, CountryIndexDefinition>;
 
 // ========================================================================
 // Cache
@@ -62,12 +82,22 @@ export async function getCountryStockIndex(
     available: false, code, symbol: '', indexName: '', price: 0, weekChangePercent: 0, currency: '', fetchedAt: '',
   };
 
-  if (!code) return notAvailable;
+  // The proto checks shape only. `available: false` for ZZ would read as a
+  // real country without a tracked index.
+  if (!isAssignedCountryCode(code)) {
+    throw new ValidationError([{
+      field: 'country_code',
+      description: 'country_code must be an assigned ISO 3166-1 alpha-2 code, e.g. "JP".',
+    }]);
+  }
 
   const index = COUNTRY_INDEX[code];
   if (!index) return notAvailable;
+  // A known-dead symbol: no seed row can exist and the live fetch below would
+  // return the same `null` it has for months, so answer honestly and cheaply.
+  if (index.unavailable) return notAvailable;
 
-  // Railway seeds every country in the enum and writes without the Vercel
+  // Railway seeds every serviceable country in the enum and writes without the Vercel
   // environment prefix. Prefer that raw last-good payload before serving the
   // RPC cache. The fallback cache below intentionally uses a separate key so a
   // failed request cannot replace a seed-owned record with a negative sentinel.
@@ -77,6 +107,14 @@ export async function getCountryStockIndex(
   if (isAvailableCountryStockIndex(railwaySnapshot, code)) {
     stockIndexCache[code] = { data: railwaySnapshot, ts: Date.now() };
     return railwaySnapshot;
+  }
+  // A non-Yahoo index has no live fallback here: the seeder is its only
+  // writer, so a missed seed answers honestly instead of spending a Yahoo
+  // request that returns nothing for this symbol.
+  if (index.source && index.source !== 'yahoo') {
+    const cachedNonYahoo = stockIndexCache[code];
+    return cachedNonYahoo && Date.now() - cachedNonYahoo.ts < STOCK_INDEX_CACHE_TTL
+      ? cachedNonYahoo.data : notAvailable;
   }
 
   const cached = stockIndexCache[code];

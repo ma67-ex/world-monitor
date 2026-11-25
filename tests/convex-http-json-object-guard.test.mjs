@@ -9,6 +9,7 @@ const source = readFileSync(resolve(__dirname, '..', 'convex', 'http.ts'), 'utf8
 
 const guardedPaths = [
   '/api/internal-entitlements',
+  '/api/internal-register-interest',
   '/api/user-prefs',
   '/api/telegram-pair-callback',
   '/relay/deactivate',
@@ -19,12 +20,14 @@ const guardedPaths = [
   '/relay/entitlement',
   '/relay/register-referral-code',
   '/api/internal-validate-api-key',
+  '/api/internal-validate-embed-key',
   '/api/internal-get-key-owner',
   '/api/internal-issue-pro-mcp-token',
   '/api/internal-validate-pro-mcp-token',
   '/api/internal-revoke-pro-mcp-token',
   '/relay/create-checkout',
   '/relay/customer-portal',
+  '/relay/pro-business-upgrade',
   '/relay/bulk-suppress-emails',
 ];
 

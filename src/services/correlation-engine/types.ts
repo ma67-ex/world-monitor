@@ -2,8 +2,9 @@
 
 // boundary-ignore: AppContext is an aggregate type that lives in app/ by design
 import type { AppContext } from '@/app/app-context';
+import type { CorrelationDomain } from '@/types/correlation';
 
-export type CorrelationDomain = 'military' | 'escalation' | 'economic' | 'disaster';
+export type { CorrelationDomain } from '@/types/correlation';
 export type TrendDirection = 'escalating' | 'stable' | 'de-escalating';
 
 export interface SignalEvidence {
@@ -42,7 +43,7 @@ export interface DomainAdapter {
   threshold: number;        // minimum score to emit card
   weights: Record<string, number>;
   collectSignals(ctx: AppContext): SignalEvidence[];
-  generateTitle(cluster: SignalEvidence[], context?: { entityKey?: string; country?: string }): string;
+  generateTitle(cluster: SignalEvidence[], context?: { entityKey?: string; country?: string; location?: { lat: number; lon: number } }): string;
 }
 
 export interface ClusterState {

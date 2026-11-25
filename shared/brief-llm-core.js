@@ -123,7 +123,7 @@ export function parseWhyMatters(text) {
 }
 
 /**
- * Deterministic 16-char hex hash of the SIX story fields that flow
+ * Deterministic SHA-256 hex digest of the SIX story fields that flow
  * into the whyMatters prompt (5 core + description). Also consumed by
  * server/worldmonitor/intelligence/v1/get-country-intel-brief.ts
  * (citation verification + grounding telemetry, #4921). Cache identity
@@ -155,7 +155,7 @@ export function parseWhyMatters(text) {
  * @returns {Promise<string>}
  */
 export async function hashBriefStory(story) {
-  const material = [
+  const material = JSON.stringify([
     story.headline ?? '',
     story.source ?? '',
     story.threatLevel ?? '',
@@ -166,7 +166,7 @@ export async function hashBriefStory(story) {
     // empty string → deterministic; same-story-same-description pairs
     // still collide on purpose, different descriptions don't.
     story.description ?? '',
-  ].join('||');
+  ]);
   const bytes = new TextEncoder().encode(material);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   let hex = '';
@@ -174,7 +174,7 @@ export async function hashBriefStory(story) {
   for (let i = 0; i < view.length; i++) {
     hex += view[i].toString(16).padStart(2, '0');
   }
-  return hex.slice(0, 16);
+  return hex;
 }
 
 // ── Analyst-path prompt v2 (multi-sentence, grounded) ──────────────────────
@@ -339,7 +339,10 @@ const TITLE_PREFIX_STOP = new Set([
 
 // Joiner words — lowercase tokens that bridge proper-noun sequences.
 // "Democratic Republic of Congo" is ONE sequence, not three.
-const PROPER_NOUN_JOINER = new Set(['of', 'the', 'and', 'for', 'de', 'du', 'der', 'van', 'el', 'al']);
+// Coordinating "and"/"And"/"AND" usually ends the current sequence so
+// "Ukraine and Russia" is two names. Registered expansions and repeated-name
+// entities retain it contextually in extractProperNounSequencesWithMeta.
+const PROPER_NOUN_JOINER = new Set(['of', 'the', 'for', 'de', 'du', 'der', 'van', 'el', 'al']);
 
 // Acronym ↔ expansion table (bidirectional). When summary contains
 // either form and headline contains the other, treated as equivalent.
@@ -348,6 +351,7 @@ const PROPER_NOUN_JOINER = new Set(['of', 'the', 'and', 'for', 'de', 'du', 'der'
 // its canonical key for equivalence.
 const ACRONYM_EXPANSIONS = [
   ['WHO', 'World Health Organization'],
+  ['ICC', 'International Criminal Court'],
   ['UN', 'United Nations'],
   ['US', 'USA', 'United States', 'United States of America', 'America'],
   ['UK', 'United Kingdom', 'Britain', 'Great Britain'],
@@ -418,7 +422,7 @@ const DEMONYM_TO_NATION = new Map([
   ['Danish', 'Denmark'], ['Danes', 'Denmark'],
   ['Belgian', 'Belgium'], ['Belgians', 'Belgium'],
   ['Austrian', 'Austria'], ['Austrians', 'Austria'],
-  ['Filipino', 'Philippines'], ['Filipinos', 'Philippines'],
+  ['Philippine', 'Philippines'], ['Filipino', 'Philippines'], ['Filipinos', 'Philippines'],
   ['Thai', 'Thailand'], ['Thais', 'Thailand'],
   ['Indonesian', 'Indonesia'], ['Indonesians', 'Indonesia'],
   ['Nigerian', 'Nigeria'], ['Nigerians', 'Nigeria'],
@@ -439,6 +443,11 @@ const ACRONYM_NORMALIZE = (() => {
   }
   return map;
 })();
+
+const AND_JOINED_ACRONYM_VARIANTS = ACRONYM_EXPANSIONS
+  .flatMap((group) => group)
+  .map((variant) => variant.toLowerCase().split(/\s+/))
+  .filter((tokens) => tokens.includes('and'));
 
 const DEMONYM_NORMALIZE = (() => {
   const map = new Map();
@@ -488,6 +497,7 @@ const SENTENCE_START_AMBIGUOUS = new Set([
   'no', 'not', 'yes',
   'breaking', 'live', 'updated', 'latest', 'exclusive', 'just',
   'meanwhile', 'however', 'moreover', 'additionally', 'furthermore', 'still',
+  'simultaneously', 'concurrently', 'domestically',
   'with', 'without', 'on', 'in', 'at', 'by', 'for', 'over', 'under', 'about',
 ]);
 
@@ -515,6 +525,34 @@ function normalizeDottedAcronyms(text) {
   return text.replace(/(\b[A-Z]\.(?:[A-Z]\.?)+)/g, (match) => match.replace(/\./g, ''));
 }
 
+function properNounTokenValue(token) {
+  if (typeof token !== 'string' || token.length < 2 || !/[\p{Lu}\p{Lt}]/u.test(token)) return null;
+  const stripped = token.replace(/[.,;:'’]+$/g, '').replace(/['’]s$/i, '');
+  return (stripped || token).toLowerCase();
+}
+
+function followingTokensMatch(expectedTokens, tokens, startIndex) {
+  return expectedTokens.every((expected, index) => {
+    const actual = tokens[startIndex + index];
+    if (expected === 'and' || PROPER_NOUN_JOINER.has(expected)) {
+      return actual?.toLowerCase() === expected;
+    }
+    return properNounTokenValue(actual) === expected;
+  });
+}
+
+function shouldRetainAndJoiner(current, tokens, tokenIndex) {
+  if (current.length === 0) return false;
+  if (followingTokensMatch(current, tokens, tokenIndex + 1)) return true;
+
+  return AND_JOINED_ACRONYM_VARIANTS.some((variant) => {
+    const andIndex = variant.indexOf('and');
+    if (andIndex !== current.length) return false;
+    if (!variant.slice(0, andIndex).every((token, index) => token === current[index])) return false;
+    return followingTokensMatch(variant.slice(andIndex + 1), tokens, tokenIndex + 1);
+  });
+}
+
 export function extractProperNounSequences(text) {
   return extractProperNounSequencesWithMeta(text).map((entry) => entry.tokens);
 }
@@ -538,7 +576,7 @@ function extractProperNounSequencesWithMeta(text) {
 
   // Normalize dotted acronyms BEFORE sentence-splitting so "U.S." isn't
   // misread as a sentence boundary or split into ['U', 'S'].
-  const preprocessed = normalizeDottedAcronyms(text);
+  const preprocessed = normalizeDottedAcronyms(text).replace(/[\u2010\u2011]/g, '-');
 
   // Split into sentences so sentence-start handling can run per-sentence.
   const sentences = preprocessed.split(/[.!?]+\s+|\n+/);
@@ -564,7 +602,8 @@ function extractProperNounSequencesWithMeta(text) {
     let bridgeBuffer = []; // joiners pending — kept only if another proper noun follows
     let firstToken = true;
 
-    for (const token of tokens) {
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+      const token = tokens[tokenIndex];
       // Strip trailing punctuation and possessive 's / ’s so
       // "Beirut's" → "beirut" and "U.S." → "U.S" (handled below).
       let stripped = token.replace(/[.,;:'’]+$/g, '');
@@ -572,13 +611,14 @@ function extractProperNounSequencesWithMeta(text) {
       const tokenForLookup = stripped || token;
       const isTitlePrefix = TITLE_PREFIX_STOP.has(stripped);
       const isJoiner = PROPER_NOUN_JOINER.has(token.toLowerCase());
-      // Capitalized: at least 2 chars long. Single-letter capitalized
+      // Name casing can occur after a digit or lowercase prefix (3M, eBay).
+      // Require at least 2 chars. Single-letter capitalized
       // tokens are sentence-final initials ("...J.D. Vance was met by Smith
       // and J."), middle initials in names, or "I" (the pronoun, already
       // handled by SENTENCE_START_AMBIGUOUS). None should register as
       // a standalone proper noun.
-      const isCapitalized = token.length >= 2 && /^[A-Z]/.test(token);
-      const isAllCapsAcronym = /^[A-Z]{2,6}$/.test(token);
+      const isCapitalized = token.length >= 2 && /[\p{Lu}\p{Lt}]/u.test(token);
+      const isAllCapsAcronym = /^(?=.*\p{Lu})[\p{Lu}\p{N}]{2,6}$/u.test(token);
       const isAmbiguousSentenceStart = firstToken
         && !isAllCapsAcronym
         && SENTENCE_START_AMBIGUOUS.has(token.toLowerCase());
@@ -598,6 +638,25 @@ function extractProperNounSequencesWithMeta(text) {
       }
       const atSentenceStart = firstToken;
       firstToken = false;
+
+      // Coordinating and is normally a sequence break, not a name. Preserve it
+      // only when splitting would break a registered expansion (SEC) or let a
+      // repeated-name entity reuse one cited occurrence (Johnson and Johnson).
+      if (token.toLowerCase() === 'and') {
+        if (shouldRetainAndJoiner(current, tokens, tokenIndex)) {
+          bridgeBuffer.push('and');
+          continue;
+        }
+        if (current.length > 0) {
+          sequences.push({ tokens: current, sentenceInitial: currentStartedSentence, allCaps: currentAllCaps, firstSentence: currentFirstSentence });
+          current = [];
+          currentStartedSentence = false;
+          currentAllCaps = false;
+          currentFirstSentence = false;
+        }
+        bridgeBuffer = [];
+        continue;
+      }
 
       if (isJoiner) {
         if (current.length > 0) bridgeBuffer.push(token.toLowerCase());
@@ -772,8 +831,8 @@ function normalizeSequence(sequence) {
  * normalization). The validator catches LLM-introduced invention.
  *
  * Returns `{ ok: true }` when every summary proper-noun sequence is
- * grounded in the headline, OR when either input is malformed (defensive
- * default — ship the LLM output rather than fall back on confusion).
+ * grounded in the headline. Malformed inputs fail open by default;
+ * public citation callers opt into failClosed to withhold unvalidated text.
  *
  * Returns `{ ok: false, hallucinated: [...] }` when at least one
  * summary sequence has no matching contiguous subsequence in the
@@ -782,14 +841,15 @@ function normalizeSequence(sequence) {
  *
  * @param {string} summary - the LLM-rewritten brief paragraph
  * @param {string} headline - the source headline the LLM was given
+ * @param {{ failClosed?: boolean }} [options] - Reject unavailable validation on public citation surfaces.
  * @returns {{ ok: boolean, hallucinated?: string[] }}
  */
-export function validateNoHallucinatedProperNouns(summary, headline) {
-  // Defensive: malformed inputs return ok (ship the LLM output rather
-  // than fall back on confusion). Catches null, undefined, empty
-  // string, non-string, and weird unicode.
-  if (typeof summary !== 'string' || summary.length === 0) return { ok: true };
-  if (typeof headline !== 'string' || headline.length === 0) return { ok: true };
+export function validateNoHallucinatedProperNouns(summary, headline, { failClosed = false } = {}) {
+  // Preserve the legacy default; citation publication must opt into rejection.
+  const unavailable = () => failClosed ? { ok: false, hallucinated: [] } : { ok: true };
+  if (typeof summary !== 'string' || summary.length === 0) return unavailable();
+  if (typeof headline !== 'string' || headline.length === 0) return unavailable();
+  if (failClosed && (!summary.trim() || !headline.trim())) return unavailable();
 
   let summaryEntries, headlineSequences, headlineTokens;
   try {
@@ -811,8 +871,8 @@ export function validateNoHallucinatedProperNouns(summary, headline) {
     // included, with nothing in the log. A dead gate and a healthy gate looked
     // identical. Warn so the difference is visible, matching the pattern used
     // by checkLeadGrounding below.
-    console.warn(`[brief_grounding] proper-noun extraction threw (${err?.message ?? err}) — accepting unvalidated`);
-    return { ok: true };
+    console.warn(`[brief_grounding] proper-noun extraction threw (${err?.message ?? err}) — ${failClosed ? 'rejecting unvalidated' : 'accepting unvalidated'}`);
+    return unavailable();
   }
 
   if (summaryEntries.length === 0) return { ok: true };
@@ -889,7 +949,7 @@ const NUMBER_FACT_WORD_SEQUENCE_RE = new RegExp(
   `\\b(?:${NUMBER_FACT_WORD_PATTERN})(?:[- ](?:${NUMBER_FACT_WORD_PATTERN}|and))*\\b(?:\\s+percent\\b)?`,
   'gi',
 );
-const DIGIT_FACT_RE = /\d[\d,]*(?:\.\d+)?(?:\s*(?:%|percent|thousands?|millions?|billions?|trillions?))?/gi;
+const DIGIT_FACT_RE = /\d[\d,]*(?:\.\d+)?(?:\s*(?:%|percent|thousands?|millions?|billions?|bil\b|trillions?))?/gi;
 const DATE_MONTH_PATTERN = 'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
 const DATE_EXPRESSION_RE = new RegExp(
   `\\b(?:\\d{4}-\\d{1,2}-\\d{1,2}|\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?|(?:${DATE_MONTH_PATTERN})\\.?\\s+\\d{1,2}(?:,?\\s+\\d{4})?|\\d{1,2}\\s+(?:${DATE_MONTH_PATTERN})\\.?\\s*(?:\\d{4})?)\\b`,
@@ -908,7 +968,7 @@ function formatNumericFact(value) {
 
 function normalizeDigitFact(raw) {
   const match = raw.trim().toLowerCase().replace(/,/g, '').match(
-    /^(\d+(?:\.\d+)?)(?:\s*(%|percent|thousands?|millions?|billions?|trillions?))?$/,
+    /^(\d+(?:\.\d+)?)(?:\s*(%|percent|thousands?|millions?|billions?|bil\b|trillions?))?$/,
   );
   if (!match) return `number:${raw.trim().toLowerCase()}`;
   const value = Number(match[1]);
@@ -916,7 +976,7 @@ function normalizeDigitFact(raw) {
   const unit = match[2];
   if (!unit) return `number:${formatNumericFact(value)}`;
   if (unit === '%' || unit === 'percent') return `number:${formatNumericFact(value)}%`;
-  const scale = NUMBER_FACT_WORD_VALUES.get(unit.replace(/s$/, ''));
+  const scale = NUMBER_FACT_WORD_VALUES.get(unit === 'bil' ? 'billion' : unit.replace(/s$/, ''));
   return scale ? `number:${formatNumericFact(value * scale)}` : `number:${formatNumericFact(value)} ${unit}`;
 }
 
@@ -954,7 +1014,7 @@ function normalizeNumberWordFact(raw) {
   return `number:${formatNumericFact(value)}${percent ? '%' : ''}`;
 }
 
-function addDateFact(facts, year, month, day) {
+function addDateFact(facts, year, month, day, dateParts = true) {
   const monthNumber = Number(month);
   const dayNumber = Number(day);
   if (!Number.isInteger(monthNumber) || !Number.isInteger(dayNumber)) return;
@@ -964,36 +1024,38 @@ function addDateFact(facts, year, month, day) {
   facts.add(`date:${monthPart}-${dayPart}`);
   // Keep the components available for prose that says only "in 2026" or
   // "on the 1st" while the full date expression still requires an exact match.
-  facts.add(`number:${formatNumericFact(monthNumber)}`);
-  facts.add(`number:${formatNumericFact(dayNumber)}`);
+  if (dateParts) {
+    facts.add(`number:${formatNumericFact(monthNumber)}`);
+    facts.add(`number:${formatNumericFact(dayNumber)}`);
+  }
   if (year != null && year !== '') {
     const yearNumber = Number(year);
     if (Number.isInteger(yearNumber)) {
       facts.add(`date:${yearNumber}-${monthPart}-${dayPart}`);
-      facts.add(`number:${formatNumericFact(yearNumber)}`);
+      if (dateParts) facts.add(`number:${formatNumericFact(yearNumber)}`);
     }
   }
 }
 
-function addDateExpressionFacts(facts, raw) {
+function addDateExpressionFacts(facts, raw, dateParts) {
   const normalized = raw.trim().replace(/\s+/g, ' ');
   let match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   if (match) {
-    addDateFact(facts, match[1], match[2], match[3]);
+    addDateFact(facts, match[1], match[2], match[3], dateParts);
     return;
   }
   match = normalized.match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?$/);
   if (match) {
-    addDateFact(facts, match[3], match[1], match[2]);
+    addDateFact(facts, match[3], match[1], match[2], dateParts);
     return;
   }
   match = normalized.match(/^([A-Za-z]+)\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?$/);
   if (match) {
-    addDateFact(facts, match[3], DATE_MONTH_NUMBERS.get(match[1].toLowerCase()), match[2]);
+    addDateFact(facts, match[3], DATE_MONTH_NUMBERS.get(match[1].toLowerCase()), match[2], dateParts);
     return;
   }
   match = normalized.match(/^(\d{1,2})\s+([A-Za-z]+)\.?\s*(?:\s+(\d{4}))?$/);
-  if (match) addDateFact(facts, match[3], DATE_MONTH_NUMBERS.get(match[2].toLowerCase()), match[1]);
+  if (match) addDateFact(facts, match[3], DATE_MONTH_NUMBERS.get(match[2].toLowerCase()), match[1], dateParts);
 }
 
 /**
@@ -1002,16 +1064,21 @@ function addDateExpressionFacts(facts, raw) {
  * the same value ("9" and "nine"). This is intentionally a fact-presence
  * check, not a full source fact-checker.
  *
+ * A date also yields its month, day and year as numbers unless
+ * `dateParts: false`, which a caller listing the figures a text states uses
+ * so a count equal to a date part ("kills 9 on October 9") stays its own fact.
+ *
  * @param {string} text
+ * @param {{ dateParts?: boolean }} [options]
  * @returns {Set<string>}
  */
-export function extractNumericFacts(text) {
+export function extractNumericFacts(text, { dateParts = true } = {}) {
   const facts = new Set();
   if (typeof text !== 'string' || text.length === 0) return facts;
 
   let remaining = text.replace(/\[\d{1,3}\]/g, ' ');
   remaining = remaining.replace(DATE_EXPRESSION_RE, (match) => {
-    addDateExpressionFacts(facts, match);
+    addDateExpressionFacts(facts, match, dateParts);
     return ' '.repeat(match.length);
   });
   remaining = remaining.replace(DIGIT_FACT_RE, (match, offset, original) => {
@@ -1048,6 +1115,81 @@ export function validateNoHallucinatedFacts(summary, groundText) {
     if (!groundFacts.has(fact)) return { ok: false, hallucinated: [fact] };
   }
   return { ok: true };
+}
+
+const STATUS_QUALIFIER_CLASSES = [
+  ['former', 'ex', 'erstwhile', 'one-time', 'onetime', 'then-', 'outgoing', 'retired'],
+  ['acting', 'interim', 'caretaker'],
+  ['incoming'],
+  ['late'],
+];
+const STATUS_QUALIFIER_CLASS_OF = new Map(
+  STATUS_QUALIFIER_CLASSES.flatMap((cls) => cls.map((q) => [q.replace(/-$/, ''), cls])),
+);
+const PERSON_TITLE_WORDS =
+  'president|prime minister|vice president|premier|chancellor|minister|secretary|senator|governor|mayor|'
+  + 'chairman|chairwoman|chairperson|chair|chief|ceo|cfo|ambassador|envoy|speaker|king|queen|pope|leader|'
+  + 'commander|general|admiral|director|prosecutor|judge|justice|adviser|advisor|aide|spokesman|spokeswoman|'
+  + 'spokesperson|head|official|lawmaker|congressman|congresswoman|representative|pm';
+// Lowercase words that can sit inside an office name between the qualifier
+// and the title: "former deputy prime minister", "former national security adviser".
+const OFFICE_MODIFIER_WORDS =
+  'deputy|vice|assistant|associate|senior|national|security|foreign|defense|defence|finance|interior|'
+  + 'justice|health|trade|energy|state|army|military|intelligence|supreme|party|attorney|federal|regional';
+const CALENDAR_WORDS =
+  'Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|January|February|March|April|May|June|July|'
+  + 'August|September|October|November|December';
+// No `i` flag: under `i`, \p{Lu} also matches lowercase, so "Former officials said" reads as a named person.
+const anyCase = (/** @type {string} */ word) => word.replace(/\p{L}/gu, (c) => `[${c.toUpperCase()}${c}]`);
+const PERSON_TITLE_RE_SOURCE = PERSON_TITLE_WORDS.split('|').map(anyCase).join('|');
+// A bridge word is part of the office name: a nationality or institution
+// ("US", "Brazilian", "White House"), an office modifier, or a title word
+// ("official adviser"). Any other word ends the match, so "Former officials
+// said President Trump" and "Late on Tuesday President Trump" qualify nobody.
+const BRIDGE_WORD_RE_SOURCE = `(?:(?!(?:${CALENDAR_WORDS})\\b)\\p{Lu}[\\p{L}'’-]*`
+  + `|${OFFICE_MODIFIER_WORDS.split('|').map(anyCase).join('|')}|${PERSON_TITLE_RE_SOURCE})`;
+const STATUS_QUALIFIER_RE = new RegExp(
+  `\\b(${STATUS_QUALIFIER_CLASSES.flat().map((q) => (q.endsWith('-') ? `${anyCase(q.slice(0, -1))}(?=-)` : anyCase(q))).join('|')})[-\\s]+`
+  + `(?:${BRIDGE_WORD_RE_SOURCE}\\s+){0,3}?(?:${PERSON_TITLE_RE_SOURCE})s?\\b[-\\s]+(?:(?:of|the|for|to|and)\\s+)?(\\p{Lu}[\\p{L}'’-]+)`,
+  'gu',
+);
+
+/**
+ * @param {{ text: string; tokens: Set<string> }} ground
+ * @param {string} word
+ */
+function groundHasWord(ground, word) {
+  if (word.includes('-')) return ground.text.includes(word);
+  return ground.tokens.has(word);
+}
+
+/**
+ * Validate that every status qualifier the summary attaches to a titled,
+ * named person is carried by the ground text. `groundText` may be one string
+ * or one string per source story; with an array, the qualifier class and the
+ * name must appear in the SAME story. Malformed inputs accept, matching the
+ * sibling validators.
+ *
+ * @param {unknown} summary
+ * @param {unknown} groundText
+ * @returns {{ ok: boolean, hallucinated?: string[] }}
+ */
+export function validateNoHallucinatedStatusQualifiers(summary, groundText) {
+  if (typeof summary !== 'string' || summary.length === 0) return { ok: true };
+  const grounds = (Array.isArray(groundText) ? groundText : [groundText])
+    .filter((g) => typeof g === 'string' && g.trim().length > 0)
+    .map((g) => normalizeDottedAcronyms(g).toLowerCase())
+    .map((text) => ({ text, tokens: new Set(text.split(/[^\p{L}\p{N}]+/u)) }));
+  if (grounds.length === 0) return { ok: true };
+  const hallucinated = [];
+  for (const match of normalizeDottedAcronyms(summary).matchAll(STATUS_QUALIFIER_RE)) {
+    const qualifier = match[1].toLowerCase();
+    const name = match[2].replace(/['’]s$/i, '').toLowerCase();
+    const cls = STATUS_QUALIFIER_CLASS_OF.get(qualifier) ?? [qualifier];
+    const grounded = grounds.some((g) => cls.some((q) => groundHasWord(g, q)) && groundHasWord(g, name));
+    if (!grounded) hallucinated.push(match[0].trim());
+  }
+  return hallucinated.length === 0 ? { ok: true } : { ok: false, hallucinated };
 }
 
 /**
@@ -1251,7 +1393,7 @@ export function groundingTokenSet(text) {
 // edge-safe module — callers with a different cap pass it explicitly.
 const DEFAULT_GROUNDING_STORY_CAP = 8;
 
-export function checkLeadGrounding(synthesis, stories, storyCap = DEFAULT_GROUNDING_STORY_CAP) {
+export function checkLeadGrounding(synthesis, stories, storyCap = DEFAULT_GROUNDING_STORY_CAP, { combinedThreshold = null } = {}) {
   if (!Array.isArray(stories) || stories.length === 0) return true;
 
   const storyTokens = new Set();
@@ -1299,7 +1441,14 @@ export function checkLeadGrounding(synthesis, stories, storyCap = DEFAULT_GROUND
       combinedTokens.add(w);
     }
   }
-  const threshold = storyTokens.size >= 4 ? 2 : 1;
+  // combinedThreshold override (#7253 review): the 2-hit requirement is
+  // calibrated for a FULL 2-3 sentence lead. A lead the repair path shortened
+  // may have lost the sentence that carried the second anchor, so its caller
+  // passes 1 — requirement 1 above still stands unconditionally, which is what
+  // keeps an anchor-free mush lead rejected even at the relaxed threshold.
+  const threshold = Number.isInteger(combinedThreshold) && combinedThreshold > 0
+    ? combinedThreshold
+    : (storyTokens.size >= 4 ? 2 : 1);
   let combinedHits = 0;
   for (const tok of storyTokens) {
     if (combinedTokens.has(tok)) {

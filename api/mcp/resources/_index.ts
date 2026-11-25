@@ -37,19 +37,27 @@
 // resources/read response shape (per MCP spec):
 //   { contents: [{ uri, mimeType, text }] }
 // where `text` is the JSON-stringified payload INCLUDING `cached_at` and
-// `stale`. mimeType is `application/json` for every resource here.
+// `stale`. mimeType is `application/json` for every data resource here; the
+// static agent guide is `text/markdown`.
 
 import type {
+  McpAccessClass,
   McpAuthContext,
   McpHandlerDeps,
   PublicResourceDef,
   TemplateResourceDef,
-} from '../_types';
-import { dispatchToolsCall } from '../_dispatch';
-import { evaluateFreshness } from '../_freshness';
-import { rpcError, rpcOk, withMcpNoStore } from '../_rpc';
+} from '../types';
+import { TOOL_REGISTRY, toolAccess } from '../registry/index';
+import { dispatchToolsCall } from '../dispatch';
+import type { McpUsage } from '../usage';
+import { evaluateFreshness } from '../freshness';
+import type { McpBudget } from '../quota';
+import { readAccountAllowance } from '../_account-allowance';
+import { rpcError, rpcOk, withMcpNoStore } from '../rpc';
 import { readJsonFromUpstash } from '../../_upstash-json.js';
-import { CHOKEPOINT_SLUGS } from './_slugs';
+import { isAppOwnedRedisKey } from '../../_redis-key-ownership.js';
+import { CHOKEPOINT_SLUGS } from './slugs';
+import { AGENT_GUIDE, AGENT_GUIDE_RESOURCE_URI, CHATGPT_AGENT_GUIDE } from '../constants';
 
 // ---------------------------------------------------------------------------
 // Public resource freshness reader
@@ -65,7 +73,9 @@ import { CHOKEPOINT_SLUGS } from './_slugs';
 const MARKET_FRESHNESS_CHECK = { key: 'seed-meta:market:stocks', maxStaleMin: 30 } as const;
 
 async function readMarketFreshness(): Promise<string> {
-  const meta = await readJsonFromUpstash(MARKET_FRESHNESS_CHECK.key).catch(() => null);
+  // Seeder-owned seed-meta (#7674): the seeder fleet stamps it bare, so the
+  // probe reads raw in every environment.
+  const meta = await readJsonFromUpstash(MARKET_FRESHNESS_CHECK.key, 3_000, true).catch(() => null);
   const { cached_at, stale } = evaluateFreshness([MARKET_FRESHNESS_CHECK], [meta]);
   return JSON.stringify({ cached_at, stale });
 }
@@ -81,7 +91,60 @@ export const PUBLIC_RESOURCE_REGISTRY: PublicResourceDef[] = [
     mimeType: 'application/json',
     read: readMarketFreshness,
   },
+  {
+    // The full agent guide behind the 2 KB server instructions (see
+    // SERVER_INSTRUCTIONS_MAX_BYTES). Static documentation: no data, no auth.
+    uri: AGENT_GUIDE_RESOURCE_URI,
+    name: 'Agent Guide',
+    description: 'Full usage guide for this server: which tool fits which question, availability flags, access and weight metering, JMESPath limits, webcam and market-data semantics, and content-safety rules. Static text, anonymous and quota-free.',
+    mimeType: 'text/markdown',
+    read: async () => AGENT_GUIDE,
+  },
 ];
+
+// Account-specific status is deliberately separate from the anonymous public
+// registry and the data-bearing templates. It is returned by resources/list
+// only after a user-bound credential is resolved, and its read path performs
+// only a GET or read-only GET/PTTL Lua snapshot: no tool dispatch and no
+// allowance reservation.
+export const MCP_ALLOWANCE_RESOURCE_URI = 'worldmonitor://account/mcp-allowance';
+export const ACCOUNT_RESOURCE_LIST_RESPONSE = [{
+  uri: MCP_ALLOWANCE_RESOURCE_URI,
+  name: 'MCP Allowance Status',
+  description: 'Current authenticated account MCP usage, remaining daily units, UTC reset time, and free-account request-window status when applicable. Reading this resource consumes no allowance.',
+  mimeType: 'application/json',
+  _meta: { 'worldmonitor/access': 'free-account' as const },
+}];
+
+export function isAccountResourceUri(uri: unknown): boolean {
+  return uri === MCP_ALLOWANCE_RESOURCE_URI;
+}
+
+/** Quota-exempt authenticated resources/read handler for current allowance. */
+export async function buildAccountAllowanceResourceResponse(
+  context: McpAuthContext,
+  deps: McpHandlerDeps,
+  body: { id?: unknown; params?: unknown },
+  corsHeaders: Record<string, string>,
+  budget?: McpBudget,
+  freeAccountAllowance = false,
+  nowMs = Date.now(),
+): Promise<Response> {
+  const id = body.id ?? null;
+  const params = body.params as { uri?: unknown } | null;
+  if (!params || params.uri !== MCP_ALLOWANCE_RESOURCE_URI) {
+    return rpcError(id, -32602, 'Invalid params: missing account allowance resource uri', corsHeaders);
+  }
+  if (context.kind !== 'pro' && context.kind !== 'user_key') {
+    return rpcError(id, -32002, 'Account allowance status requires a user-bound credential.', corsHeaders);
+  }
+
+  const allowance = await readAccountAllowance(context, deps, budget, freeAccountAllowance, nowMs);
+  if (!allowance) return rpcError(id, -32603, 'Allowance status is temporarily unavailable.', corsHeaders);
+  return rpcOk(id, {
+    contents: [{ uri: MCP_ALLOWANCE_RESOURCE_URI, mimeType: 'application/json', text: JSON.stringify(allowance) }],
+  }, corsHeaders);
+}
 
 // ---------------------------------------------------------------------------
 // Template (data-bearing, gated, quota-symmetric) resources
@@ -96,7 +159,7 @@ export const TEMPLATE_RESOURCE_REGISTRY: TemplateResourceDef[] = [
   {
     uriTemplate: 'worldmonitor://countries/{iso2}/risk',
     name: 'Country Risk',
-    description: 'Composite Instability Index (CII) score 0–100 with unrest/conflict/security/news components, travel-advisory level, and OFAC sanctions exposure for a single ISO 3166-1 alpha-2 country. URI param {iso2} is lowercase alpha-2 (e.g. "de", "us", "ir").',
+    description: 'Composite Instability Index at cii.combinedScore (0–100) with its four contributing components under cii.components — historical names whose meanings are domestic unrest, armed conflict, security and mobility, and the information environment — plus advisoryLevel and OFAC exposure as sanctionsActive/sanctionsCount, for a single ISO 3166-1 alpha-2 country. Check upstreamUnavailable before trusting a low score: when true, at least one required upstream read failed and the whole response was withheld, so the zeroed fields mean UNKNOWN, not calm. URI param {iso2} is lowercase alpha-2 (e.g. "de", "us", "ir").',
     mimeType: 'application/json',
     tool: 'get_country_risk',
     // RPC tool — wrap freshness against the regional-snapshot-canonical
@@ -118,7 +181,7 @@ export const TEMPLATE_RESOURCE_REGISTRY: TemplateResourceDef[] = [
   {
     uriTemplate: 'worldmonitor://chokepoints/{slug}/status',
     name: 'Chokepoint Status',
-    description: 'Maritime chokepoint transit summary: today total / tanker / cargo counts, week-over-week change, risk level, incident count, disruption percentage, and risk narrative. URI param {slug} is one of the hand-curated kebab-case identifiers (suez, strait-of-malacca, strait-of-hormuz, bab-el-mandeb, panama-canal, taiwan-strait, cape-of-good-hope, strait-of-gibraltar, bosphorus, korea-strait, dover-strait, kerch-strait, lombok-strait).',
+    description: 'Maritime chokepoint transit summary: today total / tanker / cargo counts, week-over-week change, risk level, incident count, and disruption percentage. Generated riskSummary and riskReportAction prose is withheld as empty strings; this does not indicate low risk. URI param {slug} is one of the hand-curated kebab-case identifiers (suez, strait-of-malacca, strait-of-hormuz, bab-el-mandeb, panama-canal, taiwan-strait, cape-of-good-hope, strait-of-gibraltar, bosphorus, korea-strait, dover-strait, kerch-strait, lombok-strait).',
     mimeType: 'application/json',
     tool: 'get_chokepoint_status',
     paramExtractor: (uri: string) => {
@@ -180,6 +243,7 @@ export interface PublicResourceShape {
   name: string;
   description: string;
   mimeType: string;
+  _meta: { 'worldmonitor/access': 'free' };
 }
 
 export interface ResourceTemplateShape {
@@ -187,6 +251,7 @@ export interface ResourceTemplateShape {
   name: string;
   description: string;
   mimeType: string;
+  _meta: { 'worldmonitor/access': McpAccessClass };
 }
 
 export const RESOURCE_LIST_RESPONSE: PublicResourceShape[] = PUBLIC_RESOURCE_REGISTRY.map((r) => ({
@@ -194,14 +259,20 @@ export const RESOURCE_LIST_RESPONSE: PublicResourceShape[] = PUBLIC_RESOURCE_REG
   name: r.name,
   description: r.description,
   mimeType: r.mimeType,
+  _meta: { 'worldmonitor/access': 'free' },
 }));
 
-export const RESOURCE_TEMPLATE_LIST_RESPONSE: ResourceTemplateShape[] = TEMPLATE_RESOURCE_REGISTRY.map((r) => ({
-  uriTemplate: r.uriTemplate,
-  name: r.name,
-  description: r.description,
-  mimeType: r.mimeType,
-}));
+export const RESOURCE_TEMPLATE_LIST_RESPONSE: ResourceTemplateShape[] = TEMPLATE_RESOURCE_REGISTRY.map((r) => {
+  const tool = TOOL_REGISTRY.find((candidate) => candidate.name === r.tool);
+  if (!tool) throw new Error(`Resource template ${r.uriTemplate} references unknown tool ${r.tool}`);
+  return {
+    uriTemplate: r.uriTemplate,
+    name: r.name,
+    description: r.description,
+    mimeType: r.mimeType,
+    _meta: { 'worldmonitor/access': toolAccess(tool) },
+  };
+});
 
 // Exact-match set of the concrete public URIs. The handler consults this to
 // decide whether a `resources/read` is anonymously servable — ONLY the exact
@@ -220,12 +291,13 @@ export function isPublicResourceUri(uri: unknown): boolean {
 // Serves a concrete PUBLIC_RESOURCE_REGISTRY entry via its direct `read()`.
 // No auth context, no dispatchToolsCall, no Pro reservation — the content is
 // metadata-only (a freshness envelope), so this is safe to serve to an
-// anonymous caller, mirroring `prompts/list` / `describe_tool`. The handler
+// anonymous caller, mirroring `prompts/list`. The handler
 // only routes a request here when `isPublicResourceUri(uri)` is true, so the
 // `-32602` fallback below is a fail-explicit guard for a broken invariant.
 export async function buildPublicResourceResponse(
   body: { id?: unknown; params?: unknown },
   corsHeaders: Record<string, string>,
+  { informOnly = false }: { informOnly?: boolean } = {},
 ): Promise<Response> {
   const outerId = body.id ?? null;
   const params = body.params as { uri?: unknown } | null;
@@ -243,7 +315,8 @@ export async function buildPublicResourceResponse(
   // runtime. The current reader (readMarketFreshness) already catches internally.
   let text: string;
   try {
-    text = await def.read();
+    // An inform-only host (ChatGPT) reads the guide without plan billing copy.
+    text = informOnly && def.uri === AGENT_GUIDE_RESOURCE_URI ? CHATGPT_AGENT_GUIDE : await def.read();
   } catch {
     return rpcError(outerId, -32603, 'Internal error: resource reader failed', corsHeaders);
   }
@@ -288,7 +361,17 @@ export async function buildResourceResponse(
   // Forwarded verbatim to the dispatcher so a template read is capped at the
   // caller's PLAN allowance, exactly like the equivalent tools/call. Dropping
   // it here would reopen the quota asymmetry this path exists to close.
-  mcpDailyLimit?: number | null,
+  budget?: McpBudget,
+  freeAccountAllowance?: boolean,
+  // Forwarded so a denial raised inside the dispatcher carries the same
+  // WWW-Authenticate as the equivalent tools/call (#6716).
+  resourceMetadataUrl?: string,
+  // Forwarded so a quota denial names the same upgrade plan (#9144).
+  planKey?: string,
+  // Forwarded so the request's wm_api_usage row records the tool outcome (#9431).
+  usage?: McpUsage,
+  // Forwarded so a paused subscriber's denial names the billing portal (#11213).
+  paymentFailed?: boolean,
 ): Promise<Response> {
   const outerId = body.id ?? null;
   const params = body.params as { uri?: unknown } | null;
@@ -333,7 +416,23 @@ export async function buildResourceResponse(
   // budget gate, and telemetry emission. Returns a Response with
   // the standard JSON-RPC envelope. We parse, repackage, and re-emit
   // under the OUTER id.
-  const dispatched = await dispatchToolsCall(req, context, deps, innerBody, corsHeaders, ctx, mcpDailyLimit);
+  const dispatched = await dispatchToolsCall(
+    req,
+    context,
+    deps,
+    innerBody,
+    corsHeaders,
+    ctx,
+    budget,
+    freeAccountAllowance,
+    resourceMetadataUrl,
+    undefined,
+    planKey,
+    usage,
+    undefined,
+    undefined,
+    paymentFailed,
+  );
 
   // Parse the dispatched body. dispatched.json() is safe — the dispatcher
   // always emits JSON-RPC, never streams or returns null bodies for these
@@ -348,15 +447,17 @@ export async function buildResourceResponse(
     // a 200 with _budget_exceeded inside content[0].text — handled below
     // as a success-shape envelope, not an error — see PR 4 design).
     //
-    // Forward Retry-After from the inner response so quota-exhaustion
-    // (429 with seconds-until-UTC-midnight) and reservation-failure (503
-    // with 5s) honour the same client back-off contract tools/call does.
-    // Without this, a correctly-implemented client back-off would retry
-    // immediately on resources/read while waiting correctly on tools/call
-    // — directly contradicting the auth-symmetry contract.
+    // Forward Retry-After and X-Billing-Verification from the inner response
+    // so quota-exhaustion (429 with seconds-until-UTC-midnight),
+    // reservation-failure (503 with 5s), and mid-call billing denials
+    // honour the same client contract tools/call does. Dropping
+    // X-Billing-Verification (#7269) made a 503 look like rate-limit
+    // degradation and a 403 look like an ordinary tier precheck.
     const errorHeaders: Record<string, string> = withMcpNoStore({ 'Content-Type': 'application/json', ...corsHeaders });
-    const retryAfter = dispatched.headers.get('Retry-After');
-    if (retryAfter !== null) errorHeaders['Retry-After'] = retryAfter;
+    for (const name of ['Retry-After', 'X-Billing-Verification'] as const) {
+      const value = dispatched.headers.get(name);
+      if (value !== null) errorHeaders[name] = value;
+    }
     return new Response(
       JSON.stringify({ jsonrpc: '2.0', id: outerId, error: innerBodyParsed.error }),
       { status: dispatched.status, headers: errorHeaders },
@@ -400,7 +501,11 @@ export async function buildResourceResponse(
       wrappedText = innerText;
     } else {
       const { seedMetaKey, maxStaleMin } = matched.def.freshnessWrap;
-      const meta = await readJsonFromUpstash(seedMetaKey).catch(() => null);
+      const meta = await readJsonFromUpstash(
+        seedMetaKey,
+        3_000,
+        !isAppOwnedRedisKey(seedMetaKey),
+      ).catch(() => null);
       const { cached_at, stale } = evaluateFreshness(
         [{ key: seedMetaKey, maxStaleMin }],
         [meta],

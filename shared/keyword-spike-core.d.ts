@@ -7,6 +7,7 @@ export declare const LEADER_PATTERNS: Array<{ name: string; pattern: RegExp }>;
 export declare const ROLLING_WINDOW_MS: number;
 export declare const BASELINE_WINDOW_MS: number;
 export declare const MIN_TOKEN_LENGTH: number;
+export declare const MAX_TERM_TITLE_CHARS: number;
 export declare const MIN_SPIKE_SOURCE_COUNT: number;
 export declare const DEFAULT_MIN_SPIKE_COUNT: number;
 export declare const DEFAULT_SPIKE_MULTIPLIER: number;
@@ -32,6 +33,13 @@ export interface CorpusStory {
   title: string;
   lastSeenMs: number;
   sources?: string[];
+  link?: string;
+}
+
+export interface CorpusSampleHeadline {
+  title: string;
+  source: string;
+  link: string;
 }
 
 export interface CorpusSpike {
@@ -41,7 +49,8 @@ export interface CorpusSpike {
   multiplier: number;
   windowMs: number;
   uniqueSources: number;
-  sampleHeadlines: string[];
+  sourceNames: string[];
+  sampleHeadlines: CorpusSampleHeadline[];
 }
 
 export declare function toTermKey(term: string): string;

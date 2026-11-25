@@ -3,18 +3,28 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import {
+  PROVIDER_IDENTITY_GROUPS,
+  PROVIDER_IDENTITY_REVIEW,
+  activeSourceAttributionEntries,
   buildManifest,
+  buildSourceAttributionStats,
   checkSourceAttribution,
   loadManifest,
   matchGeneratedAttributionSection,
   renderAttributionSection,
   runSourceAttribution,
   scanUpstreamHosts,
+  sourceAttributionLedgerStats,
   sourceAttributionStats,
+  validateSourceAttributionLedger,
   validateManifest,
+  validateProviderIdentityGroups,
+  providerIdentityDigest,
 } from '../scripts/source-attribution.mjs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { catalogProviderIdentities } from '../scripts/source-catalog-identity.mjs';
+import { rawCatalogProviderNames, rawManifestActiveEntries } from './helpers/raw-catalog-providers.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -25,7 +35,7 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
  */
 function makeFixtureCheckout() {
   const dir = mkdtempSync(join(tmpdir(), 'source-attribution-'));
-  for (const root of ['scripts/shared', 'server', 'api', 'src', 'shared', 'docs']) {
+  for (const root of ['scripts', 'server', 'api', 'src', 'shared', 'docs']) {
     mkdirSync(join(dir, root), { recursive: true });
   }
   writeFileSync(
@@ -35,12 +45,10 @@ function makeFixtureCheckout() {
   const inventory = scanUpstreamHosts(dir);
   const manifest = buildManifest(inventory, { entries: [], logicalEntries: [] });
   const manifestPath = join(dir, 'shared/source-attribution-manifest.json');
-  const mirrorPath = join(dir, 'scripts/shared/source-attribution-manifest.json');
   const docsPath = join(dir, 'docs/source-attribution.mdx');
   const writeManifest = (value) => {
     const serialized = `${JSON.stringify(value, null, 2)}\n`;
     writeFileSync(manifestPath, serialized);
-    writeFileSync(mirrorPath, serialized);
   };
   const writeDocs = (value) => writeFileSync(
     docsPath,
@@ -52,7 +60,6 @@ function makeFixtureCheckout() {
     dir,
     manifest,
     manifestPath,
-    mirrorPath,
     docsPath,
     writeManifest,
     writeDocs,
@@ -63,7 +70,6 @@ function makeFixtureCheckout() {
 function readFixtureArtifacts(fixture) {
   return {
     manifest: readFileSync(fixture.manifestPath, 'utf8'),
-    mirror: readFileSync(fixture.mirrorPath, 'utf8'),
     docs: readFileSync(fixture.docsPath, 'utf8'),
   };
 }
@@ -77,6 +83,15 @@ test('source inventory has complete metadata and matches the generated catalog',
   const generated = renderAttributionSection(inventory, manifest);
   const actual = matchGeneratedAttributionSection(docs);
   assert.equal(actual, generated, 'docs/source-attribution.mdx must contain exactly the generated attribution section');
+  assert.match(generated, /\| Provider \| Observed surface \|/);
+  for (const forbidden of [
+    /\blicen[cs]\w*/i,
+    /\bterms-review\b/i,
+    /\bredistribut\w*/i,
+    /\bcommercial(?:-|\s+)use\b/i,
+  ]) {
+    assert.doesNotMatch(docs, forbidden, `public source attribution docs must omit ${forbidden}`);
+  }
 
   // Mintlify parses these pages as MDX v3, which rejects `<!--` with
   // "Unexpected character `!` (U+0021) before name" and fails the whole
@@ -94,12 +109,233 @@ test('source inventory has complete metadata and matches the generated catalog',
   }
 
   const stats = sourceAttributionStats(inventory, manifest);
-  // Includes the licensed direct-feed pack and its provider-neutral logical
-  // origin rows. Recompute these from the generated manifest when sources move.
-  assert.equal(stats.activeHosts, 547);
-  assert.equal(stats.providerCount, 545);
-  assert.equal(stats.observedHosts, 666);
-  assert.ok(stats.reviewNeeded > 0, 'terms-review rows must remain visible until a license audit is complete');
+  const activeEntries = rawManifestActiveEntries(manifest);
+  const inventoryHosts = new Set(inventory.map((entry) => entry.host));
+  const observedManifestHosts = new Set(
+    manifest.entries.filter((entry) => entry.observed === true).map((entry) => entry.host),
+  );
+  assert.ok(activeEntries.length > 0, 'the active source oracle must not be empty');
+  assert.deepEqual(observedManifestHosts, inventoryHosts, 'raw manifest membership must match the source scan exactly');
+  assert.equal(stats.activeHosts, activeEntries.length, 'production stats must match the independent active-host oracle');
+  assert.deepEqual(
+    [...catalogProviderIdentities(manifest)].sort(),
+    [...rawCatalogProviderNames(manifest)].sort(),
+    'production identities must match the independent provider oracle membership',
+  );
+  assert.equal(
+    stats.providerCount,
+    rawCatalogProviderNames(manifest).size,
+    'production stats must match the independent provider oracle',
+  );
+  assert.equal(stats.observedHosts, inventory.length, 'observed stats must derive from the source scan');
+  assert.ok(stats.reviewNeeded > 0, 'the internal source-policy review backlog must remain tracked');
+
+  const byHost = new Map(manifest.entries.map((entry) => [entry.host, entry]));
+  assert.equal(byHost.get('auth.opensky-network.org')?.provider, 'opensky-network.org');
+  assert.equal(byHost.get('opensky-network.org')?.provider, 'opensky-network.org');
+  assert.equal(byHost.get('customer-api.wingbits.com')?.provider, 'wingbits.com');
+  assert.equal(byHost.get('ecs-api.wingbits.com')?.provider, 'wingbits.com');
+});
+
+const NEWS_CATALOG_PATH = 'shared/news-catalog.json';
+
+function loadNewsCatalog() {
+  return JSON.parse(readFileSync(join(rootDir, NEWS_CATALOG_PATH), 'utf8'));
+}
+
+function catalogHrefs(feed) {
+  return [feed.url, feed.browser?.url]
+    .flatMap((value) => (typeof value === 'string' ? [value] : Object.values(value ?? {})));
+}
+
+function sitePublisherHosts(href) {
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return [];
+  }
+  if (url.hostname !== 'news.google.com') return [];
+  const query = url.searchParams.get('q') ?? '';
+  return [...query.matchAll(/\bsite:([a-z0-9.-]+)/gi)].map((match) => match[1].toLowerCase());
+}
+
+test('Google News site feeds account for both the editorial host and Google News', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const byHost = new Map(inventory.map((entry) => [entry.host, entry]));
+  const catalog = loadNewsCatalog();
+
+  const googleNews = byHost.get('news.google.com');
+  assert.ok(googleNews, 'Google News must remain an accounted transport host');
+
+  // Each publisher stays accounted under its own host, cites the catalog, and
+  // is still served to both the dashboard and the server digest.
+  for (const [host, provider] of [
+    ['lorientlejour.com', "L'Orient Today"],
+    ['annahar.com', 'Annahar'],
+    ['pap.pl', 'PAP'],
+    ['wyborcza.pl', 'Gazeta Wyborcza'],
+    ['polityka.pl', 'Polityka'],
+    ['wiadomosci.onet.pl', 'Onet'],
+    ['oko.press', 'OKO.press'],
+    ['tvp.info', 'TVP Info'],
+  ]) {
+    const entry = byHost.get(host);
+    assert.ok(entry, `${provider} must be accounted under ${host}`);
+    assert.ok(
+      entry.references.some((reference) => reference.path === NEWS_CATALOG_PATH),
+      `${provider} must cite the news catalog`,
+    );
+    const feeds = catalog.feeds.filter((feed) => catalogHrefs(feed)
+      .some((href) => sitePublisherHosts(href).includes(host) || href.includes(`//${host}/`) || href.includes(`.${host}/`)));
+    assert.ok(feeds.length > 0, `${provider} must have a catalog feed`);
+    const placements = feeds.flatMap((feed) => feed.placements);
+    assert.ok(placements.some((placement) => placement.browserOrder !== undefined), `${provider} must keep its client placement`);
+    assert.ok(placements.some((placement) => placement.serverOrder !== undefined), `${provider} must keep its server placement`);
+  }
+
+  const configuredPublisherHosts = new Set();
+  for (const feed of catalog.feeds) {
+    if (!feed.placements.some((placement) => placement.serverOrder !== undefined)) continue;
+    for (const href of [feed.url, feed.depthUrl].filter(Boolean)) {
+      for (const host of sitePublisherHosts(href)) configuredPublisherHosts.add(host);
+    }
+  }
+  assert.ok(configuredPublisherHosts.size > 20, 'server site-scoped publishers must be extracted');
+  const missingHosts = [...configuredPublisherHosts]
+    .filter((host) => !byHost.has(host))
+    .sort();
+  assert.deepEqual(
+    missingHosts,
+    [],
+    'every site-scoped publisher must be accounted under its own configured host',
+  );
+});
+
+test('provider identity groups declare complete reviewed multi-host membership', () => {
+  const manifest = loadManifest(rootDir);
+  assert.deepEqual(validateProviderIdentityGroups(manifest), []);
+  for (const [groupId, group] of Object.entries(PROVIDER_IDENTITY_GROUPS)) {
+    assert.ok(group.reason.trim(), `${groupId} must explain why its hosts are one provider`);
+    assert.match(group.reviewReference, /(?:PR|issue|review)\s+#?\d+/i, `${groupId} needs a review reference`);
+    const manifestHosts = manifest.entries
+      .filter((entry) => entry.provider === group.provider)
+      .map((entry) => entry.host)
+      .sort();
+    assert.deepEqual(manifestHosts, [...group.memberHosts].sort(), `${groupId} must declare every ledger host`);
+  }
+});
+
+test('provider collisions and incomplete identity groups fail closed', () => {
+  const collision = {
+    entries: ['a.example', 'b.example'].map((host) => ({
+      host,
+      provider: 'Accidentally Shared',
+      observed: true,
+      status: 'terms-review',
+    })),
+  };
+  assert.ok(
+    validateProviderIdentityGroups(collision).some((error) => error.includes('undeclared identity collision')),
+    'a shared provider label must not silently collapse two hosts',
+  );
+
+  const groups = {
+    shared: {
+      provider: 'Declared Shared',
+      memberHosts: ['a.example', 'b.example'],
+      reason: 'Reviewed shared service identity.',
+      reviewReference: 'PR #1',
+    },
+  };
+  const overrides = {
+    'a.example': { provider: 'Declared Shared', identityGroup: 'shared' },
+    'b.example': { provider: 'Declared Shared', identityGroup: 'shared' },
+  };
+  const incomplete = {
+    entries: [{ host: 'a.example', provider: 'Declared Shared', observed: true, status: 'reviewed' }],
+  };
+  assert.ok(
+    validateProviderIdentityGroups(incomplete, groups, overrides)
+      .some((error) => error.includes('manifest membership') && error.includes('b.example')),
+    'a declared group must preserve its complete host set',
+  );
+
+  assert.ok(
+    validateProviderIdentityGroups({ entries: [] }, groups, overrides)
+      .some((error) => error.includes('manifest membership') && error.includes('(empty)')),
+    'deleting an entire declared group must require an explicit group retirement review',
+  );
+});
+
+test('single-host provider identity changes require a reviewed lifecycle epoch', () => {
+  const overrides = {
+    'single.example': { provider: 'Original Provider' },
+  };
+  const review = {
+    sha256: providerIdentityDigest(overrides),
+    reason: 'Fixture baseline.',
+    reviewReference: 'PR #1',
+  };
+  assert.deepEqual(validateProviderIdentityGroups({ entries: [] }, {}, overrides, review), []);
+  overrides['single.example'].provider = 'Renamed Provider';
+  assert.ok(
+    validateProviderIdentityGroups({ entries: [] }, {}, overrides, review)
+      .some((error) => error.includes('without a reviewed lifecycle epoch')),
+    'a single-host provider rename must update the explicit identity review epoch',
+  );
+
+  const manifest = loadManifest(rootDir);
+  const directRename = structuredClone(manifest);
+  const defaultNamedEntry = directRename.entries.find(
+    (entry) => entry.observed && entry.status !== 'excluded' && entry.provider === entry.host,
+  );
+  assert.ok(defaultNamedEntry, 'the direct-rename mutation needs a default-named provider');
+  defaultNamedEntry.provider = 'Silently Renamed Provider';
+  assert.ok(
+    validateManifest(scanUpstreamHosts(rootDir), directRename)
+      .some((error) => error.includes('must be declared in PROVIDER_OVERRIDES')),
+    'a direct single-host manifest rename must declare an explicit reviewed identity override',
+  );
+  assert.match(PROVIDER_IDENTITY_REVIEW.reviewReference, /(?:PR|issue|review)\s+#?\d+/i);
+});
+
+test('the independent raw-manifest oracle catches an active-predicate mutation', async () => {
+  const sourcePath = join(rootDir, 'scripts/source-attribution.mjs');
+  const source = readFileSync(sourcePath, 'utf8');
+  const originalPredicate = "return entry?.observed === true && entry.catalogActive !== false && CREDIT_BEARING_STATUSES.has(entry.status);";
+  assert.equal(source.split(originalPredicate).length - 1, 1, 'mutation target must identify the canonical predicate once');
+  const mutantDir = mkdtempSync(join(tmpdir(), 'source-attribution-mutant-'));
+  const mutantPath = join(mutantDir, 'source-attribution-mutant.mjs');
+  try {
+    writeFileSync(
+      mutantPath,
+      source
+        .replace(
+          "from './source-catalog-identity.mjs'",
+          `from ${JSON.stringify(pathToFileURL(join(rootDir, 'scripts/source-catalog-identity.mjs')).href)}`,
+        )
+        .replace(originalPredicate, "return entry?.observed === true && entry.status === 'excluded';"),
+    );
+    const mutant = await import(`${pathToFileURL(mutantPath).href}?test=${Date.now()}`);
+    const manifest = loadManifest(rootDir);
+    const expectedHosts = rawManifestActiveEntries(manifest).map((entry) => entry.host).sort();
+    const mutantHosts = mutant.activeSourceAttributionEntries(manifest).map((entry) => entry.host).sort();
+    assert.notDeepEqual(mutantHosts, expectedHosts, 'the independent oracle must reject a mutated active predicate');
+  } finally {
+    rmSync(mutantDir, { recursive: true, force: true });
+  }
+});
+
+test('credits the restricted-party dataset on the host that serves its release assets', () => {
+  const manifest = loadManifest(rootDir);
+  const active = activeSourceAttributionEntries(manifest);
+  const provider = active.find((entry) => entry.host === 'release-assets.githubusercontent.com');
+  assert.equal(provider?.provider, 'US Restricted Parties feed (Tensorust LLC)');
+  assert.match(provider.license, /CC BY 4\.0/);
+  assert.match(provider.attribution, /Tensorust LLC/);
+  assert.deepEqual(provider.references, [{ path: 'scripts/_us-restricted-sanctions.mjs' }]);
+  assert.equal(active.some((entry) => entry.host === 'github.com'), false);
 });
 
 test('the issue audit providers are represented by named attribution rows', () => {
@@ -138,9 +374,116 @@ test('the issue audit providers are represented by named attribution rows', () =
     'ReliefWeb (UN OCHA)',
     'NSIDC',
     'Fintraffic Digitraffic',
+    'Toronto Police Service',
+    'Toronto Police Service Open Data',
+    'GTA Update',
   ]) {
     assert.ok(names.has(provider), `missing named provider row: ${provider}`);
   }
+});
+
+test('City of Toronto CART host stays terms-review while CKAN licence_id is notspecified', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const manifest = loadManifest(rootDir);
+  const observed = inventory.find((entry) => entry.host === 'secure.toronto.ca');
+  assert.ok(observed, 'secure.toronto.ca must be observed from the Toronto seeder/adapter');
+  const entry = [...manifest.entries, ...manifest.logicalEntries].find((row) => row.host === 'secure.toronto.ca');
+  assert.ok(entry, 'secure.toronto.ca must have a generated attribution row');
+  assert.equal(entry.status, 'terms-review');
+  assert.equal(entry.provider, 'City of Toronto Open Data');
+});
+
+test('GTA Update records permission but stays inactive pending activation gates', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const manifest = loadManifest(rootDir);
+  const observed = inventory.find((entry) => entry.host === 'gtaupdate.com');
+  assert.ok(observed, 'gtaupdate.com must be observed from the GTA Update adapter');
+  const entry = [...manifest.entries, ...manifest.logicalEntries].find((row) => row.host === 'gtaupdate.com');
+  assert.ok(entry, 'gtaupdate.com must have a generated attribution row');
+  assert.equal(entry.status, 'reviewed');
+  assert.equal(entry.provider, 'GTA Update');
+  assert.match(entry.license, /Reuse permission held by WorldMonitor/);
+  assert.match(entry.license, /upstream provenance/);
+  assert.equal(entry.catalogActive, false);
+  assert.equal(activeSourceAttributionEntries(manifest).some((row) => row.host === 'gtaupdate.com'), false);
+  assert.equal(rawManifestActiveEntries(manifest).some((row) => row.host === 'gtaupdate.com'), false);
+});
+
+test('NBS saved-response extraction records permission without live catalog activation', () => {
+  const manifest = loadManifest(rootDir);
+  const entry = manifest.entries.find((row) => row.host === 'data.stats.gov.cn');
+  assert.ok(entry, 'the NBS extractor must retain its attribution record');
+  assert.equal(entry.observed, true);
+  assert.equal(entry.status, 'reviewed');
+  assert.match(entry.license, /NBS Terms of Service section III/);
+  assert.equal(entry.catalogActive, false);
+  assert.equal(activeSourceAttributionEntries(manifest).some((row) => row.host === entry.host), false);
+  assert.equal(rawManifestActiveEntries(manifest).some((row) => row.host === entry.host), false);
+});
+
+test('TPS MCI records the exact OGL-Ontario licence before reviewed', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const manifest = loadManifest(rootDir);
+  for (const host of ['data.tps.ca', 'www.tps.ca']) {
+    assert.ok(inventory.some((entry) => entry.host === host), `${host} must be observed`);
+    const entry = [...manifest.entries, ...manifest.logicalEntries].find((row) => row.host === host);
+    assert.ok(entry, `${host} must have a generated attribution row`);
+    assert.equal(entry.status, 'reviewed');
+    assert.equal(entry.provider, 'Toronto Police Service Open Data');
+    assert.match(entry.license, /Open Government Licence - Ontario/);
+    assert.match(entry.attribution, /Contains information licensed under the Open Government Licence - Ontario/);
+    assert.match(entry.license, /0a239a5563a344a3bbf8452504ed8d68/);
+    assert.doesNotMatch(entry.license, /46c7581a136445c78831acb657a4fb0d/);
+    assert.doesNotMatch(entry.license, /C4S_Public_NoGO/);
+    assert.doesNotMatch(entry.license, /privacy-filtered public live/);
+  }
+});
+
+test('current TPS Calls CKAN hosts record the unresolved package licence', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const manifest = loadManifest(rootDir);
+  for (const host of ['ckan0.cf.opendata.inter.prod-toronto.ca', 'open.toronto.ca']) {
+    assert.ok(inventory.some((entry) => entry.host === host), `${host} must be observed`);
+    const entry = [...manifest.entries, ...manifest.logicalEntries].find((row) => row.host === host);
+    assert.ok(entry, `${host} must have a generated attribution row`);
+    assert.equal(entry.status, 'terms-review');
+    assert.equal(entry.provider, 'City of Toronto Open Data');
+    assert.match(entry.license, /license_id=notspecified/);
+    assert.match(entry.license, /bfffadee-e6e5-4404-8455-e67e9ea11ba7/);
+    assert.match(entry.attribution, /Calls for Service Attended/);
+    assert.doesNotMatch(entry.attribution, /Open Government Licence/);
+  }
+});
+
+test('C4S CAD and TPS Open Data stay distinct catalog identities on the shared ArcGIS host', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const manifest = loadManifest(rootDir);
+  assert.ok(inventory.some((entry) => entry.host === 'services.arcgis.com'), 'services.arcgis.com must be observed');
+  const cad = [...manifest.entries, ...manifest.logicalEntries].find((row) => row.host === 'services.arcgis.com');
+  assert.ok(cad, 'services.arcgis.com must have a generated attribution row');
+  assert.equal(cad.status, 'reviewed');
+  assert.equal(cad.provider, 'Toronto Police Service');
+  assert.match(cad.license, /C4S_Public_NoGO/);
+  assert.match(cad.license, /Not Major Crime Indicators \/ YTD/);
+  assert.match(cad.attribution, /Toronto Police Service, Calls for Service/);
+  assert.doesNotMatch(cad.license, /0a239a5563a344a3bbf8452504ed8d68/);
+  assert.doesNotMatch(cad.license, /46c7581a136445c78831acb657a4fb0d/);
+  assert.doesNotMatch(cad.license, /deliberately offset/);
+  assert.doesNotMatch(cad.provider, /Open Data/);
+
+  const names = catalogProviderIdentities(manifest);
+  assert.ok(names.has('Toronto Police Service'), 'C4S must remain a live catalog identity');
+  assert.ok(names.has('Toronto Police Service Open Data'), 'Open Data must remain a live catalog identity');
+  assert.equal(
+    PROVIDER_IDENTITY_GROUPS['tps-open-data'].memberHosts.includes('services.arcgis.com'),
+    false,
+    'the Open Data identity group must not absorb the C4S ArcGIS host',
+  );
+  assert.deepEqual([...PROVIDER_IDENTITY_GROUPS['tps-open-data'].memberHosts].sort(), ['data.tps.ca', 'www.tps.ca']);
+  assert.deepEqual(
+    [...PROVIDER_IDENTITY_GROUPS['city-of-toronto-open-data'].memberHosts].sort(),
+    ['ckan0.cf.opendata.inter.prod-toronto.ca', 'open.toronto.ca', 'secure.toronto.ca'],
+  );
 });
 
 test('uppercase URL constants are included in the upstream inventory', () => {
@@ -152,9 +495,9 @@ test('uppercase URL constants are included in the upstream inventory', () => {
 
 test('live HLS playback origins are observed with an explicit presentation exclusion', () => {
   const inventory = scanUpstreamHosts(rootDir);
-  assert.ok(inventory.some((entry) => entry.host === 'pe-fa-lp02a.9c9media.com'));
+  assert.ok(inventory.some((entry) => entry.host === 'live-hls-apps-aje-fa.getaj.net'));
   const manifest = loadManifest(rootDir);
-  const entry = manifest.entries.find((candidate) => candidate.host === 'pe-fa-lp02a.9c9media.com');
+  const entry = manifest.entries.find((candidate) => candidate.host === 'live-hls-apps-aje-fa.getaj.net');
   assert.equal(entry?.status, 'excluded');
   assert.match(entry?.attribution ?? '', /presentation-only HLS stream/);
 });
@@ -229,6 +572,258 @@ test('manifest and scanner references record a path only', () => {
       assert.deepEqual(Object.keys(reference), ['path'], `scanner emitted ${JSON.stringify(reference)}`);
     }
   }
+});
+
+test('scanUpstreamHosts does not crash on empty leftover api/[domain]/v1 trees', () => {
+  const fixture = makeFixtureCheckout();
+  try {
+    mkdirSync(join(fixture.dir, 'api', '[__docs_stats_probe__]', 'v1'), { recursive: true });
+    assert.doesNotThrow(() => scanUpstreamHosts(fixture.dir));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+function writeUrlModule(path, host) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `const SOURCE_URL = 'https://${host}/v1/data';\nexport const url = SOURCE_URL;\n`);
+}
+
+test('catalog Google News URLs count their site: publisher; a retired query quoted in notes does not', () => {
+  const fixture = makeFixtureCheckout();
+  try {
+    writeFileSync(join(fixture.dir, 'shared/news-catalog.json'), `${JSON.stringify({
+      feeds: [{
+        name: 'Native',
+        url: 'https://native.example/rss',
+        depthUrl: 'https://news.google.com/rss/search?q=site%3Adepth.example%20when%3A2d&hl=en-US&gl=US&ceid=US:en',
+        notes: ["Replaces gn('site:retired.example when:1d') and https://retired-url.example/rss."],
+        placements: [{ edition: 'full', category: 'politics', serverOrder: 0 }],
+      }],
+      categoryNotes: [{ side: 'server', edition: 'full', category: 'politics', note: 'Moved off https://retired-category.example/feed.' }],
+    }, null, 2)}\n`);
+    const hosts = scanUpstreamHosts(fixture.dir).map((entry) => entry.host);
+    assert.ok(hosts.includes('native.example'), 'a catalog feed URL is accounted');
+    assert.ok(!hosts.includes('retired-url.example'), 'a retired URL quoted in feed notes stays out of the inventory');
+    assert.ok(!hosts.includes('retired-category.example'), 'a URL quoted in category notes stays out of the inventory');
+    assert.ok(hosts.includes('depth.example'), 'a site-scoped Google News URL counts its publisher');
+    assert.ok(!hosts.includes('retired.example'), 'a retired query quoted in notes stays out of the inventory');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('a note whose text equals an active catalog URL does not hide that URL', () => {
+  const fixture = makeFixtureCheckout();
+  try {
+    writeFileSync(join(fixture.dir, 'shared/news-catalog.json'), `${JSON.stringify({
+      feeds: [
+        {
+          name: 'Active',
+          url: 'https://active.example/rss',
+          placements: [{ edition: 'full', category: 'politics', serverOrder: 0 }],
+        },
+        {
+          name: 'Annotated',
+          url: 'https://other.example/rss',
+          notes: ['https://active.example/rss'],
+          placements: [{ edition: 'full', category: 'politics', serverOrder: 1 }],
+        },
+      ],
+    }, null, 2)}\n`);
+    const hosts = scanUpstreamHosts(fixture.dir).map((entry) => entry.host);
+    assert.ok(hosts.includes('active.example'), 'masking a note must not blank an identical active URL field');
+    assert.ok(hosts.includes('other.example'));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('the source walk ignores generated inventory modules and compiled handler siblings', () => {
+  const fixture = makeFixtureCheckout();
+  try {
+    writeUrlModule(join(fixture.dir, 'api/_inventory-facts.generated.js'), 'pollution-generated.example');
+    writeUrlModule(join(fixture.dir, 'api/worldmonitor/probe/v1/list-probe.ts'), 'authored-ts.example');
+    writeUrlModule(join(fixture.dir, 'api/worldmonitor/probe/v1/list-probe.js'), 'pollution-compiled.example');
+    writeUrlModule(join(fixture.dir, 'api/authored-handler.js'), 'authored-js.example');
+    writeUrlModule(join(fixture.dir, 'scripts/legacy-probe.js'), 'scripts-js.example');
+    writeUrlModule(join(fixture.dir, 'scripts/legacy-probe.ts'), 'scripts-ts.example');
+
+    const inventory = scanUpstreamHosts(fixture.dir);
+    const hosts = inventory.map((entry) => entry.host).sort();
+    assert.deepEqual(
+      hosts,
+      ['authored-js.example', 'authored-ts.example', 'fixture.example', 'scripts-js.example', 'scripts-ts.example'],
+      'generated *.generated.* files and compiled api/ .js siblings of .ts handlers must not enter the inventory',
+    );
+    assert.equal(
+      inventory.find((entry) => entry.host === 'authored-ts.example')?.references[0]?.path,
+      'api/worldmonitor/probe/v1/list-probe.ts',
+    );
+    assert.equal(
+      inventory.find((entry) => entry.host === 'authored-js.example')?.references[0]?.path,
+      'api/authored-handler.js',
+    );
+    assert.equal(
+      inventory.find((entry) => entry.host === 'scripts-js.example')?.references[0]?.path,
+      'scripts/legacy-probe.js',
+    );
+    assert.equal(
+      inventory.find((entry) => entry.host === 'scripts-ts.example')?.references[0]?.path,
+      'scripts/legacy-probe.ts',
+    );
+
+    const { errors } = checkSourceAttribution(fixture.dir);
+    assert.ok(
+      errors.some((error) => error.includes('missing manifest entry for authored-js.example')),
+      `authored JS without a sibling .ts must remain visible: ${JSON.stringify(errors)}`,
+    );
+    assert.ok(
+      errors.some((error) => error.includes('missing manifest entry for scripts-js.example')),
+      `authored scripts/ JS with a sibling .ts must remain visible: ${JSON.stringify(errors)}`,
+    );
+    assert.equal(
+      errors.some((error) => /pollution-(?:generated|compiled)\.example/.test(error)),
+      false,
+      `generated pollution must not create attribution drift: ${JSON.stringify(errors)}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('the check gate stays green when Docker generators write untracked JS into scanned roots', () => {
+  const fixture = makeFixtureCheckout();
+  try {
+    // Same pollution the self-host Dockerfile creates: inventory-facts plus a
+    // compiled handler sibling that re-embeds the authored URL. Today the
+    // walk treats those as new references and the gate reports stale kinds.
+    writeUrlModule(join(fixture.dir, 'api/_inventory-facts.generated.js'), 'fixture.example');
+    writeFileSync(join(fixture.dir, 'api/probe.ts'), 'export const ready = true;\n');
+    writeUrlModule(join(fixture.dir, 'api/probe.js'), 'fixture.example');
+
+    const { errors } = checkSourceAttribution(fixture.dir);
+    assert.deepEqual(
+      errors,
+      [],
+      `untracked generator output must not fail the attribution gate: ${JSON.stringify(errors)}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('ledger stats match validated stats when the committed manifest is current', () => {
+  const inventory = scanUpstreamHosts(rootDir);
+  const manifest = loadManifest(rootDir);
+  const validated = sourceAttributionStats(inventory, manifest);
+  const ledger = sourceAttributionLedgerStats(manifest, { observedHosts: inventory.length });
+  assert.deepEqual(ledger, validated);
+  assert.deepEqual(buildSourceAttributionStats({ rootDir, validate: false }), sourceAttributionLedgerStats(manifest));
+});
+
+test('ledger stats remain countable when scan-parity validation would fail', () => {
+  const stale = {
+    entries: [{
+      host: 'stale.example',
+      provider: 'stale.example',
+      license: 'Provider terms',
+      attribution: 'Credit stale.example.',
+      observed: true,
+      kind: 'structured',
+      status: 'terms-review',
+      references: [{ path: 'scripts/removed-seed.mjs' }],
+    }],
+    logicalEntries: [],
+  };
+  assert.throws(
+    () => sourceAttributionStats([], stale),
+    /invalid manifest/,
+  );
+  const ledger = sourceAttributionLedgerStats(stale);
+  assert.equal(ledger.activeHosts, 1);
+  assert.equal(ledger.providerCount, 1);
+  assert.equal(ledger.structuredHosts, 1);
+  assert.equal(ledger.observedHosts, 1);
+});
+
+test('ledger stats reject intrinsic manifest failures before counting', () => {
+  const malformed = {
+    entries: [
+      {
+        host: 'invalid.example',
+        provider: '',
+        license: '',
+        attribution: '',
+        observed: true,
+        kind: 'not-a-source-kind',
+        status: 'reviewed',
+        references: [{ path: 'scripts/invalid.mjs' }],
+      },
+      {
+        host: 'invalid.example',
+        provider: 'invalid.example',
+        license: 'Provider terms',
+        attribution: 'Credit invalid.example.',
+        observed: true,
+        kind: 'structured',
+        status: 'reviewed',
+        references: [{ path: 'scripts/duplicate.mjs' }],
+      },
+    ],
+    logicalEntries: [{
+      host: 'candidate.example',
+      provider: 'Candidate',
+      license: '',
+      attribution: '',
+      observed: false,
+      kind: 'candidate',
+      status: 'excluded',
+    }],
+  };
+  const errors = validateSourceAttributionLedger(malformed);
+  assert.ok(errors.some((error) => error.includes('invalid manifest kind')));
+  assert.ok(errors.some((error) => error.includes('incomplete attribution metadata')));
+  assert.ok(errors.some((error) => error.includes('duplicate manifest entry')));
+  assert.ok(errors.some((error) => error.includes('incomplete logical attribution metadata')));
+  assert.throws(() => sourceAttributionLedgerStats(malformed), /invalid manifest/);
+});
+
+test('ledger stats reject unknown roles and incomplete logical providers', () => {
+  const manifest = loadManifest(rootDir);
+  const withUnknownRole = {
+    ...manifest,
+    entries: [
+      ...manifest.entries,
+      {
+        host: 'role-invalid.example',
+        provider: 'role-invalid.example',
+        license: 'Provider terms',
+        attribution: 'Credit role-invalid.example.',
+        observed: true,
+        kind: 'structured',
+        status: 'reviewed',
+        role: 'publisher',
+        references: [{ path: 'scripts/invalid-role.mjs' }],
+      },
+    ],
+  };
+  const roleErrors = validateSourceAttributionLedger(withUnknownRole);
+  assert.ok(roleErrors.some((error) => error.includes('role must be "transport"')));
+  assert.throws(() => sourceAttributionLedgerStats(withUnknownRole), /invalid manifest/);
+
+  const withBrokenLogical = {
+    ...manifest,
+    logicalProviders: [
+      ...(manifest.logicalProviders || []),
+      { provider: 'Broken Logical' },
+      { provider: 'Broken Logical', feedLabels: ['Broken Logical'], transportHosts: ['feeds.feedburner.com'] },
+    ],
+  };
+  const logicalErrors = validateSourceAttributionLedger(withBrokenLogical);
+  assert.ok(logicalErrors.some((error) => error.includes('needs feedLabels')));
+  assert.ok(logicalErrors.some((error) => error.includes('duplicate logical provider')));
+  assert.throws(() => sourceAttributionLedgerStats(withBrokenLogical), /invalid manifest/);
 });
 
 test('the committed manifest is a fixpoint of its own generator', () => {
@@ -429,7 +1024,7 @@ test('the CLI refuses malformed, unpaired, or still-observed retirement requests
   }
 });
 
-test('the CLI explicitly retires a missing fixture host and updates every artifact', () => {
+test('the CLI explicitly retires a missing fixture host and updates canonical artifacts', () => {
   const fixture = makeFixtureCheckout();
   try {
     writeFileSync(join(fixture.dir, 'scripts/seed-fixture.mjs'), 'export const removed = true;\n');
@@ -450,7 +1045,6 @@ test('the CLI explicitly retires a missing fixture host and updates every artifa
 
     const after = readFixtureArtifacts(fixture);
     assert.notEqual(after.manifest, before.manifest);
-    assert.equal(after.mirror, after.manifest, 'the scripts/shared mirror must match the retired manifest');
     assert.notEqual(after.docs, before.docs);
     const retired = JSON.parse(after.manifest).entries.find((entry) => entry.host === 'fixture.example');
     assert.equal(retired.observed, false);
@@ -494,13 +1088,13 @@ test('a playback-only host that gains a real fetch stops being excluded', () => 
     observed: true,
     kind: 'feed',
     status: 'excluded',
-    references: [{ path: 'src/components/LiveNewsPanel.ts' }],
+    references: [{ path: 'src/config/live-video-sources.ts' }],
   };
   const rebuilt = buildManifest(
     [{
       host: 'stream.example',
       kinds: ['structured'],
-      references: [{ path: 'scripts/seed-example.mjs' }, { path: 'src/components/LiveNewsPanel.ts' }],
+      references: [{ path: 'scripts/seed-example.mjs' }, { path: 'src/config/live-video-sources.ts' }],
     }],
     { entries: [playbackOnly], logicalEntries: [] },
   );
@@ -512,7 +1106,7 @@ test('a playback-only host that gains a real fetch stops being excluded', () => 
   // The same host while still playback-only stays excluded — otherwise the
   // assertions above would pass against a rule that never fires.
   const unchanged = buildManifest(
-    [{ host: 'stream.example', kinds: ['feed'], references: [{ path: 'src/components/LiveNewsPanel.ts' }] }],
+    [{ host: 'stream.example', kinds: ['feed'], references: [{ path: 'src/config/live-video-sources.ts' }] }],
     { entries: [playbackOnly], logicalEntries: [] },
   );
   assert.equal(unchanged.entries.find((entry) => entry.host === 'stream.example').status, 'excluded');
@@ -544,7 +1138,7 @@ test('a retired row stops claiming a source path it is no longer found in', () =
   const rebuilt = buildManifest([], {
     entries: [{
       host: 'gone.example',
-      provider: 'Gone',
+      provider: 'gone.example',
       license: 'Terms review',
       attribution: 'Credit Gone.',
       observed: true,
@@ -646,7 +1240,7 @@ test('a truncated reference list says how much it is hiding', () => {
     {
       entries: [{
         host: 'many.example',
-        provider: 'Many',
+        provider: 'many.example',
         license: 'Terms review',
         attribution: 'Credit Many.',
         observed: true,
@@ -689,7 +1283,7 @@ test('the check gate passes on a checkout the generator just wrote', () => {
   try {
     const { errors, stats } = checkSourceAttribution(fixture.dir);
     assert.deepEqual(errors, []);
-    assert.equal(stats.activeHosts, 1, 'the fixture must contain a host, or every red case below is vacuous');
+    assert.ok(stats.activeHosts > 0, 'the fixture must contain a host, or every red case below is vacuous');
   } finally {
     fixture.cleanup();
   }
@@ -717,11 +1311,6 @@ test('the check gate goes red on manifest, docs, and logical-entry drift', () =>
       const docsPath = join(f.dir, 'docs/source-attribution.mdx');
       writeFileSync(docsPath, readFileSync(docsPath, 'utf8').replace('fixture.example', 'fixture.tampered'));
     }, /source-attribution\.mdx is out of date/],
-    ['a desynced scripts/shared mirror', (f) => {
-      const drifted = structuredClone(f.manifest);
-      drifted.entries[0].provider = 'Renamed In The Mirror Only';
-      writeFileSync(f.mirrorPath, `${JSON.stringify(drifted, null, 2)}\n`);
-    }, /scripts\/shared\/source-attribution-manifest\.json is out of sync/],
     ['a missing manifest', (f) => rmSync(f.manifestPath), /source-attribution-manifest\.json is missing/],
   ]) {
     const fixture = makeFixtureCheckout();

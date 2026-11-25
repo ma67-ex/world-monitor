@@ -1,6 +1,8 @@
 // boundary-ignore: AppContext is an aggregate type that lives in app/ by design
 import type { AppContext } from '@/app/app-context';
 import type { DomainAdapter, SignalEvidence } from '../types';
+import { normalizeToCountryCode } from '../country-normalization';
+import { isVerifiedUnrestEvent } from './unrest-verification';
 
 // v1 weights: wildfire and cable_alert deferred — renormalized to sum to 1.0.
 const WEIGHTS: Record<string, number> = {
@@ -35,7 +37,7 @@ export const disasterAdapter: DomainAdapter = {
 
       signals.push({
         type: 'earthquake',
-        source: 'usgs',
+        source: q.source || 'usgs',
         severity,
         lat: q.location.latitude,
         lon: q.location.longitude,
@@ -50,18 +52,20 @@ export const disasterAdapter: DomainAdapter = {
     // inflating correlation scores with duplicate signals)
     const conflictCountries = new Set(
       (cache.protests?.events ?? [])
+        .filter(isVerifiedUnrestEvent)
         .filter(p => {
           const age = now - (p.time?.getTime?.() ?? now);
           return age <= windowMs;
         })
-        .map(p => p.country)
-        .filter(Boolean),
+        .map(p => normalizeToCountryCode(p.country, p.lat, p.lon))
+        .filter((code): code is string => !!code),
     );
     const outages = cache.outages ?? [];
     for (const o of outages) {
       const age = now - (o.pubDate?.getTime?.() ?? now);
       if (age > windowMs) continue;
-      if (o.country && conflictCountries.has(o.country)) continue;
+      const country = normalizeToCountryCode(o.country, o.lat, o.lon);
+      if (country && conflictCountries.has(country)) continue;
       // Skip outages with sentinel 0/0 coordinates (no real location)
       if (o.lat == null || o.lon == null || (o.lat === 0 && o.lon === 0)) continue;
 
@@ -73,7 +77,7 @@ export const disasterAdapter: DomainAdapter = {
         severity: severityMap[o.severity] ?? 30,
         lat: o.lat,
         lon: o.lon,
-        country: o.country,
+        country,
         timestamp: o.pubDate?.getTime?.() ?? now,
         label: `Infra outage: ${o.title}`,
         rawData: o,
@@ -90,17 +94,14 @@ export const disasterAdapter: DomainAdapter = {
     const types = new Set(cluster.map(s => s.type));
     const parts: string[] = [];
 
-    if (types.has('earthquake')) {
-      const maxMag = Math.max(
-        ...cluster
-          .filter(s => s.type === 'earthquake')
-          .map(s => (s.rawData as { magnitude?: number })?.magnitude ?? 0),
-      );
-      parts.push(`M${maxMag.toFixed(1)} seismic`);
-    }
+    const magnitude = (s: SignalEvidence) => (s.rawData as { magnitude?: number })?.magnitude ?? 0;
+    const strongestQuake = cluster
+      .filter(s => s.type === 'earthquake')
+      .reduce<SignalEvidence | undefined>((max, s) => (!max || magnitude(s) > magnitude(max) ? s : max), undefined);
+    if (strongestQuake) parts.push(`M${magnitude(strongestQuake).toFixed(1)} seismic`);
     if (types.has('infra_outage')) parts.push('infra disruption');
 
-    const quakePlace = cluster.find(s => s.type === 'earthquake')?.label?.split('\u2014')[1]?.trim();
+    const quakePlace = strongestQuake?.label?.split('\u2014')[1]?.trim();
 
     return parts.length > 0
       ? `Disaster cascade: ${parts.join(' + ')}${quakePlace ? ` \u2014 ${quakePlace}` : ''}`

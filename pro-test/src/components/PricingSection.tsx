@@ -2,7 +2,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'motion/react';
 import { Check, ShieldCheck, ArrowRight, Zap, Loader2 } from 'lucide-react';
 import { startCheckout, subscribeCheckoutPhase, type CheckoutPhase } from '../services/checkout';
+import { createTimeoutSignal } from '../services/timeout-signal';
+import { CheckoutConsent } from './CheckoutConsent';
 import { t, tArray } from '../i18n';
+import type { CheckoutAttribution } from '../../../shared/checkout-attribution';
+import type { DesktopCheckoutHandoff } from '../../../shared/desktop-checkout-handoff';
 
 // Static fallback from build-time generation (used while fetching live prices)
 import fallbackTiers from '../generated/tiers.json';
@@ -33,7 +37,7 @@ function usePricingData(): Tier[] {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(CATALOG_API, { signal: AbortSignal.timeout(5000) })
+    fetch(CATALOG_API, { signal: createTimeoutSignal(5000) })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (!cancelled && data?.tiers?.length) {
@@ -218,11 +222,13 @@ function TierCta({ cta, highlighted, loadingProductId, rateLimited, onCheckout }
 
   const isLoading = loadingProductId === cta.productId;
   const isDisabled = isLoading || rateLimited;
-  // Only the clicked tier disables during creating_checkout.
-  // Sibling tiers stay clickable; if the user changes their
-  // mind mid-flow, their next click simply updates the
-  // pending intent. The pricing page is never hard-locked.
+  // Only the clicked tier disables while sign-in or checkout is loading.
+  // The service guards repeated clicks until that attempt settles.
+  // Assent sits immediately above the button, inside the same fragment, so a
+  // card can never render the CTA without it (#6976).
   return (
+    <>
+    <CheckoutConsent />
     <button
       onClick={() => onCheckout(cta.productId)}
       disabled={isDisabled}
@@ -246,22 +252,34 @@ function TierCta({ cta, highlighted, loadingProductId, rateLimited, onCheckout }
         </>
       )}
     </button>
+    </>
   );
 }
 
-export function PricingSection({ refCode }: { refCode?: string }) {
+export function PricingSection({
+  refCode,
+  attributionSource,
+  checkoutAttribution,
+  desktopHandoff,
+}: {
+  refCode?: string;
+  attributionSource?: string;
+  checkoutAttribution?: CheckoutAttribution;
+  desktopHandoff?: DesktopCheckoutHandoff;
+}) {
   const [billing, setBilling] = useState<'monthly' | 'annual'>(() => {
     const planKey = new URLSearchParams(window.location.search).get('wm_reactivate_plan');
     return planKey?.endsWith('_annual') ? 'annual' : 'monthly';
   });
   // Loading state is driven by the service's checkout phase. Only the
-  // `creating_checkout` phase (post-auth, inside doCheckout) disables
-  // the clicked CTA. During the Clerk modal window, phase stays idle —
+  // auth loading and `creating_checkout` phases disable the clicked CTA.
+  // During the Clerk modal window, phase stays idle —
   // the modal backdrop is the user's feedback, so locking the pricing
   // section underneath adds no value and creates recovery problems
   // (watchdogs, DOM polling) that we don't need.
   const [phase, setPhase] = useState<CheckoutPhase>({ kind: 'idle' });
-  const loadingProductId = phase.kind === 'creating_checkout' ? phase.productId : null;
+  const loadingProductId = phase.kind === 'loading_auth' || phase.kind === 'creating_checkout'
+    ? phase.productId : null;
   const rateLimited = phase.kind === 'rate_limited';
   const TIERS = usePricingData();
   // Enterprise leaves the card grid and renders as a full-width band below
@@ -278,8 +296,13 @@ export function PricingSection({ refCode }: { refCode?: string }) {
   // checkoutInFlight in the service guards concurrent doCheckout runs.
   // The handler is fire-and-forget — no local loading state to manage.
   const handleCheckout = useCallback((productId: string) => {
-    void startCheckout(productId, { referralCode: refCode });
-  }, [refCode]);
+    void startCheckout(productId, {
+      referralCode: refCode,
+      attributionSource,
+      checkoutAttribution,
+      desktopHandoff,
+    });
+  }, [refCode, attributionSource, checkoutAttribution, desktopHandoff]);
 
   return (
     <section id="pricing" className="py-24 px-6 border-t border-wm-border bg-[#060606]">
@@ -343,7 +366,7 @@ export function PricingSection({ refCode }: { refCode?: string }) {
                   is covered by the backdrop anyway; locking during the
                   modal was unnecessary. */}
               {t('pricing.billingAnnual')}
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+              <span className={`text-xs px-1.5 py-0.5 rounded-sm ${
                 billing === 'annual'
                   ? 'bg-wm-bg/20 text-wm-bg'
                   : 'bg-wm-green/10 text-wm-green'
@@ -352,12 +375,25 @@ export function PricingSection({ refCode }: { refCode?: string }) {
               </span>
             </button>
           </motion.div>
+
+          {/* Cancellation terms follow the EULA: cancelling stops future
+              renewals and access runs to the end of the paid period. No
+              partial-period refund is offered, so the note promises none. */}
+          <p className="text-xs text-wm-muted font-mono mt-4">
+            {t('pricing.cancelAnytime')}
+          </p>
         </div>
 
         {/* Tier cards grid */}
         {/* 5 self-serve tiers since Pro Business was published (#5604):
             2-up on tablet, 3+2 on laptop, all five across on desktop.
-            Enterprise renders below as a band, not as a sixth column. */}
+            Enterprise renders below as a band, not as a sixth column.
+            Each card spans three subgrid rows (header, CTA, features), spaced
+            by the grid's row gap, so the CTAs sit above the feature lists and
+            still line up across a row. The card's own gap-y-6 matches that gap
+            and keeps the spacing where subgrid is unsupported.
+            Below md the highlighted tier moves first via CSS order only, so
+            DOM, tab and prerender order stay unchanged (#10843). */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
           {/* Personal / Commercial axis header — xl only. It is a pair of grid
               children so the spans line up with the columns they label
@@ -373,13 +409,13 @@ export function PricingSection({ refCode }: { refCode?: string }) {
             <p className="font-mono text-xs uppercase tracking-wider text-wm-muted">
               {t('pricing.axisPersonal')}
             </p>
-            <p className="text-xs text-wm-muted/70 mt-0.5">{t('pricing.axisPersonalNote')}</p>
+            <p className="text-xs text-wm-muted mt-0.5">{t('pricing.axisPersonalNote')}</p>
           </div>
           <div className="hidden xl:block xl:col-span-3 border-t border-wm-green pt-3">
             <p className="font-mono text-xs uppercase tracking-wider text-wm-green font-bold">
               {t('pricing.axisCommercial')}
             </p>
-            <p className="text-xs text-wm-muted/70 mt-0.5">{t('pricing.axisCommercialNote')}</p>
+            <p className="text-xs text-wm-muted mt-0.5">{t('pricing.axisCommercialNote')}</p>
           </div>
 
           {gridTiers.map((tier, i) => {
@@ -393,9 +429,10 @@ export function PricingSection({ refCode }: { refCode?: string }) {
             return (
               <motion.div
                 key={tier.name}
-                className={`relative bg-zinc-900 rounded-lg p-6 flex flex-col ${
+                id={`plan-${tierKey(tier)}`}
+                className={`relative bg-zinc-900 rounded-lg p-6 row-span-3 grid grid-cols-1 grid-rows-subgrid gap-y-6 ${
                   tier.highlighted
-                    ? 'border-2 border-wm-green shadow-lg shadow-wm-green/10'
+                    ? 'border-2 border-wm-green shadow-lg shadow-wm-green/10 order-first md:order-none'
                     : 'border border-wm-border'
                 }`}
                 initial={{ opacity: 0, y: 30 }}
@@ -411,29 +448,43 @@ export function PricingSection({ refCode }: { refCode?: string }) {
                   </div>
                 )}
 
-                {/* Tier name */}
-                <h3 className={`font-display text-lg font-bold mb-1 ${
-                  tier.highlighted ? 'text-wm-green' : 'text-wm-text'
-                }`}>
-                  {tier.name}
-                </h3>
+                {/* Header: name, description, price */}
+                <div>
+                  <h3 className={`font-display text-lg font-bold mb-1 ${
+                    tier.highlighted ? 'text-wm-green' : 'text-wm-text'
+                  }`}>
+                    {tier.name}
+                  </h3>
 
-                {/* Description */}
-                <p className="text-xs text-wm-muted mb-4">{localized.description}</p>
+                  {/* Description */}
+                  <p className="text-xs text-wm-muted mb-4">{localized.description}</p>
 
-                {/* Price */}
-                <div className="mb-6">
-                  <span className="text-4xl font-display font-bold">{price.amount}</span>
-                  <span className="text-sm text-wm-muted ml-1">{price.suffix}</span>
-                  {cta.type === 'checkout' && cta.billedMonthlyOnly && (
-                    <p className="mt-1 text-[11px] font-mono uppercase tracking-wider text-wm-muted">
-                      {t('pricing.billedMonthlyNote', { defaultValue: 'Billed monthly — no annual plan' })}
-                    </p>
-                  )}
+                  {/* Price */}
+                  <div>
+                    <span className="text-4xl font-display font-bold break-words hyphens-auto">{price.amount}</span>
+                    <span className="text-sm text-wm-muted ml-1">{price.suffix}</span>
+                    {cta.type === 'checkout' && cta.billedMonthlyOnly && (
+                      <p className="mt-1 text-xs font-mono uppercase tracking-wider text-wm-muted">
+                        {t('pricing.billedMonthlyNote', { defaultValue: 'Billed monthly — no annual plan' })}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* CTA above the features, bottom-aligned so a link CTA without
+                    the consent line still lines up with checkout buttons. */}
+                <div className="flex flex-col justify-end">
+                  <TierCta
+                    cta={cta}
+                    highlighted={!!tier.highlighted}
+                    loadingProductId={loadingProductId}
+                    rateLimited={rateLimited}
+                    onCheckout={handleCheckout}
+                  />
                 </div>
 
                 {/* Features */}
-                <ul className="space-y-3 mb-8 flex-1">
+                <ul className="space-y-3">
                   {localized.features.map((feature, fi) => (
                     <li key={fi} className="flex items-start gap-2 text-sm">
                       <Check className={`w-4 h-4 shrink-0 mt-0.5 ${
@@ -449,15 +500,6 @@ export function PricingSection({ refCode }: { refCode?: string }) {
                     </li>
                   ))}
                 </ul>
-
-                {/* CTA button */}
-                <TierCta
-                  cta={cta}
-                  highlighted={!!tier.highlighted}
-                  loadingProductId={loadingProductId}
-                  rateLimited={rateLimited}
-                  onCheckout={handleCheckout}
-                />
               </motion.div>
             );
           })}
@@ -476,6 +518,7 @@ export function PricingSection({ refCode }: { refCode?: string }) {
 
           return (
             <motion.div
+              id={`plan-${tierKey(bandTier)}`}
               data-tier-band={BAND_TIER_KEY}
               className="mt-6 bg-zinc-900 border border-wm-border rounded-lg p-6 md:p-8 flex flex-col gap-6 lg:flex-row lg:items-center lg:gap-10"
               initial={{ opacity: 0, y: 30 }}
@@ -488,7 +531,7 @@ export function PricingSection({ refCode }: { refCode?: string }) {
                 <h3 className="font-display text-lg font-bold mb-1 text-wm-text">{bandTier.name}</h3>
                 <p className="text-xs text-wm-muted mb-4">{localized.description}</p>
                 <div>
-                  <span className="text-4xl font-display font-bold">{price.amount}</span>
+                  <span className="text-4xl font-display font-bold break-words hyphens-auto">{price.amount}</span>
                   <span className="text-sm text-wm-muted ml-1">{price.suffix}</span>
                 </div>
               </div>

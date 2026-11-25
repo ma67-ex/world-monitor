@@ -24,6 +24,7 @@
 //   node scripts/check-railway-deploy-drift.mjs --json
 //   node scripts/check-railway-deploy-drift.mjs --head <sha> --window 200
 //   node scripts/check-railway-deploy-drift.mjs --concurrency 4
+//   node scripts/check-railway-deploy-drift.mjs --audit-deployment-config
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
@@ -32,6 +33,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   DEFAULT_CONCURRENCY,
   RAILWAY_CALL_TIMEOUT_MS,
+  RAILWAY_INVENTORY_TIMEOUT_MS,
   mapWithConcurrency,
   readArgument,
   readDeployments,
@@ -44,6 +46,10 @@ import {
   selectExpectedRepositoryServices,
 } from './railway-cli.mjs';
 import { readViewerDeploymentConfig } from './railway-viewer-deployment-config.mjs';
+import {
+  auditRailwayServiceConfig,
+  printAudit,
+} from './audit-railway-watch-paths.mjs';
 import {
   FAILED_STATUSES,
   IN_FLIGHT_STATUSES,
@@ -179,11 +185,16 @@ export function classifyServiceDeploy({
   // Paths changed by one commit, used to judge whether a single refusal was the
   // filter working. Same default, same reason.
   changedPathsIn = () => null,
+  // The service's cron expression from the live deployment config, or null for
+  // an always-on service. Decides whether a crashed serving deployment behind a
+  // failed or in-flight build is reported as a stopped cron.
+  cronSchedule = null,
 }) {
   const base = {
     service,
     runningSha: null,
     runningAt: null,
+    runningStatus: null,
     rejectedShas: [],
     unknownStatuses: [],
   };
@@ -218,6 +229,7 @@ export function classifyServiceDeploy({
       unknownStatuses,
       runningSha: running?.meta?.commitHash ?? null,
       runningAt: running?.createdAt ?? null,
+      runningStatus: running?.status ?? null,
       detail: `Railway reported ${unknownStatuses.join(', ')}, which this check cannot classify`,
     };
   }
@@ -279,16 +291,42 @@ export function classifyServiceDeploy({
     ...base,
     runningSha,
     runningAt: running?.createdAt ?? null,
+    runningStatus: running?.status ?? null,
     rejectedShas,
   };
 
-  // A failed build for head outranks an outstanding rejection when it is the
-  // newer event: that is exactly the #6142 recovery path, where the trigger is
-  // fixed, the build finally fires, and it breaks. Reporting REJECTED_PUSH
-  // there would name a cause that has already been resolved.
+  // A failed build newer than the serving source outranks an outstanding
+  // rejection when it is the newer event: that is exactly the #6142 recovery
+  // path, where the trigger is fixed, the build finally fires, and it breaks.
+  // Reporting REJECTED_PUSH there would name a cause that has already been
+  // resolved.
   const forHead = (statuses) => ordered.find((deployment) => statuses.includes(deployment.status)
     && deployment.meta?.commitHash === headSha);
-  const failedForHead = forHead(FAILED_STATUSES);
+  // The newest build attempt since the serving source was built. A failure
+  // counts only until a later attempt starts; an in-flight attempt reports
+  // through the PENDING_BUILD and BUILD_STALLED branches below.
+  const newestAttempt = running
+    ? ordered.find((deployment) => (FAILED_STATUSES.includes(deployment.status)
+      || IN_FLIGHT_STATUSES.includes(deployment.status)) && newerThanRunning(deployment))
+    : null;
+  const failedBuild = newestAttempt && FAILED_STATUSES.includes(newestAttempt.status) ? newestAttempt : null;
+  const inFlightForHead = forHead(IN_FLIGHT_STATUSES);
+  // Railway ticks a cron service's serving deployment while a newer build is
+  // FAILED or in flight; once that deployment crashes nothing is left to
+  // schedule. An always-on service is restarted instead. See
+  // docs/solutions/integration-issues/railway-cron-crash-behind-failed-build-never-self-heals.md.
+  const servingCrashedBehindBuild = running?.status === 'CRASHED' && Boolean(failedBuild || inFlightForHead);
+  const stoppedCron = !servingCrashedBehindBuild
+    ? ''
+    : cronSchedule
+      ? '; that deployment has CRASHED and its cron will not tick again until a build succeeds'
+      : '; that deployment has CRASHED';
+  const buildFailedDetail = () => {
+    const failedSha = failedBuild.meta?.commitHash;
+    return `the build for ${failedSha ? failedSha.slice(0, 9) : 'an unidentified commit'} failed, so ${runningSha ? runningSha.slice(0, 9) : 'an unidentified source'} is still serving`
+      + stoppedCron
+      + `; nothing has built since, so run \`railway redeploy --service ${service} --from-source\` to rebuild at head`;
+  };
   // A frozen comparison head can have a failed build even after a newer
   // descendant is serving. Production is ahead in that case. Keep outstanding
   // rejection handling below ahead of the final AHEAD verdict: a later refused
@@ -301,11 +339,11 @@ export function classifyServiceDeploy({
   const newestRejectionAt = outstandingRejections.length > 0
     ? Math.max(...outstandingRejections.map(createdAtMs))
     : Number.NEGATIVE_INFINITY;
-  if (!runningIsAhead && failedForHead && createdAtMs(failedForHead) > newestRejectionAt) {
+  if (!runningIsAhead && failedBuild && createdAtMs(failedBuild) > newestRejectionAt) {
     return {
       ...identified,
       verdict: 'BUILD_FAILED',
-      detail: `the build for ${headSha.slice(0, 9)} failed, so ${runningSha?.slice(0, 9) ?? 'an unidentified source'} is still serving`,
+      detail: buildFailedDetail(),
     };
   }
 
@@ -358,25 +396,24 @@ export function classifyServiceDeploy({
     };
   }
 
-  if (failedForHead) {
+  if (failedBuild) {
     return {
       ...identified,
       verdict: 'BUILD_FAILED',
-      detail: `the build for ${headSha.slice(0, 9)} failed, so ${identified.runningSha.slice(0, 9)} is still serving`,
+      detail: buildFailedDetail(),
     };
   }
   // A build that started must also still be plausibly running. Without the age
   // bound a build that wedged days ago kept reporting PENDING_BUILD — a healthy
   // verdict — for as long as head did not move, which is precisely the
   // green-while-stale outcome this check exists to prevent.
-  const inFlightForHead = forHead(IN_FLIGHT_STATUSES);
   if (inFlightForHead) {
     const startedMs = createdAtMs(inFlightForHead);
     if (Number.isFinite(now) && now - startedMs > buildGraceMs) {
       return {
         ...identified,
         verdict: 'BUILD_STALLED',
-        detail: `a build for ${headSha.slice(0, 9)} has been ${inFlightForHead.status} since ${inFlightForHead.createdAt}, longer than the ${Math.round(buildGraceMs / 60_000)}m grace`,
+        detail: `a build for ${headSha.slice(0, 9)} has been ${inFlightForHead.status} since ${inFlightForHead.createdAt}, longer than the ${Math.round(buildGraceMs / 60_000)}m grace${stoppedCron}`,
       };
     }
     return { ...identified, verdict: 'PENDING_BUILD', detail: `a build for ${headSha.slice(0, 9)} is under way` };
@@ -491,7 +528,13 @@ export const DEEP_HEALTHY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // Both verdicts mean "the shallow window never identified the live source":
 // NO_BUILD_IN_WINDOW when no rejection is outstanding, REJECTED_PUSH_UNKNOWN_SOURCE
 // when one is. Deepening only the first would leave the second unresolved.
-const DEEP_CANDIDATE_VERDICTS = new Set(['NO_BUILD_IN_WINDOW', 'REJECTED_PUSH_UNKNOWN_SOURCE']);
+//
+// BEHIND claims "no build and no rejection recorded", but the fleet stream
+// stops at head's commit time, so a build that failed between the serving
+// image and head is never read. On 2026-11-09 seed-gdelt-intel read BEHIND
+// while its 07:30Z build had FAILED on a GitHub 504; the deep read turns that
+// into BUILD_FAILED with the redeploy command.
+const DEEP_CANDIDATE_VERDICTS = new Set(['NO_BUILD_IN_WINDOW', 'REJECTED_PUSH_UNKNOWN_SOURCE', 'BEHIND']);
 
 /**
  * Re-read the services whose shallow window never identified a live source
@@ -551,6 +594,15 @@ export async function deepenNoBuildWindows(results, {
       // in-flight evidence, not an old build). A refused upgrade keeps the
       // shallow verdict and counts as neither reclassified nor failed — the
       // "unchanged" remainder in the caller's summary line.
+      // A shallow read that named the serving source took it from Railway's
+      // active-deployment projection. The deep read has no such marker and can
+      // pick a newer REMOVED record, so it may add a problem about that same
+      // source but never replace the source or clear the alarm.
+      if (result.runningSha
+        && (!isProblemVerdict(next.verdict) || next.runningSha !== result.runningSha)) {
+        unchanged += 1;
+        return;
+      }
       if (!isProblemVerdict(next.verdict) && next.runningSha) {
         const runningAtMs = Date.parse(next.runningAt ?? '');
         if (!Number.isFinite(runningAtMs) || now - runningAtMs > DEEP_HEALTHY_MAX_AGE_MS) {
@@ -562,7 +614,7 @@ export async function deepenNoBuildWindows(results, {
       // the shallow fact we already established. Keep that original alarm in
       // place instead of replacing it with NO_DEPLOYMENTS, UNKNOWN_STATUS, or
       // another inconclusive label.
-      if (UNDETERMINABLE_VERDICTS.includes(next.verdict)) {
+      if (UNDETERMINABLE_VERDICTS.includes(next.verdict) || next.verdict === result.verdict) {
         unchanged += 1;
         return;
       }
@@ -600,7 +652,7 @@ function normalizeAuthorizedLineage(result, isOnAuthorizedMainLineage) {
   return {
     ...result,
     verdict: 'AHEAD_LINEAGE_UNPROVEN',
-    detail: 'the running descendant is not proven reachable from the authorized main ref',
+    detail: `running ${result.runningSha ?? 'unknown'}; cannot prove this descendant belongs to refreshed origin/main. Verify the deployment source branch and Git fetch access before redeploying.`,
   };
 }
 
@@ -702,9 +754,23 @@ export function readRepeatedArguments(argv, name) {
   return values;
 }
 
-export function resolveComparisonHead(argv, { git = runGit } = {}) {
+export function resolveOriginMainRelation(headSha, originMainSha, ancestry) {
+  if (!originMainSha) return 'unavailable';
+  if (headSha === originMainSha) return 'exact';
+  const forward = ancestry(headSha, originMainSha);
+  if (forward === 'yes') return 'behind';
+  const reverse = ancestry(originMainSha, headSha);
+  if (reverse === 'yes') return 'ahead';
+  return forward === 'no' && reverse === 'no' ? 'diverged' : 'unknown';
+}
+
+export function resolveComparisonHead(argv, {
+  git = runGit,
+  ancestry = () => 'unknown',
+  refreshMain = false,
+} = {}) {
   const explicit = readArgument(argv, '--head', null);
-  if (explicit === null) {
+  if (explicit === null || refreshMain) {
     git([
       'fetch',
       '--quiet',
@@ -712,18 +778,53 @@ export function resolveComparisonHead(argv, { git = runGit } = {}) {
       '+refs/heads/main:refs/remotes/origin/main',
     ]);
   }
-  const target = explicit ?? 'origin/main';
-  return git(['rev-parse', '--verify', '--end-of-options', `${target}^{commit}`]);
+  let originMainSha = null;
+  try {
+    originMainSha = git(['rev-parse', '--verify', '--end-of-options', 'origin/main^{commit}']);
+  } catch (error) {
+    // Symmetric with the fetch condition above. A refresh call always passes an
+    // explicit --head, so keying this on `explicit === null` alone would swallow
+    // the failure and hand back originMainSha: null — which reads downstream as
+    // "no commit is on authorized main" and blocks the whole fleet with a detail
+    // string blaming the deployment source rather than this resolution failure.
+    if (explicit === null || refreshMain) {
+      throw new Error(
+        'cannot resolve origin/main for the deploy-drift comparison; fetch main or pass --head explicitly',
+        { cause: error },
+      );
+    }
+  }
+
+  let headSha = originMainSha;
+  let headSource = 'origin/main';
+  if (explicit !== null) {
+    headSource = '--head';
+    try {
+      headSha = git(['rev-parse', '--verify', '--end-of-options', `${explicit}^{commit}`]);
+    } catch (error) {
+      throw new Error(`cannot resolve --head ${explicit} to a commit`, { cause: error });
+    }
+  }
+
+  return {
+    headSha,
+    headSource,
+    originMainSha,
+    originMainRelation: resolveOriginMainRelation(headSha, originMainSha, ancestry),
+  };
+}
+
+export function formatComparisonHead({ headSource, originMainRelation }) {
+  return `source=${headSource} vs-origin-main=${originMainRelation}`;
 }
 
 
 
-
-function printReport(results, summary, headSha, graceSha) {
-  console.log(`Railway deploy-drift check: head=${headSha.slice(0, 9)} grace=${graceSha.slice(0, 9)} services=${results.length} ${JSON.stringify(summary.counts)}`);
+function printReport(results, summary, headSha, graceSha, headContext) {
+  console.log(`Railway deploy-drift check: head=${headSha.slice(0, 9)} ${formatComparisonHead(headContext)} grace=${graceSha.slice(0, 9)} services=${results.length} ${JSON.stringify(summary.counts)}`);
 
   if (summary.blocking.length > 0) {
-    console.error(`Railway deploy-drift check found ${summary.blocking.length} service(s) not running the head commit:`);
+    console.error(`Railway deploy-drift check found ${summary.blocking.length} service(s) with deployment or source-verification problems:`);
     for (const problem of summary.blocking) {
       console.error(`- ${problem.service} [${problem.verdict}] ${problem.detail}`);
     }
@@ -745,6 +846,7 @@ async function main() {
   });
   const asJson = process.argv.includes('--json');
   const strict = process.argv.includes('--strict');
+  const auditDeploymentConfig = process.argv.includes('--audit-deployment-config');
   const expectedServices = readRepeatedArguments(process.argv, '--expected-service');
   const environment = readArgument(process.argv, '--environment', DEFAULT_ENVIRONMENT);
   const window = Number(readArgument(process.argv, '--window', String(DEFAULT_DEPLOYMENT_WINDOW)));
@@ -762,7 +864,6 @@ async function main() {
   // Manual/operator runs default to the production line, never a feature
   // worktree's HEAD. The workflow passes its immutable event SHA explicitly,
   // then fetches newer main ancestry without moving this target.
-  const headSha = resolveComparisonHead(process.argv);
   // `git merge-base --is-ancestor` exits non-zero both when the answer is no
   // and when the object is missing (a shallow checkout that never fetched the
   // commit). Both collapse to "cannot prove it", which keeps the service
@@ -776,14 +877,8 @@ async function main() {
   // "cannot prove it keeps the service reported" behaviour.
   const ancestry = createAncestryResolver({ git: runGit });
   const isAncestor = (ancestor, descendant) => ancestry(ancestor, descendant) === 'yes';
-  let authorizedMainSha = null;
-  try {
-    authorizedMainSha = runGit(['rev-parse', '--verify', 'origin/main^{commit}']);
-  } catch {
-    // AHEAD acceptance needs a positive repository-lineage proof. A missing
-    // ref is not fatal for exact CURRENT results, but every AHEAD result fails
-    // closed in the summary below.
-  }
+  let headContext = resolveComparisonHead(process.argv, { git: runGit, ancestry });
+  const { headSha } = headContext;
   // The newest commit that has been available longer than the build grace.
   // On a checkout too shallow to reach back that far, rev-list answers with
   // nothing and this falls back to head — the stricter reading.
@@ -803,17 +898,23 @@ async function main() {
   const projectId = process.env.RAILWAY_PROJECT_ID;
   if (!projectId) throw new Error('RAILWAY_PROJECT_ID is required for the Viewer deployment projection');
   assertRailwayCallCanStart('reading the Railway service list');
+  const remainingInventoryMs = deepPassDeadlineAt - performance.now();
   const services = selectExpectedRepositoryServices(
-    readServices(environment, { projectId }),
+    readServices(environment, {
+      projectId,
+      timeoutMs: Math.min(
+        RAILWAY_INVENTORY_TIMEOUT_MS,
+        Math.max(1, Math.floor(remainingInventoryMs)),
+      ),
+    }),
     readExpectedRepositoryFleet(),
   );
   // What each service's container can be affected by. The registry is the
   // repository's declaration and the live config is what Railway is actually
   // filtering on; resolveServiceClosure unions them, because between a merged
-  // registry edit and the audit's --apply each knows a path the other does not.
-  const registryByService = new Map(
-    JSON.parse(readFileSync(REGISTRY_URL, 'utf8')).map((entry) => [entry.service, entry]),
-  );
+  // registry edit and verified registry sync each knows a path the other does not.
+  const registry = JSON.parse(readFileSync(REGISTRY_URL, 'utf8'));
+  const registryByService = new Map(registry.map((entry) => [entry.service, entry]));
   // The dedicated Viewer cannot see environment-variable values. Read only the
   // explicit source/build/deploy projection used by closure classification.
   assertRailwayCallCanStart('resolving the Railway environment id');
@@ -832,6 +933,18 @@ async function main() {
     includeActiveDeployments: true,
     deadlineAt: deepPassDeadlineAt,
   })).services;
+  const configurationDrift = auditDeploymentConfig
+    ? auditRailwayServiceConfig(
+        { services: liveById },
+        new Map(services.map((service) => [service.name, service.id])),
+        registry,
+        {
+          evaluateRequiredEnv: false,
+          requireMainTrigger: true,
+        },
+      )
+    : [];
+  if (auditDeploymentConfig && !asJson) printAudit(configurationDrift);
   const initialDeploymentsByService = new Map(
     Object.entries(liveById).map(([serviceId, config]) => [
       serviceId,
@@ -872,6 +985,33 @@ async function main() {
     monotonicNow: () => performance.now(),
   });
 
+  // Main can advance while Railway is read. Fetch after that observation so a
+  // newly deployed main commit has both its object and lineage available.
+  // Keep the original target: refreshing evidence must not move the goalpost.
+  //
+  // Two guards, both about what sits immediately after this line. The next step
+  // is classifyFleetWithinDeadline, which DISCARDS every history already read
+  // once the deadline has passed — so a refresh that runs past the deadline, or
+  // that spends its 30s git timeout crossing it, converts a fully-read fleet
+  // into a fleet-wide deadline error. That is the same false alarm this refresh
+  // exists to remove. And an unhandled throw here would strand the completed
+  // Railway read with no report at all, which is strictly worse than judging
+  // against a stale ref: a stale authorized main only ever OVER-blocks, so
+  // degrading to the pre-refresh context stays fail-closed.
+  if (performance.now() < deepPassDeadlineAt) {
+    try {
+      headContext = {
+        ...resolveComparisonHead(['--head', headSha], { git: runGit, ancestry, refreshMain: true }),
+        headSource: headContext.headSource,
+      };
+    } catch (error) {
+      console.error(`Could not refresh origin/main after the Railway read; judging lineage against the pre-refresh ref, which can only over-report: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    console.error('Skipped the post-observation origin/main refresh: the run deadline was reached while reading Railway. Lineage is judged against the pre-refresh ref, which can only over-report.');
+  }
+  const { originMainSha: authorizedMainSha } = headContext;
+
   // One classifier closure for both passes: the shallow fleet read and the
   // deep per-service re-read must judge a history identically, or the deepen
   // pass could reach a different verdict for reasons other than depth.
@@ -895,6 +1035,9 @@ async function main() {
     changedPathsIn: (sha) => (
       classificationDeadlineReached() ? null : changedPathsIn(sha)
     ),
+    cronSchedule: liveById[service.id]?.deploy?.cronSchedule
+      ?? registryByService.get(service.name)?.cronSchedule
+      ?? null,
   });
 
   const shallowResults = classifyFleetWithinDeadline(services, histories, {
@@ -918,7 +1061,7 @@ async function main() {
     // apart: reclassified (the deep read answered), failed (the read never
     // landed — a tooling problem, not fleet state), unchanged (read landed but
     // stayed inconclusive or refused a stale healthy upgrade).
-    console.error(`Deepened ${deepPass.deepened} service history read(s) whose ${window}-record window left the source unidentified (deep window ${DEEP_DEPLOYMENT_WINDOW}): ${deepPass.reclassified} reclassified, ${deepPass.failed} failed, ${deepPass.unchanged} unchanged.`);
+    console.error(`Deepened ${deepPass.deepened} service history read(s) the ${window}-record window could not settle (deep window ${DEEP_DEPLOYMENT_WINDOW}): ${deepPass.reclassified} reclassified, ${deepPass.failed} failed, ${deepPass.unchanged} unchanged.`);
   }
   if (deepPass.capped > 0) {
     console.error(`Deep pass capped at ${DEEP_PASS_MAX_CANDIDATES} candidate(s); ${deepPass.capped} kept their shallow verdict this run and retry next tick.`);
@@ -943,6 +1086,8 @@ async function main() {
     console.log(JSON.stringify({
       environment,
       headSha,
+      headSource: headContext.headSource,
+      originMainRelation: headContext.originMainRelation,
       graceSha,
       deepPass: {
         attempted: deepPass.deepenedServices,
@@ -952,18 +1097,22 @@ async function main() {
         capped: deepPass.capped,
         deadlineDeferred: deepPass.deadlineDeferred,
       },
+      configurationAudit: {
+        evaluated: auditDeploymentConfig,
+        drift: configurationDrift,
+      },
       summary,
       results,
     }, null, 2));
   }
   else if (strict) {
-    console.log(`Strict Railway deploy-drift check: head=${headSha.slice(0, 9)} services=${results.length}`);
+    console.log(`Strict Railway deploy-drift check: head=${headSha.slice(0, 9)} ${formatComparisonHead(headContext)} services=${results.length}`);
     for (const problem of summary.blocking) {
       console.error(`- ${problem.service ?? 'unknown'} [${problem.verdict}] ${problem.detail ?? ''}`);
     }
     for (const service of summary.missing) console.error(`- ${service} [MISSING] was not positively classified`);
-  } else printReport(results, summary, headSha, graceSha);
-  if (!summary.ok) process.exitCode = 1;
+  } else printReport(results, summary, headSha, graceSha, headContext);
+  if (!summary.ok || configurationDrift.length > 0) process.exitCode = 1;
 }
 
 // realpath BOTH sides: Node sets import.meta.url to the realpath while argv[1]

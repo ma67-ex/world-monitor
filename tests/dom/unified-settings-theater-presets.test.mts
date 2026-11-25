@@ -62,6 +62,7 @@ vi.mock('@/services/entitlements', () => ({
   getEntitlementState: () => entitlementState,
   getEntitlementVerificationStatus: () => 'ready',
   hasFeature: () => true,
+  hasEmbedAccessForAccount: () => true,
   isEntitled: () => true,
   onEntitlementChange: () => () => {},
   onEntitlementVerificationChange: () => () => {},
@@ -76,7 +77,7 @@ vi.mock('@/services/widget-store', () => ({
 }));
 
 vi.mock('@/services/preferences-content', () => ({
-  renderPreferences: () => ({
+  renderPreferenceSection: () => ({
     html: '',
     attach: () => () => {},
   }),
@@ -113,6 +114,7 @@ vi.mock('@/config/variant', () => ({
 
 vi.mock('@/services/billing', () => ({
   getSubscription: () => null,
+  isSubscriptionLoaded: () => true,
   onSubscriptionChange: () => () => {},
   openBillingPortal: async () => ({ outcome: 'no-customer' as const }),
   prereserveBillingPortalTab: () => null,
@@ -126,7 +128,10 @@ vi.mock('@/services/billing', () => ({
   removeBusinessSeat: async () => ({ status: 'removed' as const }),
 }));
 
-vi.mock('@/services/billing-state', () => ({
+// Partial so the real status-tone helpers stay available: a full stub goes
+// stale the moment billing-state gains an export the panel renders (#7315).
+vi.mock('@/services/billing-state', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/billing-state')>()),
   deriveBillingUxState: () => 'active',
   getReactivationHref: () => '/pro#pricing',
 }));
@@ -153,7 +158,7 @@ const { getTheaterPreset } = await import('@/config/theater-presets');
 
 type SettingsInternals = {
   overlay: HTMLElement;
-  render(loadAccountData?: boolean): void;
+  rebuild(runEnter: boolean): void;
 };
 
 // The 'ukraine-war' preset lists 11 sources; the stub catalog knows all of
@@ -230,8 +235,7 @@ beforeEach(() => {
 
   settings = new UnifiedSettings(config);
   internal = settings as unknown as SettingsInternals;
-  internal.overlay.classList.add('active');
-  internal.render(false);
+  settings.open('sources');
 });
 
 afterEach(() => {
@@ -326,7 +330,7 @@ describe('UnifiedSettings theater coverage presets', () => {
 
   it('(f) no presets row renders when zero presets resolve', () => {
     config.getAllSourceNames = () => [UNRELATED_SOURCE];
-    internal.render(false);
+    internal.rebuild(false);
 
     const chips = internal.overlay.querySelectorAll('.unified-settings-preset-chip');
     expect(chips.length).toBe(0);

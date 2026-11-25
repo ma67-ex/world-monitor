@@ -39,10 +39,18 @@ export interface SubscriptionInfo {
   displayName: string;
   status: 'active' | 'on_hold' | 'cancelled' | 'expired';
   currentPeriodEnd: number; // epoch ms, renewal date
+  // Cancelled in the Dodo portal but still `active` until currentPeriodEnd.
+  // Optional across a mixed frontend/backend deploy.
+  cancelAtPeriodEnd?: boolean;
   // #4771: verdict of the request-path renewal verification (#4770), null
   // when no verification episode is recorded. Drives the billing-aware
   // gating copy in billing-state.ts.
   renewalVerificationState: 'pending' | 'failed' | 'lapsed' | null;
+  // The address billing mail (receipts, dunning) resolves to, and whether
+  // Resend hard-bounced it. Optional across a mixed frontend/backend deploy;
+  // missing reads as not bounced.
+  billingEmail?: string | null;
+  billingEmailBounced?: boolean;
 }
 
 // Module-level state
@@ -51,6 +59,7 @@ let subscriptionLoaded = false;
 const listeners = new Set<(sub: SubscriptionInfo | null) => void>();
 let initialized = false;
 let unsubscribeConvex: (() => void) | null = null;
+let subscriptionGeneration = 0;
 
 // Convex/Clerk bootstrap rarely rejects with a non-Error value (undefined, null, string).
 // Sentry serializes those as synthetic `Error: undefined` with zero frames — uninvestigable.
@@ -58,13 +67,18 @@ let unsubscribeConvex: (() => void) | null = null;
 // and as `cause` (for Sentry's structured display) so events remain debuggable (WORLDMONITOR-ND).
 function normalizeCaughtError(action: string, err: unknown): Error {
   if (err instanceof Error) return err;
+  // Chrome iOS / WKWebView: DOMException is not always `instanceof Error`, so
+  // a SecurityError from window.open / location assignment fell through to the
+  // synthetic "threw non-Error: …" branch below and titled its Sentry issue
+  // after the wrapper rather than the fault (WORLDMONITOR-11D). Keep the
+  // `[billing] <action>:` prefix every other error from this module carries —
+  // without it the same fault produces two differently-shaped titles depending
+  // on which branch caught it, and neither says where it happened.
+  if (typeof DOMException !== 'undefined' && err instanceof DOMException) {
+    return new Error(`[billing] ${action}: ${err.name}: ${err.message}`, { cause: err });
+  }
   const rendered = err === undefined ? 'undefined' : String(err);
-  const wrapped = new Error(`[billing] ${action} threw non-Error: ${rendered}`);
-  // Attach the original thrown value as `cause` so Sentry shows it as structured data.
-  // Assigned post-construction because tsconfig target=ES2020 lacks ErrorOptions typing;
-  // Sentry and modern browsers read the property either way.
-  (wrapped as Error & { cause?: unknown }).cause = err;
-  return wrapped;
+  return new Error(`[billing] ${action} threw non-Error: ${rendered}`, { cause: err });
 }
 
 function requireSignedInUserId(action: string): string {
@@ -78,7 +92,10 @@ async function requireCurrentConvexUser(
   action: string,
 ): Promise<void> {
   if (!await waitForConvexAuthForUser(userId)) {
-    throw new Error(`Account changed while ${action}. Try again.`);
+    // A failed or unconfirmed auth handshake for the same signed-in user is
+    // not an account switch (Sentry WORLDMONITOR-1CP).
+    assertAccountStillCurrent(userId, action);
+    throw new Error(`Authentication unavailable while ${action}. Try again.`);
   }
   assertAccountStillCurrent(userId, action);
 }
@@ -92,33 +109,40 @@ export async function initSubscriptionWatch(
   _userId?: string,
   isCurrent: () => boolean = () => true,
 ): Promise<void> {
+  const generation = subscriptionGeneration;
   const isExpectedAccount = (): boolean => (
-    isCurrent() && (_userId === undefined || getCurrentClerkUser()?.id === _userId)
+    generation === subscriptionGeneration
+    && isCurrent() && (_userId === undefined || getCurrentClerkUser()?.id === _userId)
   );
   if (initialized || !isExpectedAccount()) return;
 
   try {
+    // Start the API chunk now so it loads alongside the client chunk instead
+    // of after it. A failed load is reported below, where it is awaited.
+    const apiLoad = getConvexApi();
+    apiLoad.catch(() => {});
     const client = await getConvexClient();
     if (!client) {
       console.warn('[billing] No VITE_CONVEX_URL -- skipping subscription watch');
       return;
     }
 
-    const api = await getConvexApi();
+    const api = await apiLoad;
     if (!api) {
       console.warn('[billing] Could not load Convex API -- skipping subscription watch');
       return;
     }
-    if (!isExpectedAccount()) return;
+    // Another initializer can attach while this one awaits the client/API.
+    if (initialized || !isExpectedAccount()) return;
 
-    unsubscribeConvex = client.onUpdate(
+    const unsubscribe = client.onUpdate(
       api.payments.billing.getSubscriptionForUser,
       {},
       (result: SubscriptionInfo | null) => {
         if (!isExpectedAccount()) return;
         currentSubscription = result;
         subscriptionLoaded = true;
-        for (const cb of listeners) cb(result);
+        notifySubscriptionListeners(result);
       },
       (err: Error) => {
         if (!isExpectedAccount()) return;
@@ -126,10 +150,16 @@ export async function initSubscriptionWatch(
         // Clear stale cached value so getSubscription() returns null (not old plan).
         currentSubscription = null;
         subscriptionLoaded = true;
-        for (const cb of listeners) cb(null);
+        notifySubscriptionListeners(null);
       },
     );
 
+    // onUpdate may synchronously notify a consumer that tears us down.
+    if (!isExpectedAccount()) {
+      unsubscribe();
+      return;
+    }
+    unsubscribeConvex = unsubscribe;
     initialized = true;
   } catch (err) {
     console.error('[billing] Failed to initialize subscription watch:', err);
@@ -139,6 +169,17 @@ export async function initSubscriptionWatch(
       initErr,
       { tags: { component: 'dodo-billing', action: 'initSubscriptionWatch' } },
     ));
+  }
+}
+
+/** Deliver committed billing state to independent consumers even if one throws. */
+function notifySubscriptionListeners(subscription: SubscriptionInfo | null): void {
+  for (const cb of listeners) {
+    try {
+      cb(subscription);
+    } catch (err) {
+      console.warn('[billing] listener threw; continuing fan-out:', err);
+    }
   }
 }
 
@@ -166,6 +207,8 @@ export function onSubscriptionChange(
  * Tear down the subscription watch. Call from PanelLayout.destroy() for cleanup.
  */
 export function destroySubscriptionWatch(): void {
+  // Retire pending initialization and queued callbacks, including same-account rebinds.
+  subscriptionGeneration += 1;
   if (unsubscribeConvex) {
     unsubscribeConvex();
     unsubscribeConvex = null;
@@ -184,6 +227,17 @@ export function getSubscription(): SubscriptionInfo | null {
   return currentSubscription;
 }
 
+/**
+ * Whether the subscription watch has produced a value at least once (including
+ * a legitimate `null` — no row, or a query error). Callers use this to tell an
+ * unresolved watch apart from a settled "no subscription": `getSubscription()`
+ * returns `null` in both cases, but only the settled null means the user truly
+ * has no own subscription row (e.g. a Business Pro grant invitee).
+ */
+export function isSubscriptionLoaded(): boolean {
+  return subscriptionLoaded;
+}
+
 export type ProActivationClaimOutcome =
   | 'claimed'
   | 'not_eligible'
@@ -199,8 +253,7 @@ export async function claimProActivationPresentation(
   claimNonce: string,
 ): Promise<ProActivationClaimOutcome> {
   const userId = requireSignedInUserId('claim Pro activation');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'claiming Pro activation');
   const result = await settleAccountOperation(
@@ -221,8 +274,7 @@ export async function confirmProActivationPresentation(
   claimNonce: string,
 ): Promise<boolean> {
   const userId = requireSignedInUserId('confirm Pro activation');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'confirming Pro activation');
   return settleAccountOperation(
@@ -257,8 +309,7 @@ export async function openProActivationDay0Presentation(
   sessionStartedAt: number,
 ): Promise<ProActivationDay0Outcome> {
   const userId = requireSignedInUserId('open Pro activation');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'opening Pro activation');
   const result = await settleAccountOperation(
@@ -304,8 +355,7 @@ export async function recordProActivationOutcome(
   outcome: ProActivationOutcomeSnapshot,
 ): Promise<boolean> {
   const userId = requireSignedInUserId('record Pro activation');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'recording Pro activation');
   return settleAccountOperation(
@@ -367,10 +417,18 @@ export async function openBillingPortal(
     // documents this as its contract: a swallowed failure that still claims
     // "opened" is worse than no message, because the caller then tells the
     // user to look at a window that does not exist.
-    const navOutcome = await openExternalUrl(url, reservedWin);
-    return navOutcome === 'failed'
-      ? { outcome: 'open-failed', url }
-      : { outcome: 'opened', url };
+    //
+    // Never let a recoverable nav throw reject this promise: two CTA
+    // callers invoke `void openBillingPortal(...)` with no .catch, and a
+    // SecurityError on a reserved blank tab became WORLDMONITOR-11C.
+    try {
+      const navOutcome = await openExternalUrl(url, reservedWin);
+      return navOutcome === 'failed'
+        ? { outcome: 'open-failed', url }
+        : { outcome: 'opened', url };
+    } catch {
+      return { outcome: 'open-failed', url };
+    }
   };
 
   // NO_CUSTOMER means the user is entitled (comp grant, recently-restored
@@ -384,11 +442,20 @@ export async function openBillingPortal(
   // pre-reserved tab — still better UX than landing in a stranger's
   // portal. WORLDMONITOR-R5.
   const closeReserved = (): void => {
-    if (reservedWin && !reservedWin.closed) reservedWin.close();
+    if (!reservedWin) return;
+    try {
+      if (!reservedWin.closed) reservedWin.close();
+    } catch {
+      try {
+        reservedWin.close();
+      } catch {
+        // Chrome iOS can throw SecurityError on both `.closed` and `.close()`.
+      }
+    }
   };
 
   const userId = getCurrentClerkUser()?.id;
-  if (!userId) return navigate(DODO_PORTAL_FALLBACK_URL);
+  if (!userId) return await navigate(DODO_PORTAL_FALLBACK_URL);
 
   try {
     const client = await getConvexClient();
@@ -445,7 +512,10 @@ export async function openBillingPortal(
       closeReserved();
       return { outcome: 'no-customer' };
     }
-    return navigate(DODO_PORTAL_FALLBACK_URL);
+    // Same load-bearing `return await` as the try path: without it a throw
+    // from navigate rejects openBillingPortal, and two callers use bare
+    // `void openBillingPortal(...)` (WORLDMONITOR-11C).
+    return await navigate(DODO_PORTAL_FALLBACK_URL);
   }
 }
 
@@ -475,8 +545,7 @@ export async function listBusinessSeats(): Promise<ListBusinessSeatsResult> {
   if (!userId) {
     return { businessSubscriptionId: null, ownerDomain: null, ownerIsCorporateDomain: false, seats: [] };
   }
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) {
     return { businessSubscriptionId: null, ownerDomain: null, ownerIsCorporateDomain: false, seats: [] };
   }
@@ -491,13 +560,12 @@ export async function listBusinessSeats(): Promise<ListBusinessSeatsResult> {
   );
 }
 
-/** Invite up to 4 same-domain teammates to Business Pro seats. */
+/** Invite up to 4 teammates at any corporate email domain to Business Pro seats. */
 export async function inviteBusinessSeats(emails: string[]): Promise<{
   invited: Array<{ email: string; grantId: string; status: 'created' | 'already_pending' | 'already_accepted' }>;
 }> {
   const userId = requireSignedInUserId('invite Business Pro seats');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'inviting Business Pro seats');
   return settleAccountOperation(
@@ -512,8 +580,7 @@ export async function removeBusinessSeat(
   grantId: string,
 ): Promise<{ ok: true; status: 'revoked' | 'already_inactive' }> {
   const userId = requireSignedInUserId('remove a Business Pro seat');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'removing a Business Pro seat');
   return settleAccountOperation(
@@ -526,11 +593,134 @@ export async function removeBusinessSeat(
   );
 }
 
+/**
+ * Replace the billing email at Dodo and locally. Rejects with a ConvexError
+ * whose `data.kind` (INVALID_EMAIL, EMAIL_SUPPRESSED, NO_CUSTOMER,
+ * DODO_CUSTOMER_UPDATE_ERROR) the banner maps to inline copy.
+ */
+export async function updateBillingEmail(email: string): Promise<{ email: string }> {
+  const userId = requireSignedInUserId('update the billing email');
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
+  if (!client || !api) throw new Error('Convex unavailable');
+  await requireCurrentConvexUser(userId, 'updating the billing email');
+  return settleAccountOperation(
+    userId,
+    'updating the billing email',
+    () => client.action(api.payments.billing.updateBillingEmail, { email }),
+  );
+}
+
+export type ProBusinessUpgradeResponse =
+  | {
+      kind: 'preview';
+      fromPlanKey: string;
+      toPlanKey: string;
+      chargeAmount: number;
+      currency: string;
+      renewalAmount: number | null;
+      renewalCurrency: string | null;
+      renewalDate: string | null;
+      billingPeriod: 'monthly' | 'annual';
+    }
+  | { kind: 'upgraded'; fromPlanKey: string; toPlanKey: string };
+
+/**
+ * Preview (confirm=false) or apply (confirm=true) the in-place Pro → Pro
+ * Business upgrade. Rejects with a ConvexError whose `data.kind`
+ * (NO_UPGRADEABLE_PRO, ALREADY_PRO_BUSINESS, PRO_CANCEL_SCHEDULED, UPGRADE_IN_PROGRESS,
+ * UPGRADE_RATE_LIMITED,
+ * DODO_PLAN_CHANGE_ERROR, ...) the checkout dialog maps to copy.
+ */
+export async function requestProBusinessUpgrade(confirm: boolean): Promise<ProBusinessUpgradeResponse> {
+  const userId = requireSignedInUserId('upgrade to Pro Business');
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
+  if (!client || !api) throw new Error('Convex unavailable');
+  await requireCurrentConvexUser(userId, 'upgrading to Pro Business');
+  return settleAccountOperation(
+    userId,
+    'upgrading to Pro Business',
+    () => client.action(api.payments.billing.upgradeToProBusiness, { confirm }),
+  );
+}
+
+export interface EnterpriseSeat {
+  memberId: string;
+  email: string | null;
+  status: 'active' | 'pending' | 'expired';
+  role: 'admin' | 'member';
+  isSelf: boolean;
+  invitedAt: number | null;
+  joinedAt: number | null;
+  inviteExpiresAt: number | null;
+  /** The invite email could not be sent; withdraw and invite again. */
+  emailFailed: boolean;
+}
+
+export interface EnterpriseSeatsView {
+  accountName: string;
+  isAdmin: boolean;
+  seatCap: number;
+  seatsUsed: number;
+  contractEnd: number;
+  contractEnded: boolean;
+  /** The full roster for the admin; empty for other members. */
+  seats: EnterpriseSeat[];
+}
+
+/** The caller's Enterprise account seat view, or null when they are not an active member. */
+export async function listEnterpriseSeats(): Promise<EnterpriseSeatsView | null> {
+  const userId = getCurrentClerkUser()?.id;
+  if (!userId) return null;
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
+  if (!client || !api) return null;
+  if (!await waitForConvexAuthForUser(userId)) {
+    assertAccountStillCurrent(userId, 'loading Enterprise seats');
+    throw new Error('Authentication unavailable while loading Enterprise seats. Try again.');
+  }
+  return settleAccountOperation(
+    userId,
+    'loading Enterprise seats',
+    () => client.query(api.enterpriseSeats.listMySeats, {}),
+  );
+}
+
+/** Admin-only: invite people to the Enterprise account by email. */
+export async function inviteEnterpriseMembers(emails: string[]): Promise<{
+  invited: Array<{ email: string; memberId: string; status: 'created' | 'already_pending' | 'already_active' }>;
+}> {
+  const userId = requireSignedInUserId('invite people to the Enterprise account');
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
+  if (!client || !api) throw new Error('Convex unavailable');
+  await requireCurrentConvexUser(userId, 'inviting people to the Enterprise account');
+  return settleAccountOperation(
+    userId,
+    'inviting people to the Enterprise account',
+    () => client.mutation(api.enterpriseSeats.inviteMembers, { emails }),
+  );
+}
+
+/** Admin-only: remove a member or withdraw an invite. */
+export async function removeEnterpriseMember(
+  memberId: string,
+): Promise<{ ok: true; status: 'removed' | 'already_removed' }> {
+  const userId = requireSignedInUserId('remove an Enterprise member');
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
+  if (!client || !api) throw new Error('Convex unavailable');
+  await requireCurrentConvexUser(userId, 'removing an Enterprise member');
+  return settleAccountOperation(
+    userId,
+    'removing an Enterprise member',
+    () => client.mutation(
+      api.enterpriseSeats.removeMember,
+      { memberId: memberId as Id<'enterpriseMembers'> },
+    ),
+  );
+}
+
 /** Accept a Business Pro seat invite using the token from the email link. */
 export async function acceptBusinessInvite(grantId: string, token: string): Promise<void> {
   const userId = requireSignedInUserId('accept a Business Pro seat invite');
-  const client = await getConvexClient();
-  const api = await getConvexApi();
+  const [client, api] = await Promise.all([getConvexClient(), getConvexApi()]);
   if (!client || !api) throw new Error('Convex unavailable');
   await requireCurrentConvexUser(userId, 'accepting a Business Pro seat invite');
   await settleAccountOperation(

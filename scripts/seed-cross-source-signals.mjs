@@ -4,6 +4,10 @@ import { pathToFileURL } from 'node:url';
 import { loadEnvFile, runSeed, getRedisCredentials } from './_seed-utils.mjs';
 import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 import { CII_RISK_SCORE_CACHE_KEYS } from './_cii-risk-cache-keys.mjs';
+import { regionForCountry } from './shared/geography.js';
+import iso3ToIso2 from './shared/iso3-to-iso2.json' with { type: 'json' };
+import { physicalDivergenceStaleReason } from './shared/physical-divergence-staleness.js';
+import { METHODOLOGY_VERSION as PHYSICAL_DIVERGENCE_METHODOLOGY_VERSION } from './lib/physical-divergence.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -30,6 +34,8 @@ const SOURCE_KEYS = [
   'infra:outages:v1',
   'wildfire:fires:v1',
   `displacement:summary:v1:${new Date().getFullYear()}`,
+  'displacement:border-uk:v1',
+  'displacement:idmc-idu:v1',
   'forecast:predictions:v2',
   'gdelt:intel:tone:military',
   'gdelt:intel:tone:nuclear',
@@ -37,6 +43,7 @@ const SOURCE_KEYS = [
   'weather:alerts:v1',
   CII_RISK_SCORE_CACHE_KEYS.stale,
   'regulatory:actions:v1',
+  'market:physical-divergence:v1',
 ];
 
 // Reject preserved contract envelopes after the same age budgets used by
@@ -49,14 +56,17 @@ const SOURCE_MAX_AGE_MIN = Object.freeze({
   'market:stocks-bootstrap:v1': 30,
   'market:commodities-bootstrap:v1': 30,
   'cyber:threats-bootstrap:v2': 240,
-  'supply_chain:shipping:v2': 420,
+  'supply_chain:shipping:v2': 1140,
   'sanctions:pressure:v1': 720,
   'seismology:earthquakes:v1': 30,
   'radiation:observations:v1': 30,
   'infra:outages:v1': 30,
   'wildfire:fires:v1': 360,
+  'displacement:border-uk:v1': 2880,
+  'displacement:idmc-idu:v1': 2880,
   'forecast:predictions:v2': 90,
   'weather:alerts:v1': 45,
+  'market:physical-divergence:v1': 2160,
 });
 
 // ── Theater classification helpers ────────────────────────────────────────────
@@ -108,6 +118,16 @@ const REGION_THEATER_MAP = {
   'global markets': 'Global Markets',
 };
 
+const WEATHER_REGION_THEATER = Object.freeze({
+  'east-asia': 'East Asia',
+  europe: 'Western Europe',
+  latam: 'Latin America',
+  mena: 'Middle East',
+  'north-america': 'North America',
+  'south-asia': 'South Asia',
+  'sub-saharan-africa': 'Sub-Saharan Africa',
+});
+
 function normalizeTheater(raw) {
   if (!raw) return 'Global';
   const lower = String(raw).toLowerCase();
@@ -116,6 +136,11 @@ function normalizeTheater(raw) {
   }
   // Title-case the raw value as fallback
   return String(raw).trim().replace(/\b\w/g, c => c.toUpperCase()) || 'Global';
+}
+
+function weatherTheaterForCountry(countryCode) {
+  const regionId = regionForCountry(countryCode);
+  return WEATHER_REGION_THEATER[regionId] || normalizeTheater(countryCode);
 }
 
 // ── Signal category mapping for composite detection ────────────────────────────
@@ -141,6 +166,7 @@ const TYPE_CATEGORY = {
   CROSS_SOURCE_SIGNAL_TYPE_MEDIA_TONE_DETERIORATION: 'information',
   CROSS_SOURCE_SIGNAL_TYPE_RISK_SCORE_SPIKE: 'intelligence',
   CROSS_SOURCE_SIGNAL_TYPE_REGULATORY_ACTION: 'policy',
+  CROSS_SOURCE_SIGNAL_TYPE_PHYSICAL_PREMIUM_REGIME_TRANSITION: 'financial',
 };
 
 // Base severity weights for each signal type
@@ -172,6 +198,7 @@ const BASE_WEIGHT = {
   CROSS_SOURCE_SIGNAL_TYPE_WEATHER_EXTREME: 1.5,        // environmental — regional
   CROSS_SOURCE_SIGNAL_TYPE_MEDIA_TONE_DETERIORATION: 1.5, // sentiment — lagging
   CROSS_SOURCE_SIGNAL_TYPE_REGULATORY_ACTION: 2.0,      // policy action — direct market impact
+  CROSS_SOURCE_SIGNAL_TYPE_PHYSICAL_PREMIUM_REGIME_TRANSITION: 2.0,
 };
 
 function scoreTier(score) {
@@ -673,22 +700,47 @@ function extractWildfireEscalation(d) {
   return signals.slice(0, 2);
 }
 
-// Intentionally silent, and documented as such rather than "fixed".
-//
-// This extractor was written against a `crises[]` array carrying
-// `newDisplacements` and `trend`. displacement:summary:v1:<year> has never
-// published that shape: the writer emits an annual UNHCR *stock* —
-// `summary.countries[]` with code/name/refugees/idps/totalDisplaced
-// (seed-displacement-summary.mjs:175) — and carries no flow, delta or trend
-// field anywhere in the payload.
-//
-// So this is not a field-name mismatch that a rename fixes. A surge is a flow,
-// and choosing a totalDisplaced cutoff to stand in for one would be inventing a
-// calibration rather than repairing a read — the opposite of what the rest of
-// this change does. It stays silent until the signal is either sourced from a
-// flow series or redefined as a stock-level signal. See #5870.
-function extractDisplacementSurge() {
-  return [];
+// Only the daily arrival series has a complete weekly baseline. Annual stocks
+// and monthly encounters cannot stand in for newly arriving people.
+function extractDisplacementSurge(d) {
+  const routes = d['displacement:border-uk:v1']?.routes;
+  if (!Array.isArray(routes)) return [];
+  return routes.flatMap(route => {
+    const detectedAt = Date.parse(route.asOf);
+    if (route.kind !== 'arrival' || route.surge !== true || !Number.isFinite(detectedAt)
+      || detectedAt > Date.now() || Date.now() - detectedAt > 3 * 86400000
+      || !(route.last7Days >= 1000) || !/^[A-Z]{2}$/.test(route.countryCode)) return [];
+    return [{ id: `displacement:${route.id}`, type: 'CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE',
+      theater: weatherTheaterForCountry(route.countryCode), severity: scoreTier(BASE_WEIGHT.CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE),
+      severityScore: BASE_WEIGHT.CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE,
+      summary: `${route.name}: ${route.last7Days.toLocaleString('en-US')} arrivals in seven days, source-confirmed arrival surge (UK Home Office)`,
+      detectedAt, contributingTypes: [], signalCount: 0 }];
+  });
+}
+
+// IDMC Internal Displacement Updates (seed-idmc-idu-displacement.mjs): the
+// seeder flags a country whose last 30 days reach 5,000 people and three times
+// its monthly mean of the 150 days before. IDMC publishes a median of three
+// weeks after the displacement, so detectedAt is the latest displacement date,
+// not the read time, and the summary says so.
+const IDU_SURGE_LIMIT = 5;
+function extractInternalDisplacementSurge(d) {
+  const countries = d['displacement:idmc-idu:v1']?.countries;
+  if (!Array.isArray(countries)) return [];
+  return countries.flatMap(c => {
+    const iso2 = iso3ToIso2[c?.countryCode];
+    const detectedAt = Date.parse(`${c?.latestDisplacementDate}T00:00:00Z`);
+    if (c?.surge !== true || !iso2 || !Number.isFinite(detectedAt) || detectedAt > Date.now()
+      || !(safeNum(c.displaced30d) >= 5000)) return [];
+    const multiple = safeNum(c.baselineMonthly) > 0 ? ` (${(c.displaced30d / c.baselineMonthly).toFixed(1)}x its monthly average)` : '';
+    return [{ id: `displacement-idu:${c.countryCode}`, type: 'CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE',
+      theater: weatherTheaterForCountry(iso2), severity: scoreTier(BASE_WEIGHT.CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE),
+      severityScore: BASE_WEIGHT.CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE,
+      summary: `${c.countryName || c.countryCode}: ${Math.round(c.displaced30d).toLocaleString('en-US')} people displaced inside the country in 30 days${multiple}, latest ${c.latestDisplacementDate} (IDMC, published with a lag of weeks)`,
+      detectedAt, contributingTypes: [], signalCount: 0, displaced30d: safeNum(c.displaced30d) }];
+  }).sort((a, b) => b.displaced30d - a.displaced30d || a.id.localeCompare(b.id))
+    .slice(0, IDU_SURGE_LIMIT)
+    .map(({ displaced30d: _, ...signal }) => signal);
 }
 
 function extractForecastDeterioration(d) {
@@ -766,11 +818,16 @@ function extractWeatherExtreme(d) {
   // seed-weather-alerts.mjs:49) and publishes no category field.
   const extreme = alerts.filter(a => enumMatches(a.severity, 'extreme'));
   if (extreme.length === 0) return [];
-  // The alert carries areaDesc ('Kern County, CA; Tulare County, CA') and no
-  // country/region. Bucketing by that string would give almost every alert its
-  // own theater, which can never join a composite. The feed is NWS-only, so the
-  // theater is North America by construction.
-  const regionMap = new Map([['North America', extreme.length]]);
+  // Extreme alerts now include SWIC members outside North America. Missing
+  // countryCode (legacy NWS rows) still buckets as North America; other ISO2
+  // values use the canonical macro-theater vocabulary so weather can join
+  // other signal categories in composite escalation.
+  const regionMap = new Map();
+  for (const alert of extreme) {
+    const cc = String(alert?.countryCode || '').toUpperCase();
+    const theater = cc ? weatherTheaterForCountry(cc) : 'North America';
+    regionMap.set(theater, (regionMap.get(theater) || 0) + 1);
+  }
   const signals = [];
   for (const [theater, count] of regionMap) {
     const score = BASE_WEIGHT['CROSS_SOURCE_SIGNAL_TYPE_WEATHER_EXTREME'] * Math.min(2, 1 + count / 5);
@@ -786,7 +843,9 @@ function extractWeatherExtreme(d) {
       signalCount: 0,
     });
   }
-  return signals.slice(0, 2);
+  return signals
+    .sort((a, b) => (b.severityScore - a.severityScore) || a.theater.localeCompare(b.theater))
+    .slice(0, 2);
 }
 
 const GDELT_TONE_TOPICS = ['military', 'nuclear', 'maritime'];
@@ -927,6 +986,71 @@ function extractRegulatoryAction(d) {
   });
 }
 
+function extractPhysicalPremiumRegimeTransition(d) {
+  const payload = d['market:physical-divergence:v1'];
+  const nowMs = Date.now();
+  const readings = Array.isArray(payload?.readings) ? payload.readings : [];
+  const knownStates = new Set(['ok', 'insufficient_history', 'stale_input', 'missing_input']);
+  for (const reading of readings) {
+    if (!knownStates.has(reading?.state)) {
+      throw new TypeError(`Unknown physical divergence state: ${String(reading?.state)}`);
+    }
+  }
+  // SOURCE_MAX_AGE_MIN is enforced against a `_seed` envelope, and this key is written by a
+  // raw Lua SET that carries none — so its budget is inert unless applied here, against the
+  // snapshot's own clock. `evaluatedAt` is already published and already validated
+  // server-side.
+  // Applied only when the snapshot actually carries the clock: a legacy bare payload without
+  // `evaluatedAt` still falls through to the per-reading freshness checks below, which are
+  // what has been doing this work all along.
+  const maxAgeMs = SOURCE_MAX_AGE_MIN['market:physical-divergence:v1'] * 60_000;
+  const evaluatedAt = Date.parse(payload?.evaluatedAt ?? '');
+  if (Number.isFinite(evaluatedAt) && nowMs - evaluatedAt > maxAgeMs) return [];
+  const readingsByMetal = new Map(readings.map((reading) => [reading?.metal, reading]));
+  const transitions = Array.isArray(payload?.transitions) ? payload.transitions : [];
+  const targetMultiplier = { normal: 0.75, elevated: 1, stressed: 1.5, extreme: 2 };
+  const cutoff = nowMs - 48 * 3600 * 1000;
+  return transitions.flatMap((transition) => {
+    if (
+      !['gold', 'silver'].includes(transition?.metal)
+      || !Object.hasOwn(targetMultiplier, transition?.toRegime)
+      || !Object.hasOwn(targetMultiplier, transition?.fromRegime)
+      || transition.fromRegime === transition.toRegime
+      || !Number.isFinite(transition?.detectedAt)
+      || transition.detectedAt <= cutoff
+      || transition.detectedAt > nowMs
+      || typeof transition?.id !== 'string'
+      || transition.id !== `physical-premium:${transition.metal}:${transition.fromRegime}-${transition.toRegime}:${transition.detectedAt}`
+      || transition.methodologyVersion !== PHYSICAL_DIVERGENCE_METHODOLOGY_VERSION
+    ) return [];
+    // Freshness is per transitioning metal — the other metal may still be
+    // ramping (insufficient_history) or independently stale without suppressing
+    // a valid transition. The composite's all-or-nothing rule is separate.
+    const reading = readingsByMetal.get(transition.metal);
+    if (
+      reading?.state !== 'ok'
+      || physicalDivergenceStaleReason({
+        physicalAsOf: reading.physicalAsOf,
+        paperAsOf: reading.paperAsOf,
+        fxAsOf: reading.provenance?.fxAsOf,
+      }, nowMs) != null
+    ) return [];
+    const score = BASE_WEIGHT.CROSS_SOURCE_SIGNAL_TYPE_PHYSICAL_PREMIUM_REGIME_TRANSITION
+      * targetMultiplier[transition.toRegime];
+    return [{
+      id: transition.id,
+      type: 'CROSS_SOURCE_SIGNAL_TYPE_PHYSICAL_PREMIUM_REGIME_TRANSITION',
+      theater: 'Global Markets',
+      summary: `${transition.metal === 'gold' ? 'Gold' : 'Silver'} physical premium regime changed from ${transition.fromRegime} to ${transition.toRegime}`,
+      severity: scoreTier(score),
+      severityScore: score,
+      detectedAt: transition.detectedAt,
+      contributingTypes: [],
+      signalCount: 0,
+    }];
+  });
+}
+
 // ── Extractor registry ────────────────────────────────────────────────────────
 // Module scope (rather than inline in the aggregator) so the envelope-regression
 // suite can drive every extractor from one list: an extractor added without a
@@ -948,12 +1072,14 @@ const EXTRACTORS = Object.freeze([
   extractInfrastructureOutage,
   extractWildfireEscalation,
   extractDisplacementSurge,
+  extractInternalDisplacementSurge,
   extractForecastDeterioration,
   extractMarketStress,
   extractWeatherExtreme,
   extractMediaToneDeterioration,
   extractRiskScoreSpike,
   extractRegulatoryAction,
+  extractPhysicalPremiumRegimeTransition,
 ]);
 
 // ── Composite escalation detector ─────────────────────────────────────────────
@@ -999,9 +1125,9 @@ function detectCompositeEscalation(signals) {
 }
 
 // ── Main aggregator ───────────────────────────────────────────────────────────
-async function aggregateCrossSourceSignals() {
+async function aggregateCrossSourceSignals({ readSourceData = readAllSourceKeys } = {}) {
   console.log('  Reading source keys...');
-  const sourceData = await readAllSourceKeys();
+  const sourceData = await readSourceData();
   const foundKeys = Object.keys(sourceData);
   const missingKeys = SOURCE_KEYS.filter(k => !foundKeys.includes(k));
   console.log(`  Found ${foundKeys.length}/${SOURCE_KEYS.length} source keys populated`);
@@ -1016,6 +1142,14 @@ async function aggregateCrossSourceSignals() {
       const extracted = extractor(sourceData);
       allSignals.push(...extracted);
     } catch (err) {
+      // One flaky extractor must not sink the whole aggregate — except for a state this
+      // build does not implement. #6448: "an unknown/unhandled state must surface as an
+      // error, never silently map to 'normal'." Warning past it would publish a signal set
+      // that silently omits a source the producer believes is reporting, which is
+      // indistinguishable from "that source had nothing to say".
+      if (typeof err?.message === 'string' && err.message.startsWith('Unknown physical divergence state:')) {
+        throw err;
+      }
       console.warn(`  Extractor ${extractor.name} failed: ${err.message}`);
     }
   }
@@ -1093,6 +1227,7 @@ export {
   extractCyberEscalation,
   extractDisplacementSurge,
   extractEarthquakeSignificant,
+  extractInternalDisplacementSurge,
   extractForecastDeterioration,
   extractGpsJamming,
   extractInfrastructureOutage,
@@ -1102,6 +1237,7 @@ export {
   extractOrefAlertCluster,
   extractRadiationAnomaly,
   extractRegulatoryAction,
+  extractPhysicalPremiumRegimeTransition,
   extractRiskScoreSpike,
   extractSanctionsSurge,
   extractShippingDisruption,

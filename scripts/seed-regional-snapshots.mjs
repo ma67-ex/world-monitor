@@ -48,7 +48,8 @@ import { buildPreMeta, buildFinalMeta } from './regional-snapshot/snapshot-meta.
 import { diffRegionalSnapshot, inferTriggerReason } from './regional-snapshot/diff-snapshot.mjs';
 import { persistSnapshot, readLatestSnapshot } from './regional-snapshot/persist-snapshot.mjs';
 import { ALL_INPUT_KEYS, ALL_META_KEYS } from './regional-snapshot/freshness.mjs';
-import { generateSnapshotId, unwrapEnvelope, getCaseFileText } from './regional-snapshot/_helpers.mjs';
+import { generateSnapshotId, unwrapEnvelope } from './regional-snapshot/_helpers.mjs';
+import { hydrateEnergyImportAggregate } from './regional-snapshot/_energy-import-aggregate.mjs';
 import { generateRegionalNarrative, emptyNarrative } from './regional-snapshot/narrative.mjs';
 import { emitRegionalAlerts } from './regional-snapshot/alert-emitter.mjs';
 import { buildMobilityState } from './regional-snapshot/mobility.mjs';
@@ -102,6 +103,68 @@ async function readAllInputs() {
     }
   }
   return { sources, metaSources };
+}
+
+/**
+ * Fail-closed parse of an Upstash pipeline GET. Missing keys (null result)
+ * stay absent; a truncated response, command error, or malformed row aborts
+ * so regional scores are not published from a partial country read.
+ *
+ * @param {string[]} keys
+ * @param {unknown} results
+ * @returns {Record<string, unknown>}
+ */
+export function parseCountryPipelineResults(keys, results) {
+  if (!Array.isArray(results) || results.length !== keys.length) {
+    throw new Error(
+      `Redis pipeline read: expected ${keys.length} rows, got ${Array.isArray(results) ? results.length : 0}`,
+    );
+  }
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (let i = 0; i < keys.length; i += 1) {
+    const row = results[i];
+    if (row && typeof row === 'object' && /** @type {Record<string, unknown>} */ (row).error != null) {
+      throw new Error(
+        `Redis pipeline command failed: ${String(/** @type {Record<string, unknown>} */ (row).error)}`,
+      );
+    }
+    const raw = row && typeof row === 'object'
+      ? /** @type {Record<string, unknown>} */ (row).result
+      : undefined;
+    if (raw === null || raw === undefined) continue;
+    if (typeof raw !== 'string') {
+      throw new Error(`Redis pipeline read: ${keys[i]} returned a non-string result`);
+    }
+    try {
+      out[keys[i]] = unwrapEnvelope(JSON.parse(raw));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Redis pipeline read: ${keys[i]} returned unparseable JSON: ${msg}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Pipeline-GET arbitrary Redis keys and unwrap seed envelopes.
+ * Used to hydrate the audited energy-import aggregate from per-country
+ * resilience:static:{ISO2} records.
+ *
+ * @param {string[]} keys
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function readRedisKeys(keys) {
+  if (!keys.length) return {};
+  const { url, token } = getRedisCredentials();
+  const resp = await fetch(`${url}/pipeline`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(keys.map((k) => ['GET', k])),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) throw new Error(`Redis pipeline read: HTTP ${resp.status}`);
+  return parseCountryPipelineResults(keys, await resp.json());
 }
 
 /**
@@ -259,16 +322,19 @@ async function main() {
   const t0 = Date.now();
   console.log(`[regional-snapshots] Starting compute for ${REGIONS.length} regions`);
 
-  const runId = `${t0}-${Math.random().toString(16).slice(2, 8)}`;
-  const lockResult = await acquireLockSafely(SNAPSHOT_LOCK_DOMAIN, runId, SNAPSHOT_LOCK_TTL_MS);
-  if (!lockResult.locked) {
-    if (lockResult.skipped) {
-      console.warn('[regional-snapshots] Redis unavailable during lock acquisition; skipping run');
-    } else {
-      console.log('[regional-snapshots] Skipped: another run holds the lock');
-    }
-    return;
-  }
+  // Step 1: read all inputs once (shared across regions), plus seed-meta
+  // companions for inputs whose payloads lack top-level timestamps.
+  const { sources, metaSources } = await readAllInputs();
+  // Fail closed before compute and persistence when the audited producer,
+  // its transport, or any indexed country row is incomplete.
+  await hydrateEnergyImportAggregate(
+    sources,
+    readRedisKeys,
+    metaSources['seed-meta:resilience:static'],
+  );
+  const presentKeys = Object.entries(sources).filter(([, v]) => v !== null).length;
+  const presentMetaKeys = Object.entries(metaSources).filter(([, v]) => v !== null).length;
+  console.log(`[regional-snapshots] Read inputs: ${presentKeys}/${ALL_INPUT_KEYS.length} keys present, ${presentMetaKeys}/${ALL_META_KEYS.length} meta keys present`);
 
   try {
     // Step 1: read all inputs once (shared across regions), plus seed-meta

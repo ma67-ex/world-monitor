@@ -3,15 +3,41 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
 import {
+  ECCC_ALERTS_URL,
+  ECCC_ALERTS_URLS,
+  ECCC_HOST,
+  ECCC_LIVE_STATUSES,
+  ECCC_MAX_BYTES,
   MAX_ALERTS,
+  PER_SOURCE_FLOOR,
+  SWIC_ALERTS_URL,
+  SWIC_HOST,
+  SWIC_MAX_BYTES,
+  SWIC_MEMBERS_URL,
+  SWIC_SOURCE_DECISION,
+  WEATHER_ALERTS_SOURCE_VERSION,
   calculateCentroid,
+  carryFailedWeatherAlertSources,
+  countryCodeFromSwicUrl,
   eligibleAlertCount,
   extractCoordinates,
+  extractRings,
+  fetchApprovedWeatherJson,
+  fetchEcccAlertFeatures,
   formatTruncationWarning,
+  indexSwicMembers,
+  mapEcccRiskToSeverity,
+  mapSwicSeverity,
+  mergeAlertSources,
   requireAlertFeatures,
   selectAlerts,
+  selectEcccAlerts,
+  selectSwicAlerts,
   validateSelectedAlerts,
+  weatherAlertsAfterPublish,
+  weatherAlertNotifyCountryCode,
   weatherAlertNotifyLocation,
+  weatherAlertNotifySource,
 } from '../scripts/_weather-alert-select.mjs';
 
 const SEEDER_SOURCE = readFileSync(
@@ -138,6 +164,13 @@ describe('weather alert selection', () => {
     assert.equal(alert.centroid.length, 2);
   });
 
+  it('does not send a fabricated zero centroid from an invalid closed ring', () => {
+    const invalidRing = [[null, null], [null, null], [null, null], [null, null]];
+    const [alert] = selectAlerts([feature('Severe', 1, {}, { type: 'Polygon', coordinates: [invalidRing] })]);
+    assert.equal(alert.centroid, undefined);
+    assert.deepEqual(weatherAlertNotifyLocation(alert), {});
+  });
+
   it('caps description length at 500 characters', () => {
     const [alert] = selectAlerts([feature('Severe', 1, { description: 'y'.repeat(900) })]);
     assert.equal(alert.description.length, 500);
@@ -176,6 +209,73 @@ describe('weather alert selection', () => {
   it('extracts the outer ring of a MultiPolygon', () => {
     const coords = extractCoordinates({ type: 'MultiPolygon', coordinates: [[[[1, 2], [3, 4]]]] });
     assert.deepEqual(coords, [[1, 2], [3, 4]]);
+  });
+
+  it('rounds every Polygon and MultiPolygon position to five decimals', () => {
+    const ringA = [
+      [-100.1234567, 40.7654321],
+      [-99.9876543, 41.2345678],
+      [-100.1234567, 40.7654321],
+    ];
+    const ringB = [
+      [-80.111119, 30.999999],
+      [-79.222226, 31.333334],
+      [-80.111119, 30.999999],
+    ];
+    const roundedA = [
+      [-100.12346, 40.76543],
+      [-99.98765, 41.23457],
+      [-100.12346, 40.76543],
+    ];
+    const roundedB = [
+      [-80.11112, 31],
+      [-79.22223, 31.33333],
+      [-80.11112, 31],
+    ];
+
+    assert.deepEqual(extractCoordinates({ type: 'Polygon', coordinates: [ringA] }), roundedA);
+    assert.deepEqual(extractRings({ type: 'Polygon', coordinates: [ringA] }), [roundedA]);
+
+    const multiPolygon = { type: 'MultiPolygon', coordinates: [[ringA], [ringB]] };
+    assert.deepEqual(extractCoordinates(multiPolygon), roundedA);
+    assert.deepEqual(extractRings(multiPolygon), [roundedA, roundedB]);
+  });
+
+  it('omits geometry when rounding collapses a ring to zero area', () => {
+    // Every vertex within ~1m rounds onto the same position. The ring still has
+    // 4 positions and matching endpoints, so a length+endpoint check alone would
+    // publish a degenerate Polygon to third-party webhooks.
+    const subMetreRing = [
+      [-100.000004, 40.000004],
+      [-100.000001, 40.000004],
+      [-100.000001, 40.000001],
+      [-100.000004, 40.000004],
+    ];
+    const rounded = extractRings({ type: 'Polygon', coordinates: [subMetreRing] })[0];
+    assert.deepEqual(rounded, [[-100, 40], [-100, 40], [-100, 40], [-100, 40]],
+      'precondition: the ring really does collapse');
+    assert.equal(rounded.length, 4, 'precondition: position count still passes the old check');
+
+    const location = weatherAlertNotifyLocation({
+      centroid: [-100, 40],
+      coordinates: rounded,
+    });
+    assert.equal(location.lat, 40, 'the coarse anchor still publishes');
+    assert.equal(location.geometry, undefined, 'the degenerate polygon must NOT publish');
+  });
+
+  it('still publishes geometry for a real polygon after rounding', () => {
+    // Positive control for the test above — the distinct-vertex guard must not
+    // suppress ordinary county-scale alert polygons.
+    const realRing = [
+      [-100.1234567, 40.7654321],
+      [-99.9876543, 40.7654321],
+      [-99.9876543, 41.2345678],
+      [-100.1234567, 40.7654321],
+    ];
+    const rounded = extractRings({ type: 'Polygon', coordinates: [realRing] })[0];
+    const location = weatherAlertNotifyLocation({ centroid: [-100, 41], coordinates: rounded });
+    assert.equal(location.geometry.type, 'Polygon');
   });
 
   it('returns undefined centroid for an empty ring', () => {
@@ -321,4 +421,530 @@ describe('weather_alert notification location payload', () => {
       'ais-relay must spread weatherAlertNotifyLocation(a) INSIDE the weather_alert payload object so the already-computed centroid is published',
     );
   });
+});
+
+const ECCC_POLYGON = {
+  type: 'Polygon',
+  coordinates: [[[-80, 43], [-79, 43], [-79, 44], [-80, 44], [-80, 43]]],
+};
+function ecccFeature({ id, status_en = 'issued', risk_colour_en = 'red', alert_type = 'warning', geometry = ECCC_POLYGON, overrides = {} } = {}) {
+  return {
+    id,
+    geometry,
+    properties: {
+      alert_code: 'TOR',
+      alert_type,
+      alert_name_en: 'tornado warning',
+      alert_short_name_en: 'Tornado',
+      alert_text_en: 'A tornado warning is in effect.',
+      risk_colour_en,
+      feature_name_en: 'Toronto',
+      province: 'ON',
+      status_en,
+      validity_datetime: '2026-08-13T18:00:00.000Z',
+      expiration_datetime: '2026-08-13T22:00:00.000Z',
+      ...overrides,
+    },
+  };
+}
+
+describe('ECCC weather alert normalisation', () => {
+  it('maps an issued polygon feature onto the existing record with CA/eccc stamps and a centroid', () => {
+    const [alert] = selectEcccAlerts([ecccFeature({ id: 'ca-issued-1' })]);
+    assert.equal(alert.id, 'ca-issued-1');
+    assert.equal(alert.countryCode, 'CA');
+    assert.equal(alert.source, 'eccc');
+    assert.equal(alert.severity, 'Extreme');
+    assert.equal(alert.event, 'tornado warning');
+    assert.match(alert.headline, /tornado warning/);
+    assert.equal(alert.areaDesc, 'Toronto, ON');
+    assert.equal(alert.coordinates.length, 5);
+    assert.ok(Array.isArray(alert.centroid));
+    assert.equal(alert.centroid.length, 2);
+    // TRUE centre of the closed ring, not the closing-vertex-biased average.
+    // ECCC_POLYGON repeats its first vertex to close; averaging all five points
+    // counts it twice and yields -79.6 / 43.4. main fixed calculateCentroid to
+    // drop the duplicate (the same fix the NWS fixture pins), so this branch's
+    // original expectation was the biased value.
+    assert.equal(alert.centroid[0], -79.5);
+    assert.equal(alert.centroid[1], 43.5);
+  });
+
+  it('drops status_en=ended and status_en=active; keeps issued and continued', () => {
+    const features = [
+      ecccFeature({ id: 'ended-keep-out', status_en: 'ended' }),
+      ecccFeature({ id: 'issued-keep', status_en: 'issued' }),
+      ecccFeature({ id: 'continued-keep', status_en: 'continued' }),
+      ecccFeature({ id: 'active-keep-out', status_en: 'active' }),
+      ecccFeature({ id: 'ended-2', status_en: 'ended', risk_colour_en: 'orange' }),
+    ];
+    const alerts = selectEcccAlerts(features);
+    assert.deepEqual(alerts.map(a => a.id), ['issued-keep', 'continued-keep']);
+    assert.ok(!alerts.some(a => a.id === 'ended-keep-out'));
+    assert.ok(!alerts.some(a => a.id === 'ended-2'));
+    assert.ok(!alerts.some(a => a.id === 'active-keep-out'));
+  });
+
+  it('excludes ended ids from a merged published payload', () => {
+    const nws = selectAlerts([feature('Severe', 1)]);
+    const eccc = selectEcccAlerts([
+      ecccFeature({ id: 'ended-keep-out', status_en: 'ended' }),
+      ecccFeature({ id: 'ca-issued', status_en: 'issued' }),
+    ]);
+    const published = mergeAlertSources({ nws, eccc });
+    assert.ok(published.some(a => a.id === 'alert-1'));
+    assert.ok(published.some(a => a.id === 'ca-issued' && a.countryCode === 'CA'));
+    assert.ok(!published.some(a => a.id === 'ended-keep-out'));
+  });
+
+  it('maps ECCC risk colours onto the NWS severity vocabulary', () => {
+    assert.equal(mapEcccRiskToSeverity('red'), 'Extreme');
+    assert.equal(mapEcccRiskToSeverity('orange'), 'Severe');
+    assert.equal(mapEcccRiskToSeverity('yellow'), 'Moderate');
+    assert.equal(mapEcccRiskToSeverity('green'), 'Minor');
+    assert.equal(mapEcccRiskToSeverity(undefined, 'warning'), 'Severe');
+    assert.equal(mapEcccRiskToSeverity('purple'), 'Unknown');
+  });
+
+  it('drops unmapped ECCC severity so it cannot pass isEligible', () => {
+    const alerts = selectEcccAlerts([
+      ecccFeature({ id: 'unknown-colour', risk_colour_en: 'purple', alert_type: 'other' }),
+      ecccFeature({ id: 'yellow-ok', risk_colour_en: 'yellow' }),
+    ]);
+    assert.deepEqual(alerts.map(a => a.id), ['yellow-ok']);
+    assert.equal(alerts[0].severity, 'Moderate');
+  });
+});
+
+describe('NWS + ECCC merge and per-source caps', () => {
+  it('still publishes ECCC when NWS is missing (failed source)', () => {
+    const eccc = selectEcccAlerts([ecccFeature({ id: 'ca-only' })]);
+    const published = mergeAlertSources({ nws: null, eccc });
+    assert.deepEqual(published.map(a => a.id), ['ca-only']);
+    assert.equal(published[0].source, 'eccc');
+  });
+
+  it('still publishes NWS when ECCC is missing (failed source)', () => {
+    const nws = selectAlerts([feature('Severe', 7)]);
+    const published = mergeAlertSources({ nws, eccc: undefined });
+    assert.deepEqual(published.map(a => a.id), ['alert-7']);
+    assert.equal(published[0].source, 'nws');
+  });
+
+  it('keeps a per-source floor so CA alerts are not dropped behind US small-craft', () => {
+    const nws = Array.from({ length: MAX_ALERTS }, (_, i) => selectAlerts([feature('Minor', i)])[0]);
+    const eccc = Array.from({ length: 10 }, (_, i) => selectEcccAlerts([
+      ecccFeature({ id: `ca-extreme-${i}`, risk_colour_en: 'red' }),
+    ])[0]);
+    const published = mergeAlertSources({ nws, eccc });
+    assert.equal(published.length, MAX_ALERTS);
+    const ca = published.filter(a => a.source === 'eccc');
+    assert.equal(ca.length, 10, 'all 10 Extreme CA alerts must survive the US Minor flood');
+    assert.ok(published.filter(a => a.source === 'nws').length >= PER_SOURCE_FLOOR);
+  });
+
+  it('publishes an empty merged set as valid quiet (zeroIsValid purge path)', () => {
+    const published = mergeAlertSources({ nws: [], eccc: [] });
+    assert.deepEqual(published, []);
+    assert.equal(validateSelectedAlerts({ alerts: published }), true);
+  });
+});
+
+function swicItem({
+  id = 'IN-1',
+  mid = '066',
+  s = 4,
+  u = 4,
+  c = 3,
+  event = 'Heavy Rain',
+  headline = 'Heavy Rain is likely',
+  areaDesc = 'Panchkula district of Haryana',
+  url = 'in-ndma-xx/2026/08/18/12/00/00-abc.xml',
+  extras = {},
+} = {}) {
+  return {
+    id, mid, s, u, c, event, headline, areaDesc, url,
+    sent: '2026-08-18 12:00:00',
+    effective: '2026-08-18 12:00:00',
+    expires: '2026-08-18 15:00:00',
+    ...extras,
+  };
+}
+
+function swicMember({ mid = '066', code = 'IND', lat = 20.59, lng = 78.96, dept = 'India Meteorological Department' } = {}) {
+  return { mid, name: 'India', dept, lat, lng, code };
+}
+
+describe('WMO SWIC adapter on weather:alerts:v1', () => {
+  it('records an accepted source-decision with a 2 MiB host ceiling', () => {
+    assert.equal(SWIC_SOURCE_DECISION.host, SWIC_HOST);
+    assert.equal(SWIC_SOURCE_DECISION.status, 'accepted');
+    assert.equal(SWIC_SOURCE_DECISION.reason, 'RAILWAY_PREFLIGHT_OK');
+    assert.equal(SWIC_SOURCE_DECISION.requestCount, 2);
+    assert.equal(SWIC_MAX_BYTES, 2 * 1024 * 1024);
+    assert.ok(SWIC_MAX_BYTES > 256 * 1024);
+    assert.match(SWIC_ALERTS_URL, /^https:\/\/severeweather\.wmo\.int\/json\/wmo_all\.json$/);
+    assert.match(SWIC_MEMBERS_URL, /^https:\/\/severeweather\.wmo\.int\/json\/wmo_member\.json$/);
+    assert.equal(WEATHER_ALERTS_SOURCE_VERSION, 'nws+eccc+swic-v1');
+    assert.match(SEEDER_SOURCE, /CANONICAL_KEY = 'weather:alerts:v1'/);
+    assert.match(SEEDER_SOURCE, /fetchSwicAlertCatalog/);
+    assert.match(
+      SEEDER_SOURCE,
+      /readCanonicalValue\(CANONICAL_KEY\)/,
+      'the standalone writer must read the current envelope before a degraded overwrite',
+    );
+    assert.match(
+      SEEDER_SOURCE,
+      /carryFailedWeatherAlertSources/,
+      'the standalone writer must carry only the failed source slices',
+    );
+    assert.match(
+      SEEDER_SOURCE,
+      /afterPublish:\s*weatherAlertsAfterPublish/,
+      'degraded source state must reach seed-meta through freshnessMetaPatch',
+    );
+    assert.doesNotMatch(SEEDER_SOURCE, /weather:alerts:canada/);
+    assert.doesNotMatch(AIS_RELAY_SOURCE, /canada_weather_alert/);
+    assert.match(AIS_RELAY_SOURCE, /eventType:\s*'weather_alert'/);
+  });
+
+  it('maps CAP s codes onto the NWS severity vocabulary', () => {
+    assert.equal(mapSwicSeverity(1), 'Minor');
+    assert.equal(mapSwicSeverity(2), 'Moderate');
+    assert.equal(mapSwicSeverity(3), 'Severe');
+    assert.equal(mapSwicSeverity(4), 'Extreme');
+    assert.equal(mapSwicSeverity(0), 'Unknown');
+  });
+
+  it('derives ISO2 from the CAP url prefix and the member ISO3 code', () => {
+    assert.equal(countryCodeFromSwicUrl('in-ndma-xx/2026/08/18/x.xml'), 'IN');
+    assert.equal(countryCodeFromSwicUrl('cn-cma-xx/foo.xml'), 'CN');
+    assert.equal(countryCodeFromSwicUrl(''), null);
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+    const [alert] = selectSwicAlerts([swicItem({ url: '' })], members);
+    assert.equal(alert.countryCode, 'IN');
+  });
+
+  it('renders geocode-only records as country-centroid points, not polygons', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember({ lat: 20.5, lng: 78.9 })] }]);
+    const [alert] = selectSwicAlerts([swicItem()], members);
+    assert.equal(alert.source, 'swic');
+    assert.equal(alert.geometryPrecision, 'country');
+    assert.deepEqual(alert.coordinates, []);
+    assert.deepEqual(alert.centroid, [78.9, 20.5]);
+    assert.equal(alert.areaDesc, 'Panchkula district of Haryana');
+    const location = weatherAlertNotifyLocation(alert);
+    assert.equal(location.lat, 20.5);
+    assert.equal(location.lon, 78.9);
+    assert.equal(location.geometry, undefined);
+  });
+
+  it('falls back to the country when SWIC point coordinates are missing values', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+    for (const bad of ['', '  ', false, true, [], [12], {}, null]) {
+      const [alert] = selectSwicAlerts([swicItem({ extras: { lat: bad, lon: bad } })], members);
+      assert.equal(alert.geometryPrecision, 'country');
+      assert.deepEqual(alert.centroid, [78.96, 20.59]);
+    }
+  });
+
+  it('drops a SWIC alert whose member coordinates are missing rather than placing it at 0,0', () => {
+    for (const bad of ['', '  ', false, true, [], {}, null]) {
+      const members = indexSwicMembers([{ ra: 2, members: [swicMember({ lat: bad, lng: bad })] }]);
+      assert.deepEqual(selectSwicAlerts([swicItem()], members), []);
+    }
+  });
+
+  it('keeps genuine zero coordinates and quoted numeric strings in SWIC locations', () => {
+    for (const coordinate of [0, '0', ' 12.5 ']) {
+      const [point] = selectSwicAlerts([swicItem({ extras: { lat: coordinate, lon: coordinate } })]);
+      assert.equal(point.geometryPrecision, 'point');
+      assert.deepEqual(point.centroid, [Number(coordinate), Number(coordinate)]);
+    }
+  });
+
+  it('normalizes offset-free SWIC timestamps to explicit UTC instants', () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+      const [alert] = selectSwicAlerts([swicItem()], members);
+      assert.equal(alert.onset, '2026-08-18T12:00:00.000Z');
+      assert.equal(alert.expires, '2026-08-18T15:00:00.000Z');
+      assert.equal(new Date(alert.expires).toISOString(), '2026-08-18T15:00:00.000Z');
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
+  it('uses item geometry as the polygon tier when SWIC publishes a ring', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+    const ring = [[78, 20], [79, 20], [79, 21], [78, 21], [78, 20]];
+    const [alert] = selectSwicAlerts([swicItem({
+      extras: { geometry: { type: 'Polygon', coordinates: [ring] } },
+    })], members);
+    assert.equal(alert.geometryPrecision, 'polygon');
+    assert.deepEqual(alert.coordinates, ring);
+    assert.equal(weatherAlertNotifyLocation(alert).geometry.type, 'Polygon');
+  });
+
+  it('skips US and CA SWIC rows so NWS/ECCC keep the polygon-tier slots', () => {
+    const members = indexSwicMembers([{
+      ra: 4,
+      members: [
+        { mid: '093', name: 'United States', dept: 'NWS', lat: 39, lng: -98, code: 'USA' },
+        { mid: '056', name: 'Canada', dept: 'ECCC', lat: 56, lng: -106, code: 'CAN' },
+        swicMember(),
+      ],
+    }]);
+    const alerts = selectSwicAlerts([
+      swicItem({ id: 'us-1', mid: '093', url: 'us-nws-en/x.xml' }),
+      swicItem({ id: 'ca-1', mid: '056', url: 'ca-eccc-en/x.xml' }),
+      swicItem({ id: 'in-1', mid: '066', url: 'in-ndma-xx/x.xml' }),
+    ], members);
+    assert.deepEqual(alerts.map((a) => a.id), ['in-1']);
+  });
+
+  it('drops Unknown SWIC severity and rows with no placeable centroid', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember({ lat: 999, lng: 999 })] }]);
+    const alerts = selectSwicAlerts([
+      swicItem({ id: 'unknown', s: 0 }),
+      swicItem({ id: 'no-geo', extras: { url: '' } }),
+    ], members);
+    assert.deepEqual(alerts, []);
+  });
+
+  it('still publishes SWIC when NWS is missing, and NWS when SWIC is missing', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+    const swic = selectSwicAlerts([swicItem({ id: 'in-only' })], members);
+    const nws = selectAlerts([feature('Severe', 7)]);
+    assert.deepEqual(mergeAlertSources({ nws: null, eccc: [], swic }).map((a) => a.id), ['in-only']);
+    assert.deepEqual(mergeAlertSources({ nws, eccc: [], swic: undefined }).map((a) => a.id), ['alert-7']);
+  });
+
+  it('carries only the failed source slices from the previous weather envelope', () => {
+    const carried = carryFailedWeatherAlertSources([
+      { id: 'nws-old', source: 'nws' },
+      { id: 'eccc-old', source: 'eccc' },
+      { id: 'swic-old', source: 'swic' },
+      { id: 'legacy-untagged' },
+    ], ['nws', 'swic']);
+
+    assert.deepEqual(carried.nws.map((alert) => alert.id), ['nws-old']);
+    assert.deepEqual(carried.eccc, []);
+    assert.deepEqual(carried.swic.map((alert) => alert.id), ['swic-old']);
+  });
+
+  it('projects standalone source degradation into freshness metadata', () => {
+    assert.deepEqual(
+      weatherAlertsAfterPublish({
+        alerts: [],
+        sourceState: 'degraded',
+        errorCode: 'WEATHER_ALERT_SOURCE_INCOMPLETE',
+        failedSources: ['swic'],
+        skipReason: 'swic-unavailable',
+      }),
+      {
+        freshnessMetaPatch: {
+          sourceState: 'degraded',
+          errorCode: 'WEATHER_ALERT_SOURCE_INCOMPLETE',
+          failedSources: ['swic'],
+          skipReason: 'swic-unavailable',
+        },
+      },
+    );
+    assert.deepEqual(
+      weatherAlertsAfterPublish({ alerts: [] }),
+      { freshnessMetaPatch: { sourceState: 'ok' } },
+    );
+  });
+
+  it('keeps a SWIC floor so Extreme India alerts survive a US Minor flood', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+    const nws = Array.from({ length: MAX_ALERTS }, (_, i) => selectAlerts([feature('Minor', i)])[0]);
+    const swic = Array.from({ length: 10 }, (_, i) => selectSwicAlerts([
+      swicItem({ id: `in-extreme-${i}`, s: 4 }),
+    ], members)[0]);
+    const published = mergeAlertSources({ nws, eccc: [], swic });
+    assert.equal(published.length, MAX_ALERTS);
+    assert.equal(published.filter((a) => a.source === 'swic').length, 10);
+    assert.ok(published.filter((a) => a.source === 'nws').length >= PER_SOURCE_FLOOR);
+  });
+
+  it('derives weather_alert source and countryCode instead of hardcoding NWS/US', () => {
+    const members = indexSwicMembers([{ ra: 2, members: [swicMember()] }]);
+    const [swic] = selectSwicAlerts([swicItem()], members);
+    assert.equal(weatherAlertNotifySource(swic), 'WMO SWIC');
+    assert.equal(weatherAlertNotifyCountryCode(swic), 'IN');
+    assert.equal(weatherAlertNotifySource({ source: 'eccc', countryCode: 'CA' }), 'ECCC');
+    assert.equal(weatherAlertNotifyCountryCode({ source: 'eccc', countryCode: 'CA' }), 'CA');
+    assert.equal(weatherAlertNotifyCountryCode({ source: 'swic' }), undefined);
+    assert.match(
+      AIS_RELAY_SOURCE,
+      /source:\s*weatherAlertNotifySource\(a\)/,
+    );
+    assert.match(
+      AIS_RELAY_SOURCE,
+      /weatherAlertNotifyCountryCode\(a\)/,
+    );
+    assert.doesNotMatch(
+      AIS_RELAY_SOURCE,
+      /countryCode:\s*a\.countryCode\s*\|\|\s*\(a\.source === 'eccc' \? 'CA' : 'US'\)/,
+    );
+  });
+
+  it('pins the SWIC host, rejects redirects, and caps response bytes', async () => {
+    await assert.rejects(
+      fetchApprovedWeatherJson('https://example.test/wmo_all.json', {
+        allowedHosts: [SWIC_HOST],
+        maxBytes: SWIC_MAX_BYTES,
+      }),
+      /UNTRUSTED_SOURCE_HOST/,
+    );
+
+    let init;
+    const payload = await fetchApprovedWeatherJson(SWIC_ALERTS_URL, {
+      allowedHosts: [SWIC_HOST],
+      maxBytes: SWIC_MAX_BYTES,
+      accept: 'application/json',
+      fetchFn: async (_url, options) => {
+        init = options;
+        return new Response(JSON.stringify({ itemCount: 0, items: [] }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    assert.equal(init.redirect, 'error');
+    assert.deepEqual(payload, { itemCount: 0, items: [] });
+
+    await assert.rejects(
+      fetchApprovedWeatherJson(SWIC_ALERTS_URL, {
+        allowedHosts: [SWIC_HOST],
+        maxBytes: 10,
+        fetchFn: async () => new Response('{"this":"payload is too large"}'),
+      }),
+      /RESPONSE_TOO_LARGE/,
+    );
+  });
+});
+
+describe('bounded ECCC pagination', () => {
+  const collection = (features, numberMatched = features.length) => ({
+    type: 'FeatureCollection', numberMatched, numberReturned: features.length, features,
+  });
+  const pagedFetch = (issued, continued = [], requests = []) => async (url) => {
+    const params = new URL(url).searchParams;
+    const status = params.get('status_en');
+    const offset = Number(params.get('offset') || 0);
+    const limit = Number(params.get('limit'));
+    requests.push({ status, offset, limit, sortby: params.get('sortby') });
+    const rows = status === 'issued' ? issued : continued;
+    return Response.json(collection(rows.slice(offset, offset + limit), rows.length));
+  };
+
+  it('recovers a national collection over 4 MiB with complete pages below 4 MiB', async () => {
+    const issued = Array.from({ length: 300 }, (_, i) => ecccFeature({
+      id: `issued-${String(i).padStart(4, '0')}`, overrides: { description_en: 'x'.repeat(15_000) },
+    }));
+    const continued = [ecccFeature({ id: 'continued-1', status_en: 'continued' })];
+    assert.ok(Buffer.byteLength(JSON.stringify(collection(issued))) > ECCC_MAX_BYTES);
+    assert.ok(Buffer.byteLength(JSON.stringify(collection(issued.slice(0, 250), 300))) < ECCC_MAX_BYTES);
+    const requests = [];
+    const result = await fetchEcccAlertFeatures({ fetchFn: pagedFetch(issued, continued, requests) });
+    assert.equal(result.partial, false);
+    assert.deepEqual(result.features.map((f) => f.id), [...issued, ...continued].map((f) => f.id));
+    assert.deepEqual(requests, [
+      { status: 'issued', offset: 0, limit: 250, sortby: 'feature_id' },
+      { status: 'issued', offset: 250, limit: 250, sortby: 'feature_id' },
+      { status: 'continued', offset: 0, limit: 250, sortby: 'feature_id' },
+    ]);
+  });
+  it('accepts complete zero collections and pages both live statuses', async () => {
+    const zero = await fetchEcccAlertFeatures({ fetchFn: pagedFetch([]) });
+    assert.deepEqual(zero.features, []);
+    assert.equal(zero.partial, false);
+    const rows = (status) => Array.from({ length: 251 }, (_, i) => ecccFeature({ id: `${status}-${i}`, status_en: status }));
+    const result = await fetchEcccAlertFeatures({ fetchFn: pagedFetch(rows('issued'), rows('continued')) });
+    assert.equal(result.partial, false);
+    assert.equal(result.features.length, 502);
+  });
+
+  for (const [name, secondPage, reason] of [
+    ['count drift', collection([{ id: 'b' }], 3), 'ECCC_COUNT_DRIFT'],
+    ['repeated page', collection([{ id: 'a' }], 2), 'ECCC_DUPLICATE_ID'],
+    ['no progress', collection([], 2), 'ECCC_PAGE_PROGRESS'],
+    ['count underrun', collection([{ id: 'b' }, { id: 'c' }], 2), 'ECCC_PAGE_PROGRESS'],
+    ['returned mismatch', { ...collection([{ id: 'b' }], 2), numberReturned: 0 }, 'ECCC_MALFORMED_PAGE'],
+    ['missing features', { numberMatched: 2, numberReturned: 1 }, 'features array'],
+    ['missing counts', { type: 'FeatureCollection', features: [{ id: 'b' }] }, 'ECCC_MALFORMED_PAGE'],
+    ['invalid count', collection([{ id: 'b' }], '2'), 'ECCC_MALFORMED_PAGE'],
+    ['invalid collection', { ...collection([{ id: 'b' }], 2), type: 'Feature' }, 'ECCC_MALFORMED_PAGE'],
+    ['missing ID', collection([{}], 2), 'ECCC_INVALID_ID'],
+    ['duplicate IDs within page', collection([{ id: 'b' }, { id: 'b' }], 3), 'ECCC_DUPLICATE_ID'],
+    ['oversized page count', collection(Array.from({ length: 251 }, (_, i) => ({ id: `b${i}` })), 300), 'ECCC_MALFORMED_PAGE'],
+    ['request failure', null, 'HTTP 503'],
+  ]) {
+    it(`rejects ${name} without returning an incomplete status as success`, async () => {
+      const matched = name === 'duplicate IDs within page' ? 3 : name === 'oversized page count' ? 300 : 2;
+      const result = await fetchEcccAlertFeatures({ fetchFn: async (url) => {
+        const p = new URL(url).searchParams;
+        if (p.get('status_en') === 'continued') return Response.json(collection([{ id: 'continued' }]));
+        if (p.get('offset') === '0') return Response.json(collection([{ id: 'a' }], matched));
+        return secondPage ? Response.json(secondPage) : new Response('', { status: 503 });
+      } });
+      assert.equal(result.partial, true);
+      assert.deepEqual(result.failedStatuses, ['issued']);
+      assert.deepEqual(result.features, [{ id: 'continued' }]);
+      assert.ok(result.failureDetail.includes(reason), result.failureDetail);
+    });
+  }
+
+  it('rejects duplicate IDs across statuses', async () => {
+    const result = await fetchEcccAlertFeatures({ fetchFn: pagedFetch([{ id: 'same' }], [{ id: 'same' }]) });
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.failedStatuses, ['continued']);
+    assert.match(result.failureDetail, /ECCC_DUPLICATE_ID/);
+  });
+
+  it('keeps the per-response ceiling with and without content-length', async () => {
+    for (const advertised of [false, true]) {
+      await assert.rejects(fetchEcccAlertFeatures({ fetchFn: async () => new Response('x'.repeat(ECCC_MAX_BYTES + 1), {
+        headers: advertised ? { 'content-length': String(ECCC_MAX_BYTES + 1) } : {},
+      }) }), /RESPONSE_TOO_LARGE/);
+    }
+  });
+
+  it('caps actual aggregate bytes across statuses at 8 MiB, including UTF-8', async () => {
+    let requests = 0;
+    const pad = 'é'.repeat(1_500_000);
+    const result = await fetchEcccAlertFeatures({ fetchFn: async (url) => {
+      requests += 1;
+      const p = new URL(url).searchParams;
+      const issued = p.get('status_en') === 'issued';
+      const body = JSON.stringify(collection([{ id: `${issued}-${p.get('offset')}`, pad }], issued ? 1 : 2));
+      assert.ok(Buffer.byteLength(body) < ECCC_MAX_BYTES);
+      return new Response(body, { headers: { 'content-length': '1' } });
+    } });
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.failedStatuses, ['continued']);
+    assert.match(result.failureDetail, /ECCC_AGGREGATE_TOO_LARGE/);
+    assert.equal(requests, 3);
+  });
+
+  it('permits eight total pages but never requests a ninth', async () => {
+    for (const issuedCount of [7, 8, 9]) {
+      let requests = 0;
+      const result = await fetchEcccAlertFeatures({ fetchFn: async (url) => {
+        requests += 1;
+        const p = new URL(url).searchParams;
+        const issued = p.get('status_en') === 'issued';
+        return Response.json(collection([{ id: `${issued}-${p.get('offset')}` }], issued ? issuedCount : 1));
+      } }).catch((error) => error);
+      assert.equal(requests, 8);
+      if (issuedCount === 7) assert.equal(result.partial, false);
+      else assert.match(result.failureDetail || result.message, /ECCC_PAGE_LIMIT/);
+    }
+  });
+
 });

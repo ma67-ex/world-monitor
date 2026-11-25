@@ -10,13 +10,19 @@
  *   import { runBundle } from './_bundle-runner.mjs';
  *   await runBundle('ecb-eu', [ { label, script, seedMetaKey, freshnessMetaKey, completionMetaKey, intervalMs, timeoutMs } ]);
  *
- * Budget (opt-in): Railway cron services SIGKILL the container at 10min. If
- * the sum of timeoutMs for sections that happen to be due exceeds ~9min, we
- * risk losing the in-flight section's logs AND marking the job as crashed.
- * Callers on Railway cron can pass `{ maxBundleMs }` to enforce a wall-time
- * budget — sections whose worst-case timeout wouldn't fit in the remaining
- * budget are deferred to the next tick. Default is Infinity (no budget) so
- * existing bundles whose individual sections already exceed 9min (e.g.
+ * Budget (opt-in): a project-set admission limit, not a platform limit.
+ * Railway does not terminate a cron run (docs.railway.com/cron-jobs: it skips
+ * the next scheduled run while the previous one is still active), and
+ * seed-bundle-energy-sources finished a 607.5s run in one container on
+ * 2026-11-06. #3094 assumed a 10min container kill from a portwatch run whose
+ * last section died with no output; that cause was never confirmed.
+ * Callers can pass `{ maxBundleMs }` to limit section admission: sections
+ * whose worst-case timeout would not fit in the remaining budget are deferred.
+ * This reduces the risk of running into the next scheduled tick, but does not
+ * prevent it: derived-signals has a 570s budget and a 5-minute schedule.
+ * The budget does not guarantee a maximum tick duration. Freshness reads and
+ * onTerminalComplete can continue after it is exhausted.
+ * Default is Infinity (no budget), so bundles whose sections exceed 9min (e.g.
  * 600_000-1 timeouts in imf-extended, energy-sources) are not silently
  * broken by adopting the runner.
  *
@@ -34,7 +40,13 @@
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GRACEFUL_FETCH_FAILURE_EXIT_CODE, loadEnvFile } from './_seed-utils.mjs';
+import {
+  BUNDLE_COMPLETION_META_KEY_ENV,
+  BUNDLE_SECTION_TIMEOUT_MS_ENV,
+  GRACEFUL_FETCH_FAILURE_EXIT_CODE,
+  loadEnvFile,
+  PUBLISH_BLOCKED_EXIT_CODE,
+} from './_seed-utils.mjs';
 import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -62,17 +74,52 @@ const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 export const REDIS_READ_TIMEOUT_MS = 5_000;
 
 async function readRedisKey(key) {
-  if (!REDIS_URL || !REDIS_TOKEN) return null;
+  return (await readRedisKeyOrUndefined(key)) ?? null;
+}
+
+// Like readRedisKey, but a failed read returns undefined so callers that must
+// not mistake an unreadable key for a missing one can tell them apart.
+async function readRedisKeyOrUndefined(key) {
+  if (!REDIS_URL || !REDIS_TOKEN) return undefined;
   try {
     const resp = await fetch(`${REDIS_URL}/get/${encodeURIComponent(key)}`, {
       headers: { Authorization: `Bearer ${REDIS_TOKEN}` },
       signal: AbortSignal.timeout(REDIS_READ_TIMEOUT_MS),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) return undefined;
     const body = await resp.json();
     return body.result ? JSON.parse(body.result) : null;
   } catch {
-    return null;
+    return undefined;
+  }
+}
+
+export const SOURCE_RETRY_CLAIM_SCRIPT = [
+  "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
+  "redis.call('SET', KEYS[1], ARGV[2], 'XX', 'KEEPTTL')",
+  'return 1',
+].join('\n');
+
+async function claimSourceRetry(claim) {
+  if (!REDIS_URL || !REDIS_TOKEN) return false;
+  try {
+    const response = await fetch(REDIS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${REDIS_TOKEN}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'worldmonitor-bundle-runner/1.0',
+      },
+      body: JSON.stringify([
+        'EVAL',
+        SOURCE_RETRY_CLAIM_SCRIPT,
+        1, claim.key, claim.previousValue, claim.nextValue,
+      ]),
+      signal: AbortSignal.timeout(REDIS_READ_TIMEOUT_MS),
+    });
+    return response.ok && (await response.json()).result === 1;
+  } catch {
+    return false;
   }
 }
 
@@ -122,18 +169,105 @@ async function writeBundleHeartbeat(label) {
   }
 }
 
+export function sectionFailureKey(label, sectionLabel) {
+  return `bundle:section-failure:${label}:${sectionLabel}`;
+}
+
+export function sectionDeferralKey(label, sectionLabel) {
+  return `bundle:section-deferral:${label}:${sectionLabel}`;
+}
+
+/**
+ * TTL for a section's outcome records: outlives the 2x-interval stall
+ * threshold with a full interval to spare.
+ */
+export function sectionOutcomeTtlSeconds(section) {
+  return Math.ceil(Math.max(DAY, section.intervalMs * (STALL_AGE_INTERVAL_MULTIPLE + 1)) / 1000);
+}
+
+/**
+ * Record each section's failed runs and deferrals so a later stall can name
+ * its cause.
+ *
+ * The stall guard below sees only seed-meta age, and the age looks the same
+ * whether the section lost every budget race or was admitted and failed at the
+ * source on every tick. Both produced the same "starvation" line on
+ * seed-bundle-macro: Amman on 2026-11-16 (#10833) and Food-MIT on 2026-11-19,
+ * when viwanda.go.tz returned HTTP 500 site-wide. A failure alone does not
+ * settle it: a section can fail once, its upstream can recover, and it can
+ * then lose every budget race. So deferrals are recorded too, and a stall is
+ * blamed on the source only when nothing deferred the section after its last
+ * failed run. A later success advances seed-meta past both records, which
+ * retires them. All writes go out in one pipeline at the end of the tick.
+ */
+// Returns the keys Redis confirmed, so a caller can depend on a record landing.
+async function writeSectionOutcomes(label, commands) {
+  const written = new Set();
+  if (!commands.length || !REDIS_URL || !REDIS_TOKEN) return written;
+  try {
+    const resp = await fetch(`${REDIS_URL}/pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${REDIS_TOKEN}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'worldmonitor-bundle-runner/1.0',
+      },
+      body: JSON.stringify(commands),
+      signal: AbortSignal.timeout(REDIS_READ_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      console.warn(`[Bundle:${label}] section outcome records not written: HTTP ${resp.status}`);
+      return written;
+    }
+    const replies = await resp.json().catch(() => null);
+    const rejected = [];
+    for (const [i, command] of commands.entries()) {
+      if (Array.isArray(replies) && replies[i]?.result === 'OK') written.add(command[1]);
+      else rejected.push(command[1]);
+    }
+    if (rejected.length) console.warn(`[Bundle:${label}] section outcome records not written: ${rejected.join(', ')}`);
+  } catch (err) {
+    console.warn(`[Bundle:${label}] section outcome records not written: ${err instanceof Error ? err.message : err}`);
+  }
+  return written;
+}
+
 /**
  * Read section freshness for the interval gate.
  *
- * Returns `{ fetchedAt }` or null. A declared `freshnessMetaKey` is authoritative
+ * Returns `{ fetchedAt, retryAt?, retryClaim? }` or null. A declared `freshnessMetaKey` is authoritative
  * for sources whose canonical envelope may be republished from retained
  * last-good data. When `completionMetaKey` is also declared, its timestamp must
  * be at or after source transport success; an older completion belongs to a
  * prior run and cannot attest a newer pre-publication heartbeat. Otherwise
  * prefer envelope-form data when `canonicalKey` is declared, then fall back to
  * the legacy `seed-meta:<key>` read.
+ *
+ * `completionMetaKey` applies the same rule to the canonical clock (#6960).
+ * The bundle passes a dedicated marker key to runSeed, which writes it only
+ * after the canonical envelope, every extra key, post-publish hooks, and
+ * freshness bookkeeping finish. Its fetchedAt must equal the canonical
+ * envelope timestamp, binding the proof to one exact run.
+ *
+ * Only sections that declare it are affected. Most canonical-clock members
+ * publish no seed-meta at all, and requiring an attestation from them would
+ * mark them due on every tick — the #6806 failure this must not reintroduce.
  */
 export async function readSectionFreshness(section, readKey = readRedisKey) {
+  // Opt-in, per the invariant above: a section that declares no
+  // `expectedSourceVersion` keeps its pre-migration clock byte-for-byte,
+  // error markers included. The error-marker check exists only so a FAILED
+  // migration cannot claim success — seed-owid-energy-mix's failure path
+  // writes a fresh `fetchedAt` under the NEW sourceVersion, so without it the
+  // gate would pass on the very run it must reject. Applying that check to
+  // every section instead would strip the fresh-fetchedAt backoff that
+  // sections like Resilience-Static (90-day interval) rely on, making them due
+  // on every tick — the #6806 failure this docstring forbids.
+  const isErrorMarker = (meta) => meta?.status === 'error' || meta?.state === 'ERROR';
+  const acceptsVersion = (meta) => (
+    !section.expectedSourceVersion
+    || (!isErrorMarker(meta) && meta?.sourceVersion === section.expectedSourceVersion)
+  );
   if (section.freshnessMetaKey) {
     if (section.requireCanonical && section.canonicalKey) {
       const canonical = await readKey(section.canonicalKey);
@@ -141,7 +275,7 @@ export async function readSectionFreshness(section, readKey = readRedisKey) {
     }
     const raw = await readKey(section.freshnessMetaKey);
     const meta = unwrapEnvelope(raw).data;
-    if (!Number.isFinite(meta?.fetchedAt)) return null;
+    if (!Number.isFinite(meta?.fetchedAt) || !acceptsVersion(meta)) return null;
     if (!section.completionMetaKey) return { fetchedAt: meta.fetchedAt };
     const completionRaw = await readKey(section.completionMetaKey);
     const completion = unwrapEnvelope(completionRaw).data;
@@ -156,7 +290,18 @@ export async function readSectionFreshness(section, readKey = readRedisKey) {
   if (section.canonicalKey) {
     const raw = await readKey(section.canonicalKey);
     const { _seed } = unwrapEnvelope(raw);
-    if (_seed?.fetchedAt) return { fetchedAt: _seed.fetchedAt };
+    if (_seed?.fetchedAt) {
+      if (!acceptsVersion(_seed)) return null;
+      if (!section.completionMetaKey) return { fetchedAt: _seed.fetchedAt };
+      const completionRaw = await readKey(section.completionMetaKey);
+      const completion = unwrapEnvelope(completionRaw).data;
+      // Absent is due, not fresh: runSeed writes this marker with
+      // max(7d, ttlSeconds), so it cannot expire before the canonical key after
+      // a completed run. Missing means the run never reached the final write.
+      if (!Number.isFinite(completion?.fetchedAt)) return null;
+      if (completion.fetchedAt !== _seed.fetchedAt) return null;
+      return { fetchedAt: _seed.fetchedAt };
+    }
     // Version migrations can opt out of the legacy seed-meta fallback. A
     // fresh meta entry for the old version must never suppress the first
     // publish of a newly required canonical envelope.
@@ -167,7 +312,32 @@ export async function readSectionFreshness(section, readKey = readRedisKey) {
     // Legacy seed-meta is `{ fetchedAt, recordCount, sourceVersion }` at top
     // level. It has no `_seed` wrapper so unwrapEnvelope returns it as data.
     const meta = unwrapEnvelope(raw).data;
-    if (meta?.fetchedAt) return { fetchedAt: meta.fetchedAt };
+    if (meta?.fetchedAt && acceptsVersion(meta)) {
+      const freshness = { fetchedAt: meta.fetchedAt };
+      if (raw === meta && section.sourceRetryMetaKey && Number.isFinite(section.sourceRetryDelayMs) && section.sourceRetryDelayMs > 0) {
+        const source = unwrapEnvelope(await readKey(section.sourceRetryMetaKey)).data;
+        const firstAt = source?.firstSourceFailureAt;
+        if (
+          source?.sourceState === 'degraded' && source.stale === true
+          && Number.isInteger(source.recordCount) && source.recordCount > 0
+          && Number.isFinite(source.fetchedAt) && source.fetchedAt > 0
+          && Number.isFinite(firstAt) && firstAt > source.fetchedAt
+          && source.lastSourceAttemptAt === firstAt && source.consecutiveSourceFailures === 1
+          && typeof source.errorCode === 'string' && source.errorCode.length > 0
+          && source.lastSourceFailureCode === source.errorCode
+          && Number.isFinite(meta.fetchedAt) && firstAt <= meta.fetchedAt && meta.fetchedAt <= Date.now()
+          && meta.sourceRetryClaimedFor == null
+        ) {
+          freshness.retryAt = firstAt + section.sourceRetryDelayMs;
+          freshness.retryClaim = {
+            key: `seed-meta:${section.seedMetaKey}`,
+            previousValue: JSON.stringify(raw),
+            nextValue: JSON.stringify({ ...meta, sourceRetryClaimedFor: firstAt }),
+          };
+        }
+      }
+      return freshness;
+    }
   }
   return null;
 }
@@ -205,6 +375,26 @@ export function sectionWorstCaseMs(section) {
  * timeout keeps the two numbers linked instead of drifting apart.
  */
 export const ADMISSION_HEADROOM_MS = 3 * REDIS_READ_TIMEOUT_MS;
+// The heartbeat uses one bounded Redis request. With `prefetchFreshness`,
+// section freshness can use up to three reads but the slowest section, not the
+// section count, controls this preflight budget.
+export const BUNDLE_PREFLIGHT_HEADROOM_MS = REDIS_READ_TIMEOUT_MS + ADMISSION_HEADROOM_MS;
+
+/**
+ * Age multiple at which a deferral stops reading as ordinary budget pressure
+ * and starts reading as a stall (#6562 item 4). starvedTick only fires when a
+ * tick publishes nothing; a section can instead be squeezed out on every tick
+ * while healthy siblings keep the bundle green — `ran > 0`, exit 0, and the
+ * deferral is indistinguishable from pressure. At deferral time the runner
+ * already holds the section's seed-meta age, so a deferral whose data is older
+ * than this multiple of the section's own interval is reported loudly
+ * regardless of what else ran. The multiple must clear the 0.8x freshness
+ * floor that makes an ordinary due section deferrable; 2x means at least one
+ * full interval was missed while the section kept losing the budget race. A
+ * single transient blip cannot reach it, so this does not reintroduce the
+ * alert fatigue the GRACEFUL_FAIL exemption exists to prevent.
+ */
+export const STALL_AGE_INTERVAL_MULTIPLE = 2;
 
 /**
  * Sections that can never be admitted, whatever else the tick does. A section
@@ -237,7 +427,7 @@ function streamLines(stream, onLine) {
   stream.on('error', (err) => onLine(`<stdio error: ${err.message}>`));
 }
 
-function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs }) {
+function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs, completionMetaKey, useBundledCa }) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     // Capture the child's structured `seed_complete` event if emitted, so
@@ -252,10 +442,15 @@ function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs }) {
     // peer's seed-meta predates the current bundle run and fall back to a
     // hard default instead of reading a stale peer key. See plan
     // 2026-04-24-003 §"Phase 2 — SWF seeder" bundle-freshness guard.
-    const child = spawn(process.execPath, [scriptPath], {
+    const nodeArgs = useBundledCa === true ? ['--use-bundled-ca'] : [];
+    const child = spawn(process.execPath, [...nodeArgs, scriptPath], {
       env: {
         ...process.env,
         BUNDLE_RUN_STARTED_AT_MS: String(bundleStartedAtMs ?? Date.now()),
+        // Lets runSeed clamp its fetch deadline inside this wall clock so the
+        // graceful path fires before we SIGTERM (#8479).
+        [BUNDLE_SECTION_TIMEOUT_MS_ENV]: String(timeoutMs),
+        [BUNDLE_COMPLETION_META_KEY_ENV]: completionMetaKey || '',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -276,9 +471,8 @@ function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs }) {
     let killTimer = null;
     // Fire the terminal "Failed ... timeout" log the moment we decide to kill,
     // BEFORE the SIGTERM→SIGKILL grace window. This guarantees the reason
-    // reaches the log stream even if the container itself is killed during
-    // the grace period (Railway's ~10min cap can land inside the grace for
-    // sections whose timeoutMs is close to 10min).
+    // reaches the log stream even if the container itself is stopped during
+    // the grace period (a redeploy, an OOM kill, or an operator stop).
     const softKill = setTimeout(() => {
       timedOut = true;
       const elapsedAtTimeout = ((Date.now() - t0) / 1000).toFixed(1);
@@ -317,6 +511,17 @@ function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs }) {
           status: 'GRACEFUL_FAIL',
           reason: `graceful fetch failure (exit ${GRACEFUL_FETCH_FAILURE_EXIT_CODE})`,
         });
+      } else if (code === PUBLISH_BLOCKED_EXIT_CODE) {
+        // #6396: exit 0 must mean "the keys were written". A member whose
+        // coverage gate refused to publish — after preserving the last-good
+        // TTL — signals it with this dedicated code so the summary can never
+        // report OK for a section that wrote no seed-meta.
+        settle({
+          elapsed,
+          ok: false,
+          status: 'PUBLISH_BLOCKED',
+          reason: `coverage gate refused to publish (exit ${PUBLISH_BLOCKED_EXIT_CODE})`,
+        });
       } else {
         settle({ elapsed, ok: false, reason: `exit ${code ?? 'null'}${signal ? ` (signal ${signal})` : ''}` });
       }
@@ -330,18 +535,53 @@ function spawnSeed(scriptPath, { timeoutMs, label, bundleStartedAtMs }) {
  *   label: string,
  *   script: string,
  *   seedMetaKey?: string,    // legacy (pre-contract); reads `seed-meta:<key>`
+ *   sourceRetryMetaKey?: string, // opt-in source-attempt meta for legacy completion gates
+ *   sourceRetryDelayMs?: number, // one early retry after the first failed attempt
  *   freshnessMetaKey?: string, // authoritative explicit seed-meta key
- *   completionMetaKey?: string, // optional completed-run key paired with freshnessMetaKey
  *   canonicalKey?: string,   // PR 2+: reads envelope from the canonical data key
+ *   completionMetaKey?: string, // full key written LAST by the run; must not
+ *                               // predate the clock it attests (#6960)
  *   requireCanonical?: boolean, // do not fall back to legacy meta when canonical is absent
  *   intervalMs: number,
  *   timeoutMs?: number,
  *   dependsOn?: string[],    // labels that MUST run earlier in the array
  *   requiredEnv?: string[],  // deployment config required before any section runs
  * }>} sections
- * @param {{ maxBundleMs?: number }} [opts]
+ * @param {{ maxBundleMs?: number, prefetchFreshness?: boolean, onTerminalComplete?: () => Promise<void> | void }} [opts]
  */
+/**
+ * Env var carrying the per-member kill switch for a bundle, e.g.
+ * WM_BUNDLE_CANADA_DISABLED_MEMBERS. Per bundle, so disabling a member of one
+ * cannot silently disable a same-named member of another.
+ */
+export function bundleDisableEnvVar(label) {
+  return `WM_BUNDLE_${String(label).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_DISABLED_MEMBERS`;
+}
+
+/** Section labels disabled for `label`, parsed from the env. */
+export function disabledMembersFromEnv(label, env = process.env) {
+  const raw = env[bundleDisableEnvVar(label)];
+  if (typeof raw !== 'string' || raw.trim() === '') return new Set();
+  return new Set(raw.split(',').map((name) => name.trim()).filter(Boolean));
+}
+
 export async function runBundle(label, sections, opts = {}) {
+  if (opts.onTerminalComplete != null && typeof opts.onTerminalComplete !== 'function') {
+    throw new Error(`[Bundle:${label}] onTerminalComplete must be a function`);
+  }
+  for (const section of sections) {
+    if (
+      section.canonicalKey
+      && !section.freshnessMetaKey
+      && section.completionMetaKey
+      && !section.completionMetaKey.startsWith('seed-completion:')
+    ) {
+      throw new Error(
+        `[Bundle:${label}] section '${section.label}' canonical completionMetaKey must use `
+        + `the dedicated seed-completion: namespace, got '${section.completionMetaKey}'`,
+      );
+    }
+  }
   const missingEnvBySection = new Map();
   for (const section of sections) {
     if (section.requiredEnv == null) continue;
@@ -437,26 +677,84 @@ export async function runBundle(label, sections, opts = {}) {
       .join('; ');
     const largestFittingTimeoutMs = maxBundleMs - KILL_GRACE_MS - ADMISSION_HEADROOM_MS;
     const remedy = largestFittingTimeoutMs > 0
-      ? `Lower those section timeouts to at most ${largestFittingTimeoutMs}ms, or raise maxBundleMs (it must stay under the Railway container cap).`
-      : `No section timeout can fit this budget at all — ${KILL_GRACE_MS}ms kill grace plus ${ADMISSION_HEADROOM_MS}ms admission headroom already exceed it. Raise maxBundleMs (it must stay under the Railway container cap).`;
+      ? `Lower those section timeouts to at most ${largestFittingTimeoutMs}ms, or raise maxBundleMs (it must stay under the 600s bundle wall cap).`
+      : `No section timeout can fit this budget at all — ${KILL_GRACE_MS}ms kill grace plus ${ADMISSION_HEADROOM_MS}ms admission headroom already exceed it. Raise maxBundleMs (it must stay under the 600s bundle wall cap).`;
     throw new Error(
       `[Bundle:${label}] maxBundleMs=${maxBundleMs} is below the worst case of ${unadmittable.length} section(s), which can therefore never be admitted on any tick: ${detail}. `
       + remedy,
     );
   }
 
+  // PER-MEMBER KILL SWITCH. A bundle collapses N services into one, which also
+  // collapses N deploy controls into one: before this, taking a single
+  // misbehaving member out of rotation meant editing the section list and
+  // redeploying the whole bundle, stopping its siblings too.
+  //
+  // Fail-closed on the control itself: an unrecognised label is a CONFIGURATION
+  // ERROR, not an ignored string. A typo'd kill switch that silently disables
+  // nothing is the worst outcome here — an operator believes a source is off
+  // while it keeps running.
+  const disabledMembers = disabledMembersFromEnv(label);
+  const knownLabels = new Set(sections.map((section) => section.label));
+  const unknownDisabled = [...disabledMembers].filter((name) => !knownLabels.has(name));
+  if (unknownDisabled.length > 0) {
+    throw new Error(
+      `[Bundle:${label}] ${bundleDisableEnvVar(label)} names unknown section(s): ${unknownDisabled.join(', ')}. `
+      + `Known sections: ${[...knownLabels].join(', ')}. `
+      + 'Refusing to start: a kill switch that matches nothing would report success while the source it names keeps running.',
+    );
+  }
+
   const t0 = Date.now();
+  // The deployed commit, stamped on failure records so a stall can tell a
+  // failure on this build from one on the build it replaced. Railway's
+  // variable only: GITHUB_SHA or VERCEL_GIT_COMMIT_SHA on a test or CI host
+  // must not make two runs of one build look different.
+  const currentBuild = String(process.env.RAILWAY_GIT_COMMIT_SHA ?? '').trim();
   const budgetLabel = Number.isFinite(maxBundleMs) ? `, budget ${Math.round(maxBundleMs / 1000)}s` : '';
   console.log(`[Bundle:${label}] Starting (${sections.length} sections${budgetLabel})`);
+  if (disabledMembers.size > 0) {
+    console.warn(
+      `[Bundle:${label}] ${disabledMembers.size} member(s) disabled by ${bundleDisableEnvVar(label)}: `
+      + `${[...disabledMembers].join(', ')} — their seed-meta will age out and health will report them stale, which is intended.`,
+    );
+  }
   // Write before any section so a skip-all tick still proves the scheduler fired.
   const wroteHeartbeat = await writeBundleHeartbeat(label);
   if (wroteHeartbeat) {
     console.log(`[Bundle:${label}] tick heartbeat ${bundleHeartbeatKey(label)}`);
   }
 
-  let ran = 0, skipped = 0, deferred = 0, failed = 0, gracefulFailed = 0;
+  // Bundles with a simultaneous-fit invariant can opt into a bounded preflight:
+  // all interval clocks start together so member count cannot consume the wall
+  // budget before the first child. Keep the default sequential behavior for
+  // large bundles, where an unbounded fan-out would create a Redis burst.
+  const freshnessByLabel = opts.prefetchFreshness
+    ? new Map(await Promise.all(sections.map(async (section) => (
+      [section.label, await readSectionFreshness(section)]
+    ))))
+    : null;
 
+  let ran = 0, skipped = 0, deferred = 0, failed = 0, gracefulFailed = 0, stalled = 0, publishBlocked = 0;
+  // Sent in one pipeline after the loop, so Redis never eats section budget.
+  const outcomeWrites = [];
+  const recordOutcome = (key, section, record) => {
+    outcomeWrites.push(['SET', key, JSON.stringify(record), 'EX', sectionOutcomeTtlSeconds(section)]);
+  };
+  const stalledSections = [];
+
+  let disabled = 0;
   for (const section of sections) {
+    if (disabledMembers.has(section.label)) {
+      // Counted and logged, never silent. A disabled member stops writing
+      // seed-meta, so /api/health ages it into STALE_SEED on its own — the
+      // source disappearing from the product stays visible rather than being
+      // suppressed along with the fetch.
+      console.warn(`  [${section.label}] DISABLED by ${bundleDisableEnvVar(label)} — not run this tick`);
+      console.warn(`[Bundle:${label}] section=${section.label} status=DISABLED reason=kill-switch`);
+      disabled++;
+      continue;
+    }
     const missingEnv = missingEnvBySection.get(section.label);
     if (missingEnv) {
       const reason = `missing required environment configuration: ${missingEnv.join(', ')}`;
@@ -469,13 +767,22 @@ export async function runBundle(label, sections, opts = {}) {
     const scriptPath = join(__dirname, section.script);
     const timeout = section.timeoutMs || DEFAULT_SECTION_TIMEOUT_MS;
 
-    const freshness = await readSectionFreshness(section);
+    const freshness = freshnessByLabel
+      ? freshnessByLabel.get(section.label) || null
+      : await readSectionFreshness(section);
+    let earlyRetry = false;
     if (freshness?.fetchedAt) {
-      const elapsed = Date.now() - freshness.fetchedAt;
-      if (elapsed < section.intervalMs * 0.8) {
+      const now = Date.now();
+      const elapsed = now - freshness.fetchedAt;
+      const retryDue = Number.isFinite(freshness.retryAt) && now >= freshness.retryAt;
+      const eligibilityMs = section.intervalMs * 0.8;
+      earlyRetry = elapsed < eligibilityMs && retryDue;
+      if (elapsed < eligibilityMs && !retryDue) {
         const agoMin = Math.round(elapsed / 60_000);
         const intervalMin = Math.round(section.intervalMs / 60_000);
-        console.log(`  [${section.label}] Skipped, last seeded ${agoMin}min ago (interval: ${intervalMin}min)`);
+        const nextEligibleAt = Math.min(freshness.fetchedAt + eligibilityMs,
+          Number.isFinite(freshness.retryAt) ? freshness.retryAt : Infinity);
+        console.log(`  [${section.label}] Skipped, last seeded ${agoMin}min ago (interval: ${intervalMin}min); eligible after: ${eligibilityMs / 60_000}min; next eligible at: ${new Date(nextEligibleAt).toISOString()}`);
         skipped++;
         continue;
       }
@@ -486,16 +793,41 @@ export async function runBundle(label, sections, opts = {}) {
     // and need SIGKILL after grace). Admit only when the full worst-case fits.
     // Shared with the startup check so the two can never disagree about which
     // sections are admittable.
-    const worstCase = sectionWorstCaseMs(section);
+    const worstCase = sectionWorstCaseMs(section) + (earlyRetry ? REDIS_READ_TIMEOUT_MS : 0);
     if (elapsedBundle + worstCase > maxBundleMs) {
       const remainingSec = Math.max(0, Math.round((maxBundleMs - elapsedBundle) / 1000));
       const needSec = Math.round(worstCase / 1000);
       console.log(`  [${section.label}] Deferred, needs ${needSec}s (timeout+grace) but only ${remainingSec}s left in bundle budget`);
       deferred++;
+      // #6562 item 4: a deferral is only pressure while the data can still
+      // afford to wait for a later tick. Once the section's seed-meta age
+      // exceeds STALL_AGE_INTERVAL_MULTIPLE of its own interval, it has been
+      // losing the budget race across whole intervals — a stall, and it must
+      // be loud regardless of what else ran (see the exit gate below).
+      // The explanation is printed after the loop, once the section's failure
+      // record has been read: a stale section that was admitted and failed at
+      // the source is not starved, and budget or order changes cannot fix it.
+      if (freshness?.fetchedAt != null && Date.now() - freshness.fetchedAt > section.intervalMs * STALL_AGE_INTERVAL_MULTIPLE) {
+        stalledSections.push({ section, fetchedAt: freshness.fetchedAt, ageMs: Date.now() - freshness.fetchedAt });
+        stalled++;
+      }
+      recordOutcome(sectionDeferralKey(label, section.label), section, { at: Date.now() });
       continue;
     }
 
-    const result = await spawnSeed(scriptPath, { timeoutMs: timeout, label: section.label, bundleStartedAtMs: t0 });
+    if (earlyRetry && !await claimSourceRetry(freshness.retryClaim)) {
+      console.warn(`  [${section.label}] Early recovery not claimed; keeping normal admission`);
+      skipped++;
+      continue;
+    }
+
+    const result = await spawnSeed(scriptPath, {
+      timeoutMs: timeout,
+      label: section.label,
+      bundleStartedAtMs: t0,
+      completionMetaKey: section.freshnessMetaKey ? '' : section.completionMetaKey,
+      useBundledCa: section.useBundledCa,
+    });
     if (result.ok) {
       console.log(`  [${section.label}] Done (${result.elapsed}s)`);
       // Bundle-level per-section summary — emitted from parent stdout so
@@ -529,34 +861,180 @@ export async function runBundle(label, sections, opts = {}) {
       // "Deploy Crashed!") over a benign per-member skip. Track it separately so
       // only HARD failures gate the exit code; the skip stays fully logged above.
       if (status === 'GRACEFUL_FAIL') gracefulFailed++;
+      else if (status === 'PUBLISH_BLOCKED') publishBlocked++;
       else failed++;
+      recordOutcome(sectionFailureKey(label, section.label), section, {
+        at: Date.now(),
+        status,
+        reason: (result.reason || 'unknown').replace(/\s+/g, ' '),
+        ...(currentBuild ? { build: currentBuild } : {}),
+      });
+    }
+  }
+
+  // Read before this tick's records are written, so the deferral that made
+  // the stall does not count as a deferral after the failure.
+  const stallCauses = await Promise.all(stalledSections.map(async (stall) => {
+    const [failure, deferral] = await Promise.all([
+      readRedisKeyOrUndefined(sectionFailureKey(label, stall.section.label)),
+      readRedisKeyOrUndefined(sectionDeferralKey(label, stall.section.label)),
+    ]);
+    if (failure === undefined) return { historyUnread: true };
+    // Only a failure after the last good fetch explains the age. An older one
+    // was followed by a success, so the section has been starved since.
+    if (!Number.isFinite(failure?.at) || failure.at <= stall.fetchedAt) return null;
+    // An unreadable deferral record is not proof that nothing deferred it.
+    if (deferral === undefined) return { failure, deferredAfter: null, deferralUnknown: true };
+    const deferredAfter = Number.isFinite(deferral?.at) && deferral.at > failure.at ? deferral.at : null;
+    return { failure, deferredAfter, deferralUnknown: false };
+  }));
+  const writtenOutcomes = await writeSectionOutcomes(label, outcomeWrites);
+  let failingAtSource = 0, unknownCause = 0, notYetRunOnBuild = 0, exemptStalls = 0;
+  for (const [i, { section, ageMs }] of stalledSections.entries()) {
+    const ageMin = Math.round(ageMs / 60_000);
+    const intervalMin = Math.round(section.intervalMs / 60_000);
+    const head = `  [${section.label}] Deferred, but its data is ${ageMin}min old — over ${STALL_AGE_INTERVAL_MULTIPLE}x its ${intervalMin}min interval. `;
+    const cause = stallCauses[i];
+    const lastRun = cause?.failure
+      ? `its last admitted run at ${new Date(cause.failure.at).toISOString()} ended ${cause.failure.status} (${cause.failure.reason})`
+      : '';
+    if (cause?.historyUnread) {
+      unknownCause++;
+      console.error(
+        `${head}The cause is unknown: its failure record could not be read, so a failing source cannot be ruled out. `
+        + 'Check both the upstream and the budget.',
+      );
+    } else if (cause?.deferralUnknown) {
+      unknownCause++;
+      console.error(
+        `${head}This may be starvation: ${lastRun}, but its deferral record could not be read, `
+        + 'so a later budget loss cannot be ruled out. Check both the upstream and the budget.',
+      );
+    } else if (cause && cause.deferredAfter == null && currentBuild
+      && typeof cause.failure.build === 'string' && cause.failure.build && cause.failure.build !== currentBuild) {
+      // The failure ran on the build this one replaced, and this build has not
+      // run the section yet, so nothing says its source still fails. Seen on
+      // seed-bundle-macro 2026-11-24: Food-UCDA's parser fix deployed after
+      // its last failed run, and the next tick deferred it. One more deferral
+      // after this tick's makes it starvation, which fails the tick, so the
+      // exemption holds only when that deferral record was saved.
+      notYetRunOnBuild++;
+      const base = `${head}Not yet run on this build: ${lastRun} on build ${cause.failure.build.slice(0, 12)}, `
+        + `and this build (${currentBuild.slice(0, 12)}) has not run it`;
+      if (writtenOutcomes.has(sectionDeferralKey(label, section.label))) {
+        exemptStalls++;
+        console.error(`${base}.`);
+      } else {
+        console.error(`${base}, but this tick's deferral record was not saved, so the next tick could not tell it was deferred. It fails this tick.`);
+      }
+    } else if (cause && cause.deferredAfter == null) {
+      failingAtSource++;
+      console.error(
+        `${head}This is a failing source, not starvation: ${lastRun}, and no deferral has been recorded since. `
+        + 'Check the upstream before changing budget or order.',
+      );
+    } else if (cause) {
+      console.error(
+        `${head}This is starvation, not pressure: ${lastRun}, and a tick deferred it again at `
+        + `${new Date(cause.deferredAfter).toISOString()}. Check both the upstream and the budget.`,
+      );
+    } else {
+      console.error(`${head}This is starvation, not pressure: the section keeps losing the budget race while the bundle stays green.`);
     }
   }
 
   const totalSec = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`[Bundle:${label}] Finished in ${totalSec}s, ran:${ran} skipped:${skipped} deferred:${deferred} failed:${failed} graceful:${gracefulFailed}`);
+  // `disabled:` is appended ONLY when non-zero. This line is the documented
+  // observability contract for bundle ticks — tools key off it — so the shape
+  // stays byte-identical when no kill switch is set. `stalled:` (this PR)
+  // rides along at the tail for the same reason: it is the starvation signal
+  // #6562 item 4 exists to surface.
+  const disabledField = disabled > 0 ? ` disabled:${disabled}` : '';
+  // publish_blocked appends ONLY when non-zero, like `disabled:` above, so
+  // the documented summary line stays byte-identical for bundles without gate
+  // refusals (#6396).
+  const publishBlockedField = publishBlocked > 0 ? ` publish_blocked:${publishBlocked}` : '';
+  console.log(`[Bundle:${label}] Finished in ${totalSec}s, ran:${ran} skipped:${skipped} deferred:${deferred}${disabledField} failed:${failed} graceful:${gracefulFailed} stalled:${stalled}${publishBlockedField}`);
   // A tick that completed no section while deferring a due one accomplished
   // nothing AND shed work. Deferral only pays for itself if the deferred
   // section runs on a later tick, so this state repeating is a stalled
   // service — the shape that made #6556 invisible for six hours. Report it as
   // a failure; `ran:0 deferred:0` (everything fresh) stays a healthy no-op.
-  // `gracefulFailed === 0` is load-bearing: a tick whose only admitted section
-  // hit a transient upstream blip (child exit 75, last-good TTL extended, no
-  // data lost) already has an exit-0 exemption precisely so one flaky source
-  // does not fire "Deploy Crashed!". Without this clause a benign 429 that
-  // happened to also push a sibling past the budget would page — alert fatigue
-  // on the exact alarm this change exists to make trustworthy.
-  const starvedTick = ran === 0 && deferred > 0 && gracefulFailed === 0;
+  // This used to carry `&& gracefulFailed === 0`, exempting a tick whose only
+  // admitted section hit a transient blip (child exit 75, last-good TTL
+  // extended, no data lost) so one flaky source would not fire "Deploy
+  // Crashed!". That premise holds for the FAILING section and not for the ones
+  // it shed — those published nothing and extended no TTL.
+  //
+  // seed-bundle-static-ref is the counter-example that removed it:
+  // Arms-Suppliers burns its full 390s fetch deadline (SIPRI answers in ~10.6s
+  // and it issues ~200 requests at concurrency 4) and exits 75, leaving 179s of
+  // a 570s budget. All four remaining due sections need >=190s, so every one
+  // defers and `ran:0`. gracefulFailed was 1, so this stayed false and the
+  // bundle reported success for weeks while mineralProduction and
+  // submarineCables had no key in Redis at all (#6799).
+  //
+  // The exemption below still covers the case it was written for — `ran > 0`
+  // with a graceful skip, where real work published and one source blipped. A
+  // tick that published NOTHING has no successful work to vouch for it.
+  const starvedTick = ran === 0 && deferred > 0;
+  // A stall whose only failure ran on an earlier build, and whose deferral was
+  // saved, is reported but does not fail the tick: see notYetRunOnBuild above.
+  // Every other stall does.
+  const stallsFailTick = stalled - exemptStalls > 0;
+  const exitsNonZero = failed > 0 || starvedTick || stallsFailTick;
   if (starvedTick) {
     console.error(
       `[Bundle:${label}] ran:0 while ${deferred} due section(s) were deferred — this tick published nothing and shed work. `
       + 'Exiting non-zero: a fully-deferred tick is indistinguishable from a healthy no-op, so it must not report success.',
     );
+  } else if (stalled > 0) {
+    // #6562 item 4: partial starvation. starvedTick above stays scoped to the
+    // published-nothing tick; this branch covers the section that fits the
+    // budget on its own but never beside its siblings. The GRACEFUL_FAIL
+    // exemption does not soften this: a 2x-interval-old deferral cannot be
+    // produced by a single transient blip, so exiting non-zero here pages on
+    // a genuinely stalled member, not on alert fatigue.
+    // The verdict speaks only for the stalls. When none fails the tick it says
+    // so rather than "Exiting 0": a hard failure or the terminal hook can still
+    // fail the process, and each reports itself.
+    const unknownField = unknownCause > 0 ? `, ${unknownCause} with an unknown cause` : '';
+    const notYetRunField = notYetRunOnBuild > 0 ? `, ${notYetRunOnBuild} not yet run on this build` : '';
+    const verdict = stallsFailTick ? 'Exiting non-zero.' : 'No stall fails this tick.';
+    const starvedByBudget = stalled - failingAtSource - unknownCause - notYetRunOnBuild;
+    console.error(starvedByBudget === stalled
+      ? `[Bundle:${label}] ${stalled} deferred section(s) are older than ${STALL_AGE_INTERVAL_MULTIPLE}x their interval — starvation while the bundle reported progress. ${verdict}`
+      : `[Bundle:${label}] ${stalled} deferred section(s) are older than ${STALL_AGE_INTERVAL_MULTIPLE}x their interval — `
+        + `${failingAtSource} failing at the source, ${starvedByBudget} starved by the budget${unknownField}${notYetRunField}. ${verdict}`);
   } else if (failed === 0 && gracefulFailed > 0) {
     // Graceful-only run (transient skips, no hard failures): exit 0 so Railway
     // does not paint CRASHED and fire a spurious alert. Real staleness is caught
     // independently by the /api/health freshness monitor keyed on seed-meta TTL.
     console.log(`[Bundle:${label}] ${gracefulFailed} graceful fetch skip(s), no hard failures — no data lost, exiting 0 (not a crash)`);
   }
-  process.exit(failed > 0 || starvedTick ? 1 : 0);
+  if (!exitsNonZero && publishBlocked > 0) {
+    // #6396: a gate refusal is not a crash — the member verified preservation
+    // of the last-good snapshot before exiting, and the freshness monitor
+    // alarms if the refusal persists. What changed versus the old exit-0
+    // silence is that the per-section line and summary now say so.
+    console.log(`[Bundle:${label}] ${publishBlocked} publish-blocked section(s) preserved last-good and wrote no seed keys — exiting 0; the freshness monitor owns the alarm`);
+  }
+  let terminalHookFailed = false;
+  // Reaching this point means the tick completed and emitted its terminal
+  // summary, even when a child failed or due work was deferred. Scheduler
+  // cursors must advance for those completed invocations so a persistently
+  // failing lead member cannot monopolize the next tick. Early throws and
+  // interrupted processes never reach this hook, so their leased turn remains
+  // available for safe replay after expiry.
+  if (opts.onTerminalComplete) {
+    try {
+      await opts.onTerminalComplete();
+    } catch (error) {
+      terminalHookFailed = true;
+      console.error(
+        `[Bundle:${label}] terminal completion hook failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  process.exit(exitsNonZero || terminalHookFailed ? 1 : 0);
 }

@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  GENERATED_LOCALES,
   LOCALES,
   baselinePathFor,
   classifyKeys,
@@ -22,37 +23,71 @@ const BASELINE_PATH = join(ROOT, baselinePathFor(true));
 
 const REFRESH_HINT =
   'Run: ANTHROPIC_API_KEY=... node scripts/translate-locales.mjs --pro-test  ' +
-  '(then rebuild pro-test and commit public/pro/).';
+  '(the deploy rebuilds /pro itself since #6898 — commit only the locales).';
+
+// The locales below iterate LOCALES, which keeps zh-TW so the freshness gate
+// still covers it. The command in REFRESH_HINT no longer writes it: zh-TW is
+// converted from zh.json by scripts/convert-zh-tw.py, and translate-locales.mjs
+// skips generated locales on the write path (it even rejects --only=zh-TW). A
+// reader who follows the hint on a stale zh-TW gets a run that reports the same
+// gap and changes nothing.
+const GENERATED_HINT =
+  'Generated locales (' +
+  [...GENERATED_LOCALES].sort().join(', ') +
+  ') are not written by that command — regenerate with: npm run locales:zh-tw';
+
+/** Appended only when a generated locale is actually implicated. */
+const hintFor = (locales) =>
+  locales.some((locale) => GENERATED_LOCALES.has(locale))
+    ? REFRESH_HINT + '  ' + GENERATED_HINT
+    : REFRESH_HINT;
 
 const readJson = (file) => JSON.parse(readFileSync(file, 'utf8'));
 const enFlat = flatten(readJson(join(LOCALES_DIR, 'en.json')));
 
-// How many values may still be the English source, per locale.
-//
-// Some English is correct: brand names, acronyms, product tiers ("Claude
-// Desktop", "MCP", "PostgreSQL"). So the check cannot be "zero" — but it also
-// cannot be a shared percentage. A 50%-of-catalog rule sounds strict and is
-// unreachable: at 582 shared keys it only fires above 291, so `ar` could gain
-// 251 raw-English values — 43% of the catalog — and still pass. Nothing that
-// can happen would trip it.
-//
-// These are each locale's real count plus 8 keys of headroom, so a normal PR
-// adding a few brand-heavy strings does not red CI while a genuine regression
-// does. They are ceilings: lower them as translations improve. If one legitimately
-// needs raising, that should be a visible line in a diff, not a silent drift.
-//
-// fa is the outlier by three orders of magnitude: 565 of its 582 values ARE the
-// English source. It is registered as a supported language but was never
-// translated (#5644). The baseline cannot detect that — those values genuinely
-// were "translated from" the current English, so they read as fresh — which is
-// exactly why this ceiling exists.
-const ENGLISH_CEILING = {
-  ar: 49, bg: 50, cs: 58, de: 61, el: 60, es: 53,
-  fa: 573, fr: 66, hi: 115, hr: 55, hu: 51, it: 61,
-  ja: 51, ko: 49, nl: 67, pl: 55, pt: 55, ro: 61,
-  ru: 51, sv: 61, sw: 45, th: 54, tr: 51, uk: 574, vi: 53, zh: 49,
-  'zh-TW': 49,
+const ENGLISH_ALLOWED_KEYS = new Set([
+  'nav.api',
+  'nav.pro',
+  'nav.enterprise',
+  'tiers.pro',
+  'tiers.enterprise',
+  'whatsNew.proTag',
+  'apiSection.business',
+  'apiSection.starter',
+  'welcome.agents.resources.api',
+  'pricing.tiers.enterprise.features[9]',
+  'enterpriseShowcase.soc',
+]);
+
+// Same-spelling words and product tokens a locale already uses. A global
+// allowlist would let a locale that translates the word fall back to English
+// without a failing test, so the exemption is per locale. #9165.
+const INTENTIONAL_ENGLISH = {
+  cs: ['welcome.nav.blog', 'welcome.nav.menu', 'welcome.live.liveBadge'],
+  de: ['welcome.nav.blog', 'welcome.live.liveBadge', 'hero.signalWord', 'pricingTable.rowSupport'],
+  es: ['welcome.nav.blog'],
+  fr: [
+    'welcome.nav.blog', 'welcome.nav.menu', 'pricing.axisCommercial', 'welcome.live.trendStable',
+    'welcome.moments.m2.c1', 'welcome.moments.m4.c3', 'welcome.agents.termTitle',
+    'hero.signalWord', 'pricingTable.rowSupport',
+  ],
+  hr: ['welcome.nav.blog', 'hero.signalWord'],
+  hu: ['welcome.nav.blog'],
+  id: ['welcome.nav.blog', 'welcome.nav.menu'],
+  it: ['welcome.nav.blog', 'welcome.nav.menu', 'welcome.live.liveBadge'],
+  nl: ['welcome.nav.blog', 'welcome.nav.menu', 'welcome.live.liveBadge'],
+  pl: ['welcome.nav.blog', 'welcome.nav.menu'],
+  pt: ['welcome.nav.blog', 'welcome.nav.menu'],
+  ro: ['welcome.nav.blog', 'welcome.live.liveBadge'],
+  sv: ['welcome.live.liveBadge', 'welcome.agents.termTitle', 'hero.signalWord', 'pricingTable.rowSupport'],
+  tr: ['welcome.nav.blog'],
+  vi: ['welcome.nav.blog', 'welcome.nav.menu'],
 };
+
+// No locale gets a count ceiling. A ceiling hides new English copy, which is
+// how fa.json stayed an English placeholder (#5644). Brands and tokens that
+// stay English are named in ENGLISH_ALLOWED_KEYS or INTENTIONAL_ENGLISH.
+const TEMPORARY_LOCALE_EXEMPTIONS = {};
 
 describe('pro locale freshness', () => {
   it('tracks every shipped locale', () => {
@@ -104,6 +139,7 @@ describe('pro locale freshness', () => {
     const baselinePlurals = findPluralBases(baseline);
 
     const problems = [];
+    const problemLocales = [];
     for (const locale of LOCALES) {
       const file = join(LOCALES_DIR, locale + '.json');
       if (!existsSync(file)) continue;
@@ -114,6 +150,7 @@ describe('pro locale freshness', () => {
         expectedKeysForLocale(baseline, baselinePlurals, categories),
       );
       if (result.missing.length || result.stale.length || result.orphan.length) {
+        problemLocales.push(locale);
         problems.push(
           locale + ': ' + result.missing.length + ' missing, ' + result.stale.length + ' stale, ' +
             result.orphan.length + ' orphaned (e.g. ' +
@@ -121,36 +158,53 @@ describe('pro locale freshness', () => {
         );
       }
     }
-    assert.deepEqual(problems, [], 'pro locales are out of date. ' + REFRESH_HINT);
+    assert.deepEqual(problems, [], 'pro locales are out of date. ' + hintFor(problemLocales));
   });
 
-  it('does not let a locale drift back toward untranslated English', () => {
-    // A locale whose values are the English source is not a translation; it
-    // renders as English while the language picker claims otherwise. This is a
-    // live failure mode, not a hypothetical: validateTranslation accepts a
-    // "translation" identical to its English source, so a truncated or degraded
-    // model reply that echoes the input is written to disk, counted as
-    // refreshed, and blessed by the next baseline advance.
-    const overBudget = [];
+  it('names only real catalog keys in the English allowlist and the per-locale exemptions', () => {
+    const intentionalPairs = Object.entries(INTENTIONAL_ENGLISH).flatMap(([locale, keys]) =>
+      keys.map((key) => locale + ' ' + key),
+    );
+    const overlap = intentionalPairs.filter((pair) => ENGLISH_ALLOWED_KEYS.has(pair.split(' ')[1]));
+    const missing = [
+      ...ENGLISH_ALLOWED_KEYS,
+      ...intentionalPairs.map((pair) => pair.split(' ')[1]),
+    ].filter((key) => !(key in enFlat));
+    const idle = [];
+    for (const [locale, keys] of Object.entries(INTENTIONAL_ENGLISH)) {
+      const file = join(LOCALES_DIR, locale + '.json');
+      const flat = existsSync(file) ? flatten(readJson(file)) : {};
+      for (const key of keys) {
+        if (flat[key] !== enFlat[key]) idle.push(locale + ' ' + key);
+      }
+    }
+    assert.deepEqual(
+      { overlap, missing, idle },
+      { overlap: [], missing: [], idle: [] },
+    );
+  });
+
+  it('rejects untranslated English outside the allowlist', () => {
+    const violations = [];
     for (const locale of LOCALES) {
       const file = join(LOCALES_DIR, locale + '.json');
       if (!existsSync(file)) continue;
       const flat = flatten(readJson(file));
-      const shared = Object.keys(flat).filter((key) => key in enFlat);
-      const english = shared.filter((key) => flat[key] === enFlat[key]);
-      const ceiling = ENGLISH_CEILING[locale];
-
-      if (ceiling === undefined) {
-        overBudget.push(
-          locale + ' has no entry in ENGLISH_CEILING — add one at its current count plus a little headroom',
-        );
-      } else if (english.length > ceiling) {
-        overBudget.push(
-          locale + ' has ' + english.length + '/' + shared.length + ' values identical to English, above its ceiling of ' +
-            ceiling + ' — translations regressed, or the ceiling needs a deliberate, reviewed raise',
-        );
+      const unexplained = Object.keys(flat)
+        .filter((key) => key in enFlat && flat[key] === enFlat[key])
+        .filter((key) => !ENGLISH_ALLOWED_KEYS.has(key) && !(INTENTIONAL_ENGLISH[locale] ?? []).includes(key))
+        .sort();
+      const exemption = TEMPORARY_LOCALE_EXEMPTIONS[locale];
+      if (exemption !== undefined) {
+        if (unexplained.length > exemption) {
+          violations.push(
+            locale + ' has ' + unexplained.length + ' unlisted English values, above its ceiling of ' + exemption,
+          );
+        }
+        continue;
       }
+      for (const key of unexplained) violations.push(locale + ' ' + key);
     }
-    assert.deepEqual(overBudget, []);
+    assert.deepEqual(violations, []);
   });
 });

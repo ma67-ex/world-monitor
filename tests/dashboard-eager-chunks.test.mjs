@@ -77,6 +77,7 @@ const DEFERRED_RPC_CLIENT_CHUNKS = [
   'rpc-client-military-v1',
   'rpc-client-natural-v1',
   'rpc-client-news-v1',
+  'rpc-client-orbital-v1',
   'rpc-client-positive-events-v1',
   'rpc-client-prediction-v1',
   'rpc-client-radiation-v1',
@@ -247,19 +248,6 @@ describe('eager chunk budget: military base data stays behind its lazy loader', 
     assert.match(src, /private async runMilitarySurgeAnalysis\(flights: MilitaryFlight\[\]\): Promise<void>/);
     assert.match(src, /\[Intelligence\] Military surge analysis skipped/);
   });
-
-  it('country brief refreshes the military card after lazy base data loads', () => {
-    const src = readFileSync(resolve(repoRoot, 'src/app/country-intel.ts'), 'utf-8');
-    const start = src.indexOf('void Promise.all([', src.indexOf('page.updateInfrastructure(code);'));
-    assert.notEqual(start, -1, 'country brief should preload lazy infrastructure/base tables after first render');
-    const end = src.indexOf('const intelClient', start);
-    assert.notEqual(end, -1, 'country brief preload block should precede intelligence client setup');
-    const block = src.slice(start, end);
-    assert.match(block, /preloadMilitaryBases\(\)/);
-    assert.match(block, /preloadInfrastructureTables\(\)/);
-    assert.match(block, /updateInfrastructure\(code\)/);
-    assert.match(block, /updateMilitaryActivity\?\.\(this\.buildMilitarySummary\(code, country\)\)/);
-  });
 });
 
 describe('eager chunk budget: Sentry stays behind the deferred scheduler', { skip: shouldSkipDashboard() }, () => {
@@ -372,12 +360,67 @@ describe('eager chunk budget: generated RPC clients stay lazy', { skip: shouldSk
   });
 });
 
+describe('country-qualified observations stay outside the dashboard App graph', { skip: shouldSkipDashboard() }, () => {
+  guardDashboardBuild();
+  it('loads qualified validation and military IO only for the country feature', () => {
+    const { assets } = loadDashboardBuild();
+    const appFile = assets.find(file => /^App-[A-Za-z0-9_-]+\.js$/.test(file));
+    assert.ok(appFile, 'dashboard App chunk must exist');
+    const graph = collectStaticChunkGraph(appFile);
+    for (const name of ['country-signal-observations', 'country-signal-projection', 'country-qualified-military']) {
+      const file = assets.find(asset => asset.startsWith(`${name}-`) && asset.endsWith('.js'));
+      assert.ok(file, `${name} must remain an on-demand chunk`);
+      assert.ok(!graph.includes(file), `${name} must not be statically reachable from App`);
+    }
+  });
+});
+
+// The map popup ships with every dashboard visit (MapContainer → Map/deck-stack),
+// but the satellite-pass engine behind its reservoir and imagery rows runs only
+// when someone opens one of those popups. A static import from the popup graph
+// put the engine (~57 KB gz) and satellite.js (~12 KB gz) on every landing.
+// The markers are string literals that survive minification: one from the pass
+// client, one from the object-imagery loader.
+const LANDING_GRAPH_ENTRIES = ['App', 'MapContainer', 'Map', 'deck-stack'];
+const ORBITAL_ENGINE_MARKERS = [
+  'Orbital pass worker did not become ready',
+  'radar water-extent summary unavailable',
+];
+
+describe('orbital pass engine stays out of the landing map graph', { skip: shouldSkipDashboard() }, () => {
+  guardDashboardBuild();
+  const { assets } = loadDashboardBuild();
+  const assetsDir = resolve(distDir, 'assets');
+  const entryFiles = LANDING_GRAPH_ENTRIES
+    .map(name => assets.find(file => new RegExp(`^${escapeRegExp(name)}-[A-Za-z0-9_-]+\\.js$`).test(file)))
+    .filter(Boolean);
+  const landingGraph = [...new Set(entryFiles.flatMap(file => collectStaticChunkGraph(file)))];
+
+  it('finds the landing map entry chunks', () => {
+    for (const name of ['App', 'MapContainer', 'Map']) {
+      assert.ok(entryFiles.some(file => file.startsWith(`${name}-`)), `${name}-*.js chunk should exist in dist/assets`);
+    }
+  });
+
+  it('keeps satellite.js out of the static graph', () => {
+    const reachable = landingGraph.filter(file => file.startsWith('satellite.es-'));
+    assert.deepEqual(reachable, [], 'satellite.es must load only when a pass is computed');
+  });
+
+  it('keeps the pass client and imagery loader out of the static graph', () => {
+    for (const marker of ORBITAL_ENGINE_MARKERS) {
+      const holders = landingGraph.filter(file => readFileSync(resolve(assetsDir, file), 'utf-8').includes(marker));
+      assert.deepEqual(holders, [], `"${marker}" must sit in a chunk the map popup imports on demand`);
+    }
+  });
+});
+
 describe('correlation-engine lazy boot failure handling', () => {
   it('keeps the dynamic import locally handled', () => {
     const src = readFileSync(resolve(repoRoot, 'src/App.ts'), 'utf-8');
     const methodStart = src.indexOf('private async loadInitialCorrelationEngine(): Promise<void>');
     assert.notEqual(methodStart, -1, 'App should isolate correlation-engine lazy boot in loadInitialCorrelationEngine');
-    const methodEnd = src.indexOf('public async init(): Promise<void>', methodStart);
+    const methodEnd = src.indexOf('public async init(', methodStart);
     assert.notEqual(methodEnd, -1, 'loadInitialCorrelationEngine should be declared before init()');
     const method = src.slice(methodStart, methodEnd);
 

@@ -1,17 +1,15 @@
 # World Monitor
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 
 **リアルタイム・グローバルインテリジェンスダッシュボード** — AI によるニュース集約、地政学モニタリング、インフラ追跡を統合された状況認識インターフェースで提供します。
 
 [![GitHub stars](https://img.shields.io/github/stars/koala73/worldmonitor?style=social)](https://github.com/koala73/worldmonitor/stargazers)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/re63kWKxaz)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Last commit](https://img.shields.io/github/last-commit/koala73/worldmonitor)](https://github.com/koala73/worldmonitor/commits/main)
 [![Latest release](https://img.shields.io/github/v/release/koala73/worldmonitor?style=flat)](https://github.com/koala73/worldmonitor/releases/latest)
 [![npm: worldmonitor](https://img.shields.io/npm/v/worldmonitor?logo=npm&label=npm)](https://www.npmjs.com/package/worldmonitor)
-[![smithery badge](https://smithery.ai/badge/worldmonitor/wm-mcp)](https://smithery.ai/servers/worldmonitor/wm-mcp)
 [![skills.sh](https://skills.sh/b/koala73/worldmonitor)](https://skills.sh/koala73/worldmonitor)
 
 <p align="center">
@@ -50,15 +48,15 @@
 
 ## 主な機能
 
-- **500 以上の厳選ニュースフィード** — 15 カテゴリにわたり、AI が要約してブリーフを生成
-- **デュアルマップエンジン** — 3D グローブ (globe.gl) と WebGL フラットマップ (deck.gl)、58 種類のマップレイヤー
+- **厳選ニュースフィード** — 複数カテゴリにわたり、AI が要約してブリーフを生成
+- **デュアルマップエンジン** — 3D グローブ (globe.gl) と WebGL フラットマップ (deck.gl)、共有マップレイヤーカタログ
 - **クロスストリーム相関分析** — 軍事・経済・災害・エスカレーションのシグナル収束を検出
-- **国家不安定指数 (CII)** — Tier-1 の 31 か国を対象に、サーバー側で確定する CII v8 ストレススコアリング
-- **金融レーダー** — 29 の証券取引所、コモディティ、暗号資産、7 シグナルのマーケットコンポジット
+- **国家不安定指数 (CII)** — Tier-1 レジストリを対象に、サーバー側で確定する CII v14 ストレススコアリング
+- **金融レーダー** — 証券取引所、コモディティ、暗号資産、7 シグナルのマーケットコンポジット
 - **ローカル AI** — Ollama ですべて実行可能、API キー不要
-- **単一コードベースから 6 つのサイトバリアント** (world、tech、finance、commodity、happy、energy)
+- **単一コードベースからのサイトバリアント** (world、tech、finance、commodity、happy、energy)
 - **ネイティブデスクトップアプリ** (Tauri 2) — macOS、Windows、Linux 対応
-- **28 言語対応** — 各言語のネイティブフィードと RTL サポート
+- **多言語対応** — 各言語のネイティブフィードと RTL サポート
 
 機能の全一覧、アーキテクチャ、データソース、アルゴリズムについては **[ドキュメント](https://www.worldmonitor.app/docs/documentation)** を参照してください。
 
@@ -110,9 +108,9 @@ npm run dev:energy     # energy.worldmonitor.app
 |----------|-------------|
 | **フロントエンド** | Vanilla TypeScript、Vite、globe.gl + Three.js、deck.gl + MapLibre GL |
 | **デスクトップ** | Tauri 2 (Rust) + Node.js サイドカー |
-| **AI/ML** | Ollama / Groq / OpenRouter、Transformers.js (ブラウザ側) |
-| **API コントラクト** | Protocol Buffers (298 proto、36 サービス)、sebuf HTTP アノテーション |
-| **デプロイ** | Vercel Edge Functions (60 以上)、Railway リレー、Tauri、PWA |
+| **AI/ML** | Ollama / OpenRouter、Transformers.js (ブラウザ側) |
+| **API コントラクト** | Protocol Buffers、sebuf HTTP アノテーション |
+| **デプロイ** | Vercel Edge Functions、Railway リレー、Tauri、PWA |
 | **キャッシュ** | Redis (Upstash)、3 層キャッシュ、CDN、Service Worker |
 
 スタックの詳細は **[アーキテクチャドキュメント](https://www.worldmonitor.app/docs/architecture)** を参照してください。
@@ -130,6 +128,7 @@ World Monitor はブラウザだけでなく、エージェントやスクリプ
   ```sh
   npx worldmonitor tools          # その場で実行 — すべての MCP ツールを一覧表示 (キー不要)
   npm install -g worldmonitor     # または `worldmonitor` (エイリアス `wm`) コマンドをインストール
+  brew install worldmonitor       # または Homebrew でインストール
   worldmonitor risk IR --api-key wm_xxx
   ```
 
@@ -145,9 +144,15 @@ World Monitor はブラウザだけでなく、エージェントやスクリプ
 
 ---
 
+## サポート
+
+World Monitor の Web アプリと API は [Vercel](https://vercel.com?utm_source=worldmonitor&utm_medium=referral&utm_campaign=worldmonitor) 上で稼働しています。プロジェクトへの手厚いご支援に、Vercel に感謝いたします。
+
+---
+
 ## データソース
 
-WorldMonitor は、地政学、金融、エネルギー、気候、航空、サイバー、軍事、インフラ、ニュースインテリジェンスの各分野にわたる 526 以上の外部プロバイダーと API を集約しています。これらは 500 以上の厳選フィードを通じて提供され、35 のソースグループを対象とする鮮度モニターで追跡されています。プロバイダー、フィードのティア、収集方法の詳細は [データソースカタログ](https://www.worldmonitor.app/docs/data-sources) を参照してください。
+WorldMonitor は、地政学、金融、エネルギー、気候、航空、サイバー、軍事、インフラ、ニュースインテリジェンスの各分野にわたる外部プロバイダーと API を集約しています。厳選フィードと鮮度モニターで追跡されます。プロバイダー、フィードのティア、収集方法の詳細は [データソースカタログ](https://www.worldmonitor.app/docs/data-sources) を参照してください。
 
 ---
 
@@ -176,7 +181,7 @@ npm run build:full       # プロダクションビルド
 
 コードライセンスの全文は [LICENSE](LICENSE)、平易な言葉での要約は [docs/license.mdx](docs/license.mdx) を参照してください。AGPL 以外の条件が必要なチーム向けに、商用ライセンスも別途提供しています。
 
-Copyright (C) 2024-2026 Elie Habib. All rights reserved.
+Copyright (C) 2026 Elie Habib. All rights reserved.
 
 ---
 
@@ -209,9 +214,9 @@ Copyright (C) 2024-2026 Elie Habib. All rights reserved.
 
 ## Star History
 
-<a href="https://api.star-history.com/svg?repos=koala73/worldmonitor&type=Date">
+<a href="https://star-history.dera.page/#koala73/worldmonitor&type=Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=koala73/worldmonitor&type=Date&theme=dark" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=koala73/worldmonitor&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=koala73/worldmonitor&type=Date&theme=dark" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=koala73/worldmonitor&type=Date" />
  </picture>
 </a>

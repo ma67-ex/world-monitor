@@ -3,40 +3,37 @@
 import { loadEnvFile, readCanonicalValue, runSeed } from './_seed-utils.mjs';
 import {
   buildArmsSupplierCompletion,
-  buildSipriSupplierSnapshot,
   DEFENSE_INDUSTRIAL_TTL_SECONDS,
 } from './_defense-industrial-source.mjs';
+import {
+  ARMS_SUPPLIERS_COMPLETE_KEY,
+  ARMS_SUPPLIERS_KEY,
+  fetchSupplierSnapshot,
+  supplierContentMeta,
+  validateArmsSuppliers,
+} from './_arms-suppliers-sweep.mjs';
 
 loadEnvFile(import.meta.url, { only: ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'SIPRI_ARMS_API_BASE_URL'] });
 
-export const ARMS_SUPPLIERS_KEY = 'military:arms-suppliers:v1';
-export const ARMS_SUPPLIERS_COMPLETE_KEY = 'military:arms-suppliers:complete:v1';
+export { ARMS_SUPPLIERS_COMPLETE_KEY, ARMS_SUPPLIERS_KEY };
 
-export function validateArmsSuppliers(data) {
-  return data && Object.keys(data.importers || {}).length > 0;
-}
+// strict: an Upstash HTTP error must NOT read as an absent key here. redisGet
+// degrades HTTP failures to null by default, which would make a transient 5xx
+// look like a first run and republish one 56-importer slice over the ~200-row
+// canonical key.
+const readSnapshot = (key) => readCanonicalValue(key, { strict: true });
 
-export function supplierContentMeta(data) {
-  const endYears = Object.values(data.importers || {})
-    .map((entry) => entry?.window?.endYear)
-    .filter(Number.isInteger);
-  if (endYears.length === 0) return null;
-  return {
-    newestItemAt: Date.UTC(Math.max(...endYears), 11, 31, 23, 59, 59),
-    oldestItemAt: Date.UTC(Math.min(...endYears), 0, 1),
-  };
-}
-
-async function fetchSupplierSnapshot() {
-  const previousSnapshot = await readCanonicalValue(ARMS_SUPPLIERS_KEY).catch(() => null);
-  return buildSipriSupplierSnapshot({ previousSnapshot: previousSnapshot || {} });
-}
-
-await runSeed('military', 'arms-suppliers', ARMS_SUPPLIERS_KEY, fetchSupplierSnapshot, {
+await runSeed('military', 'arms-suppliers', ARMS_SUPPLIERS_KEY, () => fetchSupplierSnapshot({
+  readCanonical: readSnapshot,
+}), {
   validateFn: validateArmsSuppliers,
   ttlSeconds: DEFENSE_INDUSTRIAL_TTL_SECONDS,
   lockTtlMs: 7 * 60 * 1000,
-  fetchPhaseTimeoutMs: 6.5 * 60 * 1000,
+  // Sized to one 56-importer chunk, not the catalog: 7 batches at concurrency 8,
+  // p90 37.3s = ~261s of POSTs plus ~30s for getMaxYear + the catalog call. The
+  // 270s soft budget inside the fetcher stops it taking new work first, so this
+  // is the backstop rather than the normal exit.
+  fetchPhaseTimeoutMs: 340 * 1000,
   declareRecords: (data) => Object.keys(data.importers || {}).length,
   sourceVersion: 'sipri-arms-transfers-v2',
   schemaVersion: 2,
@@ -56,6 +53,7 @@ await runSeed('military', 'arms-suppliers', ARMS_SUPPLIERS_KEY, fetchSupplierSna
       transform: buildArmsSupplierCompletion,
       declareRecords: (data) => data.completedAt ? 1 : 0,
       skipWhenEmpty: true,
+      allowMissingOnSkip: true,
       metaKey: 'seed-meta:military:arms-suppliers-complete',
       metaTtlSeconds: DEFENSE_INDUSTRIAL_TTL_SECONDS,
       metaExtra: (data) => ({

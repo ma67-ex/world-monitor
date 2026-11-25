@@ -5,28 +5,14 @@
  * to 'GET, POST, OPTIONS' (sebuf routes support GET and POST).
  */
 
+// App-serving hosts only; sibling vendor hosts do not inherit browser trust.
+// Keep aligned with convex/payments/returnUrlOrigin.ts and CORS parity tests.
+const APP_ORIGIN_PATTERN = /^https:\/\/(?:(?:www|app|api|tech|finance|commodity|happy|energy)\.)?worldmonitor\.app$/;
+const MAX_ORIGIN_BYTES = 300;
+const ORIGIN_ENCODER = new TextEncoder();
+
 const PRODUCTION_PATTERNS: RegExp[] = [
-  /^https:\/\/(.*\.)?worldmonitor\.app$/,
-  // Vercel preview deployments under the "eliewm" team scope, e.g.
-  //   worldmonitor-git-<branch>-eliewm.vercel.app  (git-branch alias)
-  //   worldmonitor-<hash>-eliewm.vercel.app        (deployment URL)
-  // Tight on purpose: never a bare *.vercel.app (this is a security allowlist).
-  /^https:\/\/worldmonitor-[a-z0-9-]+-eliewm\.vercel\.app$/,
-  // SITREP fork (github.com/AkulxSharma/worldmonitor) -- Vercel project
-  // "akul-sharmas-projects-8d7c98ac". Keep in sync with api/_cors.js.
-  /^https:\/\/worldmonitor-one-theta\.vercel\.app$/,
-  /^https:\/\/worldmonitor(-[a-z0-9-]+)?-akul-sharmas-projects-8d7c98ac\.vercel\.app$/,
-  // Fork (github.com/ma67-ex/worldmonitor) -- Vercel project scope "ma6-tech".
-  // Keep in sync with api/_cors.js.
-  /^https:\/\/worldmonitor-roan-one\.vercel\.app$/,
-  /^https:\/\/worldmonitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
-  // Same fork, actual Vercel project name (verified 2026-09-10): the project
-  // is named "ma67-ex-worldmonitor", not "worldmonitor", so its real domains
-  // don't match the two patterns above and every request was getting a
-  // blanket 401/403 as a disallowed origin. Keep in sync with api/_cors.js.
-  /^https:\/\/ma67-ex-worldmonitor\.vercel\.app$/,
-  /^https:\/\/ma67-ex-worldmonitor(-[a-z0-9-]+)?-ma6-tech\.vercel\.app$/,
-  /^https:\/\/(.*\.)?sitrep\.app$/,
+  APP_ORIGIN_PATTERN,
   /^https?:\/\/tauri\.localhost(:\d+)?$/,
   /^https?:\/\/[a-z0-9-]+\.tauri\.localhost(:\d+)?$/i,
   /^tauri:\/\/localhost$/,
@@ -50,15 +36,17 @@ const ALLOWED_HEADERS = [
   'X-Api-Key',
   'X-Widget-Key',
   'X-Pro-Key',
-  'X-WorldMonitor-Desktop-Timestamp',
-  'X-WorldMonitor-Desktop-Signature',
   'Idempotency-Key',
   'Mcp-Session-Id',
   'MCP-Protocol-Version',
+  // MCP 2026-07-28 request metadata headers (mirrored method / tool, prompt or resource name).
+  'Mcp-Method',
+  'Mcp-Name',
   'Last-Event-ID',
 ].join(', ');
 
 const EXPOSED_HEADERS = [
+  'Allow',
   'Mcp-Session-Id',
   'WWW-Authenticate',
   'Retry-After',
@@ -71,14 +59,99 @@ const EXPOSED_HEADERS = [
   'X-RateLimit-Limit',
   'X-RateLimit-Remaining',
   'X-RateLimit-Reset',
+  // Fail-open limiter degradation marker. Parity with api/_cors.js (#7270):
+  // the Limit/Remaining/Reset triplet is not enough for browser JS to read Mode.
+  'X-RateLimit-Mode',
+  // api/mcp-proxy marks the 504 it relays for a remote MCP server timeout so
+  // premium-fetch's origin-5xx canary can skip it (WORLDMONITOR-17A). Parity
+  // with api/_cors.js.
+  'X-Wm-Upstream-Timeout',
+  // IETF draft-ietf-httpapi-ratelimit-headers fields — emitted by the
+  // per-account API-key limiter; docs/usage-rate-limits.mdx tells browser
+  // clients to self-throttle on these, so they must be readable cross-origin
+  // (parity with api/_cors.js).
+  'RateLimit',
+  'RateLimit-Policy',
+  'RateLimit-Limit',
+  'RateLimit-Remaining',
+  'RateLimit-Reset',
   'X-WorldMonitor-Bbox',
   'X-WorldMonitor-Bbox-Missing',
   'X-WorldMonitor-Bbox-Invalid',
   'X-Military-Bbox',
+  // RFC 9745 / RFC 8594 lifecycle signals. Link rel="deprecation" is present
+  // on current responses for policy discovery; Deprecation and Sunset appear
+  // only when a surface is actually deprecated.
+  'Link',
+  'Deprecation',
+  'Sunset',
 ].join(', ');
 
+function stripTrailingDnsDots(hostname: string): string {
+  let end = hostname.length;
+  while (end > 0 && hostname[end - 1] === '.') end--;
+  return hostname.slice(0, end);
+}
+
+/**
+ * Strip trailing DNS dots before allowlist match so
+ * `https://tech.worldmonitor.app.` is treated as first-party (#6411).
+ * Matching only — ACAO still echoes the raw Origin.
+ */
+function originForAllowlistMatch(origin: string): string {
+  if (!origin) return '';
+  try {
+    const url = new URL(origin);
+    const host = stripTrailingDnsDots(url.hostname);
+    if (!host || host === url.hostname) return origin;
+    url.hostname = host;
+    return url.origin;
+  } catch {
+    return origin;
+  }
+}
+
+/**
+ * Decode Google Translate's hostname rewrite and require the reconstructed
+ * host to be an enumerated app host. Suffix-matching the
+ * encoded label would admit evil--worldmonitor-app.translate.goog (#6411).
+ * Keep in sync with api/_cors.js and workers/api-cors-preflight.
+ */
+function isWorldMonitorGoogleTranslateOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'https:' || url.port !== '') return false;
+    const host = stripTrailingDnsDots(url.hostname);
+    const suffix = '.translate.goog';
+    if (!host.endsWith(suffix)) return false;
+    const encoded = host.slice(0, -suffix.length);
+    if (!encoded || encoded.includes('.')) return false;
+    const decoded = encoded.replace(/--/g, '\0').replace(/-/g, '.').replace(/\0/g, '-');
+    return APP_ORIGIN_PATTERN.test(`https://${decoded}`);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A Vercel preview deployment trusts only its own hostnames (VERCEL_URL,
+ * VERCEL_BRANCH_URL). Never match previews by name pattern: any Vercel account
+ * can claim `worldmonitor-<x>-eliewm.vercel.app` by naming its project so.
+ * Read at call time; production never matches. Keep in sync with api/_cors.js.
+ */
+function isOwnPreviewDeploymentOrigin(origin: string): boolean {
+  if (process.env.VERCEL_ENV !== 'preview') return false;
+  return [process.env.VERCEL_URL, process.env.VERCEL_BRANCH_URL]
+    .some((host) => Boolean(host) && origin === `https://${host}`);
+}
+
 export function isAllowedOrigin(origin: string): boolean {
-  return Boolean(origin) && ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin));
+  if (!origin || origin.length > MAX_ORIGIN_BYTES
+    || ORIGIN_ENCODER.encode(origin).byteLength > MAX_ORIGIN_BYTES) return false;
+  if (isWorldMonitorGoogleTranslateOrigin(origin)) return true;
+  const candidate = originForAllowlistMatch(origin);
+  if (isOwnPreviewDeploymentOrigin(candidate)) return true;
+  return ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(candidate));
 }
 
 export function getCorsHeaders(req: Request): Record<string, string> {
@@ -86,6 +159,24 @@ export function getCorsHeaders(req: Request): Record<string, string> {
   const allowOrigin = isAllowedOrigin(origin) ? origin : 'https://worldmonitor.app';
   return {
     'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': ALLOWED_HEADERS,
+    'Access-Control-Expose-Headers': EXPOSED_HEADERS,
+    'Access-Control-Max-Age': '3600',
+    'Vary': 'Origin',
+  };
+}
+
+/**
+ * Echo the caller's Origin on an explicit origin_403 so credentials:include
+ * fetches can read the status instead of seeing an opaque network failure.
+ * Refusal bodies only — keep in sync with api/_cors.js (#6411).
+ */
+export function getOriginDeniedCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get('origin') || '';
+  return {
+    'Access-Control-Allow-Origin': origin || 'https://worldmonitor.app',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': ALLOWED_HEADERS,

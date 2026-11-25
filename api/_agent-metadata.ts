@@ -26,6 +26,16 @@ export function resolveMetadataOrigin(req: Request): string {
 }
 
 /**
+ * The published auth.md walkthrough. Every metadata host points at the one
+ * canonical copy on the apex, which serves it without a redirect (`/auth.md`
+ * is on the Cloudflare apex-to-www exemption list, ARCHITECTURE.md §2).
+ * Readiness scanners compare `agent_auth.skill` with the /auth.md published on
+ * the scanned domain, so an issuer-relative URL fails whenever the metadata is
+ * discovered on another host such as api.worldmonitor.app.
+ */
+export const AUTH_SKILL_URL = 'https://worldmonitor.app/auth.md';
+
+/**
  * These documents are read-only. Answer CORS preflights, allow GET/HEAD, and
  * reject everything else with a spec-correct 405 + Allow. Returns null when the
  * request should proceed to the metadata handler.

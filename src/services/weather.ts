@@ -13,6 +13,15 @@ export interface WeatherAlert {
   expires: Date;
   coordinates: [number, number][];
   centroid?: [number, number];
+  countryCode?: string;
+  source?: string;
+  geometryPrecision?: 'polygon' | 'point' | 'country';
+  productKind?: string;
+  issuedBy?: string;
+  wind?: string;
+  visibility?: string;
+  seaState?: string;
+  sourceUrl?: string;
 }
 
 interface BootstrapAlert {
@@ -26,10 +35,19 @@ interface BootstrapAlert {
   expires: string;
   coordinates: [number, number][];
   centroid?: [number, number];
+  countryCode?: string;
+  source?: string;
+  geometryPrecision?: 'polygon' | 'point' | 'country';
+  issuedBy?: string;
+  /** WMO SWIC member authority (seeded as `authority`). */
+  authority?: string;
+  sourceUrl?: string;
 }
 
-const breaker = createCircuitBreaker<WeatherAlert[]>({ name: 'NWS Weather', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
+const breaker = createCircuitBreaker<WeatherAlert[]>({ name: 'NWS + ECCC + WMO SWIC Weather', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 
+/** Exported for the embed loader, which receives this wire shape from the
+ *  composed map-frame endpoint rather than from this module's own fetch. */
 // NWS's public alerts API sends Access-Control-Allow-Origin: * (verified
 // empirically), so the browser can fetch it directly -- no proxy function
 // needed. The SITREP fork has no Railway seed loop populating the bootstrap
@@ -93,7 +111,7 @@ async function fetchFromNws(): Promise<WeatherAlert[] | null> {
   }
 }
 
-function mapAlert(a: BootstrapAlert): WeatherAlert {
+export function mapAlert(a: BootstrapAlert): WeatherAlert {
   return {
     id: a.id,
     event: a.event,
@@ -105,6 +123,11 @@ function mapAlert(a: BootstrapAlert): WeatherAlert {
     expires: new Date(a.expires),
     coordinates: a.coordinates,
     centroid: a.centroid,
+    countryCode: a.countryCode,
+    source: a.source,
+    geometryPrecision: a.geometryPrecision,
+    issuedBy: a.issuedBy || a.authority || undefined,
+    sourceUrl: a.sourceUrl || undefined,
   };
 }
 
@@ -139,10 +162,6 @@ export async function fetchWeatherAlerts(): Promise<WeatherAlert[]> {
 
     throw new Error('No weather data in bootstrap');
   }, []);
-}
-
-export function getWeatherStatus(): string {
-  return breaker.getStatus();
 }
 
 export function getSeverityColor(severity: WeatherAlert['severity']): string {

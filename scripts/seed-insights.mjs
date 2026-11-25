@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
+import { retainLastFailure } from './_last-failure.mjs';
 import {
   loadEnvFile,
   CHROME_UA,
@@ -16,12 +18,15 @@ import {
 import {
   clusterItems,
   computeEntityCorroboration,
+  recencyWeight,
+  scoreImportance,
   selectTopStories,
   DIPLOMACY_KEYWORDS,
   ENTITY_BIGRAMS,
 } from './_clustering.mjs';
 import { MIN_CORROBORATING_PUBLISHERS } from './shared/publisher-families.js';
-import { extractCountryCode } from './shared/geo-extract.mjs';
+import { isAcceptableDigest } from './shared/digest-acceptance.mjs';
+import { extractStoryCountries } from './shared/geo-extract.mjs';
 import { buildChinaNewsCoverage } from './_china-news-coverage.mjs';
 import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 import {
@@ -30,6 +35,7 @@ import {
   briefUserPrompt,
   synthesisSystemPrompt,
   synthesisUserPrompt,
+  synthesisRejectionFeedback,
 } from './_insights-brief.mjs';
 import {
   INSIGHTS_COMPOSER_THREW,
@@ -37,6 +43,9 @@ import {
   classifyInsightsSynthesisFailure,
   composeInsightsSynthesis,
   resolveInsightsSynthesis,
+  insightsSynthesisSignature,
+  shouldSkipInsightsSynthesis,
+  formatInsightsBreakerOpenWarning,
 } from './_insights-synthesis-diagnostics.mjs';
 export {
   INSIGHTS_COMPOSER_THREW,
@@ -46,6 +55,11 @@ export {
   resolveInsightsSynthesis,
 };
 import { buildLlmCallEvent, emitLlmEvents, flushPendingLlmEvents } from './lib/llm-telemetry.cjs';
+import {
+  OPENROUTER_FREE_BACKUP_MODEL,
+  OPENROUTER_FREE_PRIMARY_MODEL,
+  OPENROUTER_PROVIDER_ROUTING,
+} from './_llm-model-timeouts.mjs';
 // Import from the scripts mirror (`scripts/shared/`) — NOT the repo-root
 // `shared/`. Railway services with nixpacks `rootDirectory=scripts` only
 // package files under scripts/; a `../shared/` import resolves to
@@ -53,7 +67,7 @@ import { buildLlmCallEvent, emitLlmEvents, flushPendingLlmEvents } from './lib/l
 // the seeder on startup. The local pattern is the `./shared/geo-extract.mjs`
 // line above. PR #3836 review caught this. See skill
 // railway-deploy-gotchas/reference/nixpacks-root-dir-scripts-cross-dir-import-escape.
-import { validateNoHallucinatedProperNouns } from './shared/brief-llm-core.js';
+import { validateNoHallucinatedProperNouns, validateNoHallucinatedStatusQualifiers } from './shared/brief-llm-core.js';
 
 // Hallucination validator rollout mode (PR-2 of brief-content-quality
 // regressions). `shadow` = log violations to Sentry but ship the LLM
@@ -76,7 +90,32 @@ if (_isDirectRun) loadEnvFile(import.meta.url);
 const CANONICAL_KEY = 'news:insights:v1';
 const DIGEST_KEY = 'news:digest:v1:full:en';
 const CHINA_COVERAGE_KEY = 'news:insights:v1:CN';
+// Every scored cluster of the run, not only the top-story selection, so a
+// country or keyword read (MCP get_news_intelligence) searches the whole
+// current news window. Kept out of the canonical key: that one is bootstrap
+// data every dashboard loads.
+const STORY_POOL_KEY = 'news:insights:v1:pool';
+// The paid MCP panel caches the whole bundle (pool + insights + GDELT +
+// signals + advisories, about 120 KB without the pool) under 512 KB.
+const STORY_POOL_MAX_BYTES = 262_144;
+export const STORY_POOL_MAX_MEMBER_TITLES = 6;
 const CHINA_NEWS_DIGEST_LANGUAGE = 'zh';
+// Seven-day threat-level history behind the Threat Timeline panel. Each run
+// sees only the current digest window, so the per-day counts accumulate here:
+// one entry per story, keyed by member-headline fingerprints so a story that
+// stays in the digest for days counts once, on the day it was first seen.
+// Internal state, kept out of bootstrap; the published day counts ride in the
+// canonical payload as `threatTimeline`.
+const THREAT_HISTORY_KEY = 'news:insights:v1:threat-history';
+export const THREAT_TIMELINE_DAYS = 7;
+// Past the 7-day window plus a missed day of runs, so an outage does not reset it.
+const THREAT_HISTORY_TTL = 9 * 24 * 60 * 60;
+const THREAT_HISTORY_LEVELS = ['critical', 'high', 'medium', 'low', 'info'];
+const THREAT_HISTORY_DAY_MS = 24 * 60 * 60 * 1000;
+// MAX_ITEMS_PER_CATEGORY in server/worldmonitor/news/v1/list-feed-digest.ts
+// (pinned by tests/seed-insights-threat-history.test.mjs). A category at the
+// cap may have dropped older items; one below it is complete.
+export const DIGEST_CATEGORY_CAP = 20;
 
 // Defense-in-depth auth — see seed-infra.mjs for the same pattern + rationale.
 // Set WORLDMONITOR_RELAY_KEY on the Railway service (must match a value in
@@ -105,7 +144,6 @@ const CACHE_TTL = 10800; // 3h — 6x the 30 min cron interval. Shorter = key ex
                          // is gated at brief-selection time (see pickBriefCluster + briefSystemPrompt
                          // in _insights-brief.mjs), not by aging out fast.
 const MAX_HEADLINE_LEN = 500;
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const INSIGHTS_SOURCE_VERSION = 'digest-clustering-v2-importance-diversity';
 const INSIGHTS_MAX_CONSECUTIVE_FAILURES = 100;
 const INSIGHTS_RUN_OUTCOMES = Object.freeze({
@@ -152,7 +190,7 @@ function insightsRunMeta(payload) {
  * marker for validation and afterPublish hooks.
  */
 export function publishInsightsPayload(data) {
-  const { chinaNewsCoverage: _chinaNewsCoverage, ...payload } = data || {};
+  const { chinaNewsCoverage: _chinaNewsCoverage, storyPool: _storyPool, threatHistory: _threatHistory, ...payload } = data || {};
   const runMeta = insightsRunMeta(data);
   return runMeta ? attachInsightsRunMeta(payload, runMeta) : payload;
 }
@@ -192,6 +230,8 @@ export function buildInsightsFreshnessMetaPatch({
   previousMeta,
   outcome,
   failureCode = null,
+  failureDetail = null,
+  storiesSignature = null,
   nowMs = Date.now(),
   servedGeneratedAt = null,
   briefEligibleClusters = null,
@@ -207,23 +247,63 @@ export function buildInsightsFreshnessMetaPatch({
   const normalizedFailureCode = failureCode == null ? null : normalizeInsightsFailureCode(failureCode);
   const eligibleClusters = normalizeBriefEligibleClusters(briefEligibleClusters);
 
+  // Bounded breaker inputs (see shouldSkipInsightsSynthesis): what failed and
+  // against which story set. Cleared on publish so a stale pair can never
+  // suppress a later synthesis of a genuinely different run.
+  const boundedDetail = typeof failureDetail === 'string' && failureDetail.length > 0
+    ? failureDetail.replace(/\s+/g, ' ').trim().slice(0, 80)
+    : null;
+  const boundedSignature = typeof storiesSignature === 'string' && storiesSignature.length > 0
+    ? storiesSignature.slice(0, 16)
+    : null;
+  // Per-signature repeat counter (#7255 review). consecutiveFailures counts
+  // every degraded run producer-wide, so provider noise inflated it past the
+  // breaker threshold before a gate failure ever repeated. This counter
+  // increments only while the (code, detail, signature) triple repeats
+  // EXACTLY, and resets to 1 on any change.
+  const previousSameSignature = Number.isInteger(previous.sameSignatureFailures) && previous.sameSignatureFailures > 0
+    ? previous.sameSignatureFailures
+    : 0;
+  const failureCodeForMeta = normalizedFailureCode || INSIGHTS_SYNTHESIS_FAILURE_CODES.PROVIDER;
+  const repeatsPrevious = previousSameSignature > 0 || previous.lastSynthesisFailureCode
+    ? failureCodeForMeta === previous.lastSynthesisFailureCode
+      && (boundedDetail ?? null) === (previous.lastSynthesisFailureDetail ?? null)
+      && boundedSignature !== null
+      && boundedSignature === (previous.failedStoriesSignature ?? null)
+    : false;
+
+  const lastFailure = retainLastFailure(previous.lastFailure,
+    outcome === INSIGHTS_RUN_OUTCOMES.PUBLISHED ? null : {
+      checkedAt: now, lastSuccessAt: previous.lastSuccessAt, errorCode: failureCodeForMeta,
+    });
+
   if (outcome === INSIGHTS_RUN_OUTCOMES.PUBLISHED) {
     return {
+      lastFailure,
       lastAttemptAt: now,
       lastSuccessAt: now,
       servedGeneratedAt: servedAt,
       consecutiveFailures: 0,
+      sameSignatureFailures: 0,
       lastSynthesisFailureCode: normalizedFailureCode,
+      lastSynthesisFailureDetail: null,
+      failedStoriesSignature: null,
       briefEligibleClusters: eligibleClusters,
     };
   }
 
   return {
+    lastFailure,
     lastAttemptAt: now,
     lastSuccessAt: Number.isFinite(previous.lastSuccessAt) ? previous.lastSuccessAt : null,
     servedGeneratedAt: servedAt,
     consecutiveFailures: Math.min(INSIGHTS_MAX_CONSECUTIVE_FAILURES, previousFailures + 1),
-    lastSynthesisFailureCode: normalizedFailureCode || INSIGHTS_SYNTHESIS_FAILURE_CODES.PROVIDER,
+    sameSignatureFailures: repeatsPrevious
+      ? Math.min(INSIGHTS_MAX_CONSECUTIVE_FAILURES, previousSameSignature + 1)
+      : 1,
+    lastSynthesisFailureCode: failureCodeForMeta,
+    lastSynthesisFailureDetail: boundedDetail,
+    failedStoriesSignature: boundedSignature,
     briefEligibleClusters: eligibleClusters,
   };
 }
@@ -304,9 +384,15 @@ async function generateLegacySingleHeadlineBrief(topStories, { callBudgetMs } = 
   // Hallucination check: did the LLM invent proper nouns not in the
   // headline? (May 19 incident: "Lebanese President Michel Aoun pledged…"
   // against a nameless headline. docs/plans/2026-05-19-001 U2.)
-  const validation = validateNoHallucinatedProperNouns(llmResult.text, topHeadline);
-  if (!validation.ok) {
-    const hallucinated = (validation.hallucinated || []).join(' ');
+  // The proper-noun gate reads "Former President" as a title prefix and
+  // grounds only "Trump", so the qualifier needs its own check (#8441).
+  const nounValidation = validateNoHallucinatedProperNouns(llmResult.text, topHeadline);
+  const qualifierValidation = validateNoHallucinatedStatusQualifiers(llmResult.text, topHeadline);
+  if (!nounValidation.ok || !qualifierValidation.ok) {
+    const hallucinated = [
+      ...(nounValidation.hallucinated || []),
+      ...(qualifierValidation.hallucinated || []),
+    ].join(' ');
     if (BRIEF_VALIDATOR_MODE === 'enforce') {
       console.warn(`  [brief_hallucination ENFORCE] dropped LLM summary: invented "${hallucinated}" not in headline; fell back to headline`);
       return {
@@ -340,7 +426,13 @@ async function readDigestFromRedis(key = DIGEST_KEY) {
   });
   if (!resp.ok) return null;
   const data = await resp.json();
-  return data.result ? unwrapEnvelope(JSON.parse(data.result)).data : null;
+  if (!data.result) return null;
+  try {
+    const digest = unwrapEnvelope(JSON.parse(data.result)).data;
+    return isAcceptableDigest(digest) ? digest : null;
+  } catch {
+    return null;
+  }
 }
 
 async function readExistingInsights() {
@@ -355,8 +447,8 @@ async function readExistingInsights() {
 }
 
 // Provider config — mirrors server/_shared/llm.ts getProviderCredentials()
-// Order: ollama → openrouter → groq (canonical chain since #4944: DeepSeek
-// V4 Flash primary with reasoning disabled, groq 70B free-tier fallback)
+// Order: Ollama → paid OpenRouter → two fixed free OpenRouter models.
+// Each free model stays a separate application-validated attempt.
 const LLM_PROVIDERS = [
   {
     name: 'ollama',
@@ -369,7 +461,7 @@ const LLM_PROVIDERS = [
       if (apiKey) h.Authorization = `Bearer ${apiKey}`;
       return h;
     },
-    extraBody: { think: false },
+    extraBody: { reasoning_effort: 'none' },
     timeout: 25_000,
   },
   {
@@ -378,16 +470,28 @@ const LLM_PROVIDERS = [
     apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
     model: 'deepseek/deepseek-v4-flash',
     headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://worldmonitor.app', 'X-Title': 'World Monitor', 'User-Agent': CHROME_UA }),
-    extraBody: { reasoning: { enabled: false } },
+    extraBody: { reasoning: { enabled: false }, provider: OPENROUTER_PROVIDER_ROUTING },
     timeout: 20_000,
   },
   {
-    name: 'groq',
-    envKey: 'GROQ_API_KEY',
-    apiUrl: 'https://api.groq.com/openai/v1/chat/completions',
-    model: GROQ_MODEL,
-    headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'User-Agent': CHROME_UA }),
-    timeout: 15_000,
+    name: 'openrouter-free',
+    envKey: 'OPENROUTER_API_KEY',
+    apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    model: OPENROUTER_FREE_PRIMARY_MODEL,
+    headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://worldmonitor.app', 'X-Title': 'World Monitor', 'User-Agent': CHROME_UA }),
+    extraBody: { reasoning: { enabled: false }, provider: OPENROUTER_PROVIDER_ROUTING },
+    timeout: 20_000,
+    maxRetries: 0,
+  },
+  {
+    name: 'openrouter-free-backup',
+    envKey: 'OPENROUTER_API_KEY',
+    apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    model: OPENROUTER_FREE_BACKUP_MODEL,
+    headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://worldmonitor.app', 'X-Title': 'World Monitor', 'User-Agent': CHROME_UA }),
+    extraBody: { reasoning: { enabled: false }, provider: OPENROUTER_PROVIDER_ROUTING },
+    timeout: 20_000,
+    maxRetries: 0,
   },
 ];
 
@@ -398,6 +502,8 @@ const LLM_PROVIDERS = [
 // provider's Retry-After (429/503) instead of dropping straight to the next
 // provider, but never sleep/fetch past the remaining call budget.
 const INSIGHTS_LLM_MAX_RETRIES = 2;
+const INSIGHTS_LLM_TEMPERATURE = 0.1;
+const INSIGHTS_LLM_RESAMPLE_TEMPERATURE = 0.7;
 const INSIGHTS_LLM_RETRY_BASE_MS = 1_000;
 const INSIGHTS_LLM_RETRY_AFTER_MAX_MS = 10_000;
 const INSIGHTS_LLM_CALL_BUDGET_MS = 60_000;
@@ -430,9 +536,18 @@ async function callLLM(headline, options = {}) {
   // llm_call telemetry (#4944 U5): one event per provider OUTCOME (the
   // withRetry duration covers in-provider retries), unified with the
   // Vercel-side stream via scripts/lib/llm-telemetry.cjs.
-  const promptChars = (systemPrompt?.length ?? 0) + (userPrompt?.length ?? 0);
   const events = [];
   let attemptIndex = 0;
+  // 0.1 keeps the first sample stable and cheap to reason about. But after a
+  // gate rejection, determinism is the enemy: the same prompt at the same
+  // temperature returns the same draft, so #6995's resample-once was a second
+  // identical call — 25 consecutive identical rejections on 2026-08-28 proved
+  // it. Once any sample has been gate-rejected, later samples run hot enough
+  // to actually vary, and carry the gate's correction (options.rejectionFeedback)
+  // appended to the user prompt. Both persist past the resample into the rest
+  // of the provider chain: a weaker model needs the correction more, not less.
+  let samplingTemperature = INSIGHTS_LLM_TEMPERATURE;
+  let gateFeedbackNote = null;
 
   // #6001: the chain used to fall through on TRANSPORT failures only. A model
   // that reliably returns well-formed text the brief composer then rejects on
@@ -453,17 +568,45 @@ async function callLLM(headline, options = {}) {
   let firstFaulted = null;
   const rejectedResult = () => firstRejected ?? firstFaulted;
 
-  for (const provider of LLM_PROVIDERS) {
+  // A gate rejection is not evidence that the PROVIDER is unhealthy — it says
+  // this SAMPLE was unusable. Advancing on it demotes the chain to a weaker
+  // model, which is less likely to produce a grounded lead than a second sample
+  // from the stronger one, so the strictness of an editorial gate was buying
+  // worse published prose.
+  //
+  // Measured on seed-insights 2026-08-20 before this change: of 9 gate
+  // rejections, the fallback rescued 2 and the other 7 reached the
+  // single-headline brief anyway, while 5 of 14 shipped briefs came from
+  // google/gemma-4-26b-a4b-it:free rather than deepseek-v4-flash. So the
+  // demotion mostly did not save the run, and when it did it shipped the weaker
+  // writer.
+  //
+  // Resample the SAME provider once, then fall through to the rest of the chain
+  // exactly as before. Transport failures still advance immediately — withRetry
+  // already covers transient ones, and a provider that is genuinely down should
+  // not be asked twice.
+  const queue = [...LLM_PROVIDERS];
+  const resampled = new Set();
+  while (queue.length > 0) {
+    const provider = queue.shift();
     const envVal = process.env[provider.envKey];
     if (!envVal) continue;
 
     const apiUrl = provider.apiUrlFn ? provider.apiUrlFn(envVal) : provider.apiUrl;
     const model = typeof provider.model === 'function' ? provider.model() : provider.model;
+    // Captured per attempt, BEFORE the request: a correction collected during
+    // this attempt's rejection belongs to the NEXT request. The request body
+    // and the telemetry both derive from this one variable, so the recorded
+    // promptChars is the size of what was actually sent — a corrected resample
+    // is larger than the base prompt, and the events must say so (#7248
+    // review: every event recorded the base-only size).
+    const effectiveUserPrompt = gateFeedbackNote ? `${userPrompt}\n\n${gateFeedbackNote}` : userPrompt;
+    const attemptPromptChars = (systemPrompt?.length ?? 0) + effectiveUserPrompt.length;
     const t0 = Date.now();
     const record = (ok, extra = {}) => {
       events.push(buildLlmCallEvent({
         provider: provider.name, model, stage: 'seed-insights', ok,
-        durationMs: Date.now() - t0, promptChars, maxTokens,
+        durationMs: Date.now() - t0, promptChars: attemptPromptChars, maxTokens,
         fallbackIndex: attemptIndex++,
         ...extra,
       }));
@@ -480,18 +623,18 @@ async function callLLM(headline, options = {}) {
             model,
             messages: [
               { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
+              { role: 'user', content: effectiveUserPrompt },
             ],
             max_tokens: maxTokens,
-            temperature: 0.1,
+            temperature: samplingTemperature,
             ...provider.extraBody,
           }),
           signal: AbortSignal.timeout(Math.max(1, Math.min(provider.timeout, usable))),
         });
         if (!response.ok) {
           // #6110: `usableBudgetMs()` is a real remaining wall clock, so pass it
-          // as `remainingBudgetMs` — a hint longer than that (groq's daily-quota
-          // 429 asks for ~20 minutes) makes the error nonRetryable and we fall
+          // as `remainingBudgetMs` — a hint longer than that (a daily-quota
+          // 429 can ask for ~20 minutes) makes the error nonRetryable and we fall
           // through to the next provider immediately, instead of clamping the
           // hint to the ceiling and sleeping it away twice.
           throw httpRetryError(response, {
@@ -500,7 +643,7 @@ async function callLLM(headline, options = {}) {
           });
         }
         return response;
-      }, INSIGHTS_LLM_MAX_RETRIES, retryDelayMs);
+      }, provider.maxRetries ?? INSIGHTS_LLM_MAX_RETRIES, retryDelayMs);
 
       const json = await resp.json();
       const usage = {
@@ -546,6 +689,25 @@ async function callLLM(headline, options = {}) {
           record(false, { ...usage, model: json.model || model, reason: 'validate_reject' });
           if (faulted) { if (!firstFaulted) firstFaulted = candidate; }
           else if (!firstRejected) firstRejected = candidate;
+          if (!faulted) {
+            // A FAULTED acceptor teaches the sampler nothing — the fault is in
+            // our own gate, so neither the temperature bump nor a correction
+            // note applies.
+            samplingTemperature = INSIGHTS_LLM_RESAMPLE_TEMPERATURE;
+            const feedback = typeof options.rejectionFeedback === 'function'
+              ? options.rejectionFeedback()
+              : null;
+            if (typeof feedback === 'string' && feedback.trim()) gateFeedbackNote = feedback.trim();
+          }
+          // One resample before demoting (see the queue comment above). A
+          // FAULTED acceptor is excluded deliberately: that fault is in our own
+          // gate, not in the sample, so a second identical call would throw
+          // identically and only burn budget.
+          if (!faulted && !resampled.has(provider.name)) {
+            resampled.add(provider.name);
+            queue.unshift(provider);
+            console.warn(`  ${provider.name}: resampling once before falling back to a weaker model`);
+          }
           continue;
         }
       }
@@ -640,24 +802,35 @@ async function warmDigestCache(language = 'en') {
       headers,
       signal: AbortSignal.timeout(30_000),
     });
-    if (resp.ok) console.log(`  ${language} digest cache warmed via RPC`);
-    else {
+    if (resp.ok) {
+      const digest = await resp.json();
+      if (isAcceptableDigest(digest)) {
+        console.log(`  ${language} digest cache warmed via RPC`);
+        return digest;
+      }
+      console.warn(`  Digest warm returned no acceptable ${language} digest`);
+    } else {
       const keyNote = RELAY_API_KEY ? '' : ' (WORLDMONITOR_RELAY_KEY not set — Origin-only auth)';
       console.warn(`  Digest warm failed: HTTP ${resp.status}${keyNote}`);
     }
   } catch (err) {
     console.warn(`  Digest warm failed: ${err.message}`);
   }
+  return null;
 }
 
-async function readOrWarmDigest(language) {
+export async function readOrWarmDigest(language) {
   const key = digestKeyForLanguage(language);
   let digest = await readDigestFromRedis(key);
   if (digest) return digest;
   console.log(`  ${language} digest not in Redis, warming cache via RPC...`);
-  await warmDigestCache(language);
+  const warmedDigest = await warmDigestCache(language);
+  // The RPC response has passed the endpoint's current revocation filter.
+  // Return it before any Redis readback can discard it or replace it with the
+  // unfiltered canonical body.
+  if (warmedDigest) return warmedDigest;
   // Wait for the Edge write to propagate before the readback. This is the
-  // existing full/en warm-cache contract, now reused for the Chinese digest.
+  // fallback when the RPC response did not contain an acceptable digest.
   await new Promise(r => setTimeout(r, 3_000));
   digest = await readDigestFromRedis(key);
   return digest;
@@ -675,12 +848,435 @@ async function readChinaNewsDigest() {
   }
 }
 
+/**
+ * The published shape of one story cluster. Shared by the top-story list and
+ * the story pool so a filtered MCP read returns the same fields either way.
+ */
+export function enrichInsightStory(story) {
+  // Use digest threat when present and not keyword-sourced (keyword threat uses old taxonomy).
+  // Fall back to categorizeStory() for legacy/incomplete payloads.
+  const hasDigestThreat = story.threat?.level && story.threat?.source !== 'keyword';
+  const { category, threatLevel } = hasDigestThreat
+    ? { category: story.threat.category ?? 'general', threatLevel: story.threat.level }
+    : categorizeStory(story.primaryTitle);
+  const { countryCode, countryCodes } = extractStoryCountries(story.primaryTitle);
+  return {
+    primaryTitle: story.primaryTitle,
+    primarySource: story.primarySource,
+    primaryLink: story.primaryLink,
+    pubDate: story.pubDate,
+    sourceCount: story.sourceCount,
+    // #6428: uniqueSourceCount is the corroboration breadth number every
+    // consumer (InsightsPanel badge, MCP get_news_intelligence) quotes back
+    // to a user, so it counts PUBLISHERS. `sources` stays the label list —
+    // it is what the UI credits and links, and collapsing it would drop
+    // attribution the publisher is owed.
+    uniqueSourceCount: story.uniquePublisherCount ?? 0,
+    sources: Array.isArray(story.sources) ? story.sources : [],
+    // #6419: `sources` holds only the labels that survived the digest's
+    // per-category cap; the digest's origin-aware publisher count is the
+    // floor a single-publisher verdict has to respect.
+    corroborationCount: story.corroborationCount ?? 0,
+    // #9095: publisher families in `sources` that carried the same copy;
+    // each group counts as one publisher wherever `sources` is judged.
+    ...(Array.isArray(story.sameCopy) && story.sameCopy.length > 0 ? { sameCopy: story.sameCopy } : {}),
+    lastUpdated: story.lastUpdated,
+    memberTitles: Array.isArray(story.memberTitles) ? story.memberTitles : [story.primaryTitle],
+    sourceTier: story.sourceTier,
+    upstreamImportanceScore: story.upstreamImportanceScore,
+    entityCorroboration: story.entityCorroboration === true,
+    corroborationSourceCount: story.corroborationSourceCount ?? 0,
+    importanceScore: story.importanceScore,
+    effectiveImportanceScore: story.effectiveImportanceScore,
+    ...(Number.isFinite(story.credibilityScore) ? { credibilityScore: story.credibilityScore } : {}),
+    velocity: { level: 'normal', sourcesPerHour: 0 },
+    isAlert: story.isAlert,
+    category,
+    threatLevel,
+    countryCode,
+    countryCodes,
+  };
+}
+
+/**
+ * Rank every cluster with the top-story scoring and publish it in the
+ * top-story shape. Lowest-ranked stories are dropped past `maxBytes`, and the
+ * drop is counted rather than hidden.
+ */
+export function buildStoryPool(clusters, { nowMs = Date.now(), generatedAt, maxBytes = STORY_POOL_MAX_BYTES } = {}) {
+  const ranked = clusters
+    .map((cluster) => {
+      const importanceScore = scoreImportance(cluster);
+      return { ...cluster, importanceScore, effectiveImportanceScore: importanceScore * recencyWeight(cluster, nowMs) };
+    })
+    .sort((a, b) => b.effectiveImportanceScore - a.effectiveImportanceScore || b.importanceScore - a.importanceScore);
+  const stories = [];
+  let bytes = 2;
+  for (const cluster of ranked) {
+    const { velocity: _velocity, ...story } = enrichInsightStory(cluster);
+    story.memberTitles = story.memberTitles.slice(0, STORY_POOL_MAX_MEMBER_TITLES);
+    const size = Buffer.byteLength(JSON.stringify(story)) + (stories.length > 0 ? 1 : 0);
+    // Stop rather than skip, so the pool stays a ranked prefix.
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    stories.push(story);
+  }
+  return { generatedAt, clusterCount: clusters.length, droppedForSize: ranked.length - stories.length, stories };
+}
+
+export function preserveStoryPoolInLkg(existing, storyPool) {
+  return storyPool ? { ...existing, storyPool } : existing;
+}
+
 // A degraded global brief may reuse the last known-good public payload even
 // though this run obtained fresh per-source digest evidence. Keep that audit
 // projection attached for afterPublish; publishTransform still prevents it
 // from entering the public insights cache.
 export function preserveChinaNewsCoverageInLkg(existing, chinaNewsCoverage) {
   return chinaNewsCoverage ? { ...existing, chinaNewsCoverage } : existing;
+}
+
+export function preserveThreatHistoryInLkg(existing, threatHistory) {
+  return threatHistory ? { ...existing, threatHistory } : existing;
+}
+
+function threatHistoryLevel(value) {
+  const level = String(value ?? '').trim().toLowerCase();
+  return THREAT_HISTORY_LEVELS.includes(level) ? level : 'info';
+}
+
+function threatHistoryRank(level) {
+  return THREAT_HISTORY_LEVELS.length - THREAT_HISTORY_LEVELS.indexOf(level);
+}
+
+function threatHistoryDayKey(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/** UTC day keys of the timeline window, oldest first, ending today. */
+export function threatTimelineWindow(nowMs) {
+  const today = Date.parse(`${threatHistoryDayKey(nowMs)}T00:00:00.000Z`);
+  return Array.from({ length: THREAT_TIMELINE_DAYS }, (_, index) =>
+    threatHistoryDayKey(today - (THREAT_TIMELINE_DAYS - 1 - index) * THREAT_HISTORY_DAY_MS));
+}
+
+function itemPubMs(value) {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : null;
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+  return null;
+}
+
+/** Same-headline fingerprint: case, punctuation and spacing do not split a story. */
+export function threatStoryFingerprint(title) {
+  const normalized = String(title ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+  if (!normalized) return null;
+  return createHash('sha1').update(normalized).digest('hex').slice(0, 12);
+}
+
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const FINGERPRINT_RE = /^[0-9a-f]{12}$/;
+
+function normalizeThreatHistoryState(raw) {
+  const days = {};
+  const source = raw && typeof raw === 'object' && raw.days && typeof raw.days === 'object' ? raw.days : {};
+  for (const [date, stories] of Object.entries(source)) {
+    if (!DAY_KEY_RE.test(date) || !Array.isArray(stories)) continue;
+    const kept = [];
+    for (const story of stories) {
+      const keys = Array.isArray(story?.k) ? story.k.filter(k => typeof k === 'string' && FINGERPRINT_RE.test(k)) : [];
+      if (keys.length === 0) continue;
+      kept.push({ l: threatHistoryLevel(story.l), k: [...new Set(keys)] });
+    }
+    days[date] = kept;
+  }
+  const recordingSince = typeof raw?.recordingSince === 'string' && DAY_KEY_RE.test(raw.recordingSince)
+    ? raw.recordingSince
+    : null;
+  const partialDays = Array.isArray(raw?.partialDays)
+    ? raw.partialDays.filter(date => typeof date === 'string' && DAY_KEY_RE.test(date))
+    : [];
+  return { recordingSince, partialDays, days };
+}
+
+/**
+ * Add this run's clusters to the stored history. A cluster that shares any
+ * member headline with stored stories is those stories: they merge into one
+ * (earliest day, highest level, all headlines), and the merged story is never
+ * counted again. A new story lands on the UTC day of its earliest member
+ * headline. Days older than the window are dropped.
+ *
+ * `coverageStartMs` is how far back this run's digest is complete. When the
+ * previous run is older than that, the stories published in between are
+ * lost, so the days of that gap are recorded as partial.
+ */
+export function mergeThreatHistory(previous, clusters, { nowMs = Date.now(), pubMsByTitle = new Map(), coverageStartMs = null } = {}) {
+  const state = normalizeThreatHistoryState(previous);
+  const window = threatTimelineWindow(nowMs);
+  const oldest = window[0];
+  const today = window[window.length - 1];
+  const days = {};
+  const byFingerprint = new Map();
+  const storyDate = new Map();
+  for (const [date, stories] of Object.entries(state.days)) {
+    if (date < oldest || date > today) continue;
+    days[date] = stories;
+    for (const story of stories) {
+      storyDate.set(story, date);
+      for (const key of story.k) byFingerprint.set(key, story);
+    }
+  }
+
+  for (const cluster of Array.isArray(clusters) ? clusters : []) {
+    const titles = Array.isArray(cluster?.memberTitles) && cluster.memberTitles.length > 0
+      ? cluster.memberTitles
+      : [cluster?.primaryTitle];
+    const keys = [...new Set(titles.map(threatStoryFingerprint).filter(Boolean))];
+    if (keys.length === 0) continue;
+    const level = threatHistoryLevel(cluster?.threat?.level);
+    const matched = [...new Set(keys.map(key => byFingerprint.get(key)).filter(Boolean))];
+    if (matched.length > 0) {
+      matched.sort((a, b) => storyDate.get(a).localeCompare(storyDate.get(b), 'en-US'));
+      const [target, ...absorbed] = matched;
+      for (const story of absorbed) {
+        if (threatHistoryRank(story.l) > threatHistoryRank(target.l)) target.l = story.l;
+        const date = storyDate.get(story);
+        days[date] = days[date].filter(entry => entry !== story);
+        storyDate.delete(story);
+        for (const key of story.k) {
+          if (!target.k.includes(key)) target.k.push(key);
+          byFingerprint.set(key, target);
+        }
+      }
+      if (threatHistoryRank(level) > threatHistoryRank(target.l)) target.l = level;
+      for (const key of keys) {
+        if (byFingerprint.get(key) === target) continue;
+        target.k.push(key);
+        byFingerprint.set(key, target);
+      }
+      continue;
+    }
+    const pubTimes = titles.map(title => pubMsByTitle.get(title)).filter(ms => Number.isFinite(ms));
+    const fallbackMs = itemPubMs(cluster?.pubDate) ?? nowMs;
+    const firstSeenMs = Math.min(pubTimes.length > 0 ? Math.min(...pubTimes) : fallbackMs, nowMs);
+    const date = threatHistoryDayKey(firstSeenMs);
+    if (date < oldest) continue;
+    const story = { l: level, k: keys };
+    (days[date] ||= []).push(story);
+    storyDate.set(story, date);
+    for (const key of keys) byFingerprint.set(key, story);
+  }
+  for (const [date, stories] of Object.entries(days)) {
+    if (stories.length === 0) delete days[date];
+  }
+
+  const partialDays = new Set(state.partialDays);
+  const previousRunMs = itemPubMs(previous?.updatedAt);
+  if (state.recordingSince === null && Number.isFinite(coverageStartMs)
+    && coverageStartMs > Date.parse(`${today}T00:00:00.000Z`)) {
+    // First run: earlier days are partial by recordingSince, and today is
+    // partial too when the digest does not reach back to its midnight.
+    partialDays.add(today);
+  }
+  if (previousRunMs !== null && Number.isFinite(coverageStartMs) && previousRunMs < coverageStartMs) {
+    const gapEnd = threatHistoryDayKey(Math.min(coverageStartMs, nowMs));
+    for (let ms = Date.parse(`${threatHistoryDayKey(previousRunMs)}T00:00:00.000Z`); ; ms += THREAT_HISTORY_DAY_MS) {
+      const date = threatHistoryDayKey(ms);
+      if (date > gapEnd) break;
+      partialDays.add(date);
+    }
+  }
+
+  return {
+    version: 1,
+    recordingSince: state.recordingSince ?? today,
+    updatedAt: new Date(nowMs).toISOString(),
+    partialDays: [...partialDays].filter(date => date >= oldest && date <= today).sort(),
+    days,
+  };
+}
+
+/**
+ * How far back the digest is complete. A category at the producer cap drops
+ * its oldest items first, so the bound is the newest oldest-item among capped
+ * categories. Uncapped categories are complete back to the freshness floor;
+ * when none is capped, the oldest item bounds the digest. Null when the
+ * digest carries no dated items.
+ */
+export function digestCoverageStartMs(digest) {
+  const groups = digest?.categories && typeof digest.categories === 'object'
+    ? Object.values(digest.categories).map(bucket => (Array.isArray(bucket?.items) ? bucket.items : []))
+    : [digestItemsForInsights(digest)];
+  let cappedBound = null;
+  let oldestOverall = null;
+  for (const items of groups) {
+    const times = items.map(item => itemPubMs(item?.pubDate ?? item?.publishedAt ?? item?.date)).filter(ms => ms !== null);
+    if (times.length === 0) continue;
+    const oldestInGroup = Math.min(...times);
+    if (oldestOverall === null || oldestInGroup < oldestOverall) oldestOverall = oldestInGroup;
+    if (items.length >= DIGEST_CATEGORY_CAP && (cappedBound === null || oldestInGroup > cappedBound)) cappedBound = oldestInGroup;
+  }
+  return cappedBound ?? oldestOverall;
+}
+
+/** Earliest publish time per headline, for first-seen day placement. */
+export function buildPubMsByTitle(items) {
+  const byTitle = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const title = item?.title;
+    const ms = itemPubMs(item?.pubDate);
+    if (!title || ms === null) continue;
+    const previous = byTitle.get(title);
+    if (previous === undefined || ms < previous) byTitle.set(title, ms);
+  }
+  return byTitle;
+}
+
+/**
+ * Public day counts for the panel: the window's seven UTC days, oldest
+ * first. `recordingSince` is the first day the history was written; days
+ * before it hold only what that first digest still carried. `partialDays`
+ * are days a seeder outage left incomplete.
+ */
+export function projectThreatTimeline(state, { nowMs = Date.now() } = {}) {
+  const days = threatTimelineWindow(nowMs).map(date => {
+    const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    for (const story of state?.days?.[date] ?? []) counts[threatHistoryLevel(story.l)] += 1;
+    return { date, counts };
+  });
+  const window = new Set(threatTimelineWindow(nowMs));
+  return {
+    version: 1,
+    recordingSince: state?.recordingSince ?? null,
+    updatedAt: state?.updatedAt ?? new Date(nowMs).toISOString(),
+    partialDays: (Array.isArray(state?.partialDays) ? state.partialDays : []).filter(date => window.has(date)),
+    days,
+  };
+}
+
+/**
+ * Read the stored history. A missing key is an empty history; a failed read
+ * returns undefined so the run skips the history rather than overwrite a
+ * week of counts with one digest.
+ */
+async function readThreatHistory() {
+  try {
+    const { url, token } = getRedisCredentials();
+    const resp = await fetch(`${url}/get/${encodeURIComponent(THREAT_HISTORY_KEY)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!resp.ok) return undefined;
+    const data = await resp.json();
+    return data.result ? JSON.parse(data.result) : null;
+  } catch (err) {
+    console.warn(`  Threat history read failed: ${err?.message || err}`);
+    return undefined;
+  }
+}
+
+/**
+ * Threat-timeline fields for the payload. When the history read failed, the
+ * stored week is intact but unread: keep the last published counts rather
+ * than drop the panel back to binning the top stories.
+ */
+export function threatTimelineFields(threatHistoryRun, existingInsights) {
+  if (threatHistoryRun) {
+    return { threatTimeline: threatHistoryRun.threatTimeline, threatHistory: threatHistoryRun.threatHistory };
+  }
+  const previous = existingInsights?.threatTimeline;
+  return previous && typeof previous === 'object' ? { threatTimeline: previous } : {};
+}
+
+async function readExistingInsightsOrNull() {
+  try {
+    return await readExistingInsights();
+  } catch {
+    return null;
+  }
+}
+
+async function buildThreatHistoryForRun(clusters, normalizedItems, digest, nowMs = Date.now()) {
+  const previous = await readThreatHistory();
+  if (previous === undefined) return null;
+  const threatHistory = mergeThreatHistory(previous, clusters, {
+    nowMs,
+    pubMsByTitle: buildPubMsByTitle(normalizedItems),
+    coverageStartMs: digestCoverageStartMs(digest),
+  });
+  const threatTimeline = projectThreatTimeline(threatHistory, { nowMs });
+  const stories = Object.values(threatHistory.days).reduce((sum, list) => sum + list.length, 0);
+  console.log(
+    `  Threat history: ${stories} stories over ${Object.keys(threatHistory.days).length} day(s), since ${threatHistory.recordingSince}`
+      + (threatHistory.partialDays.length > 0 ? `; partial ${threatHistory.partialDays.join(',')}` : ''),
+  );
+  return { threatHistory, threatTimeline };
+}
+
+export function normalizeDigestItemsForInsights(items) {
+  return items.map(item => ({
+    title: sanitizeTitle(item.title || item.headline || ''),
+    source: item.source || item.feed || '',
+    // #9095: clusterItems compares title + lead to count same-copy outlets once.
+    ...(typeof item.snippet === 'string' && item.snippet.trim() !== '' ? { snippet: item.snippet } : {}),
+    link: item.link || item.url || '',
+    pubDate: item.pubDate || item.publishedAt || item.date || new Date().toISOString(),
+    isAlert: item.isAlert || false,
+    tier: item.tier,
+    threat: normalizeThreat(item.threat),
+    importanceScore: item.importanceScore,
+    ...(Number.isFinite(item.credibilityScore) ? { credibilityScore: item.credibilityScore } : {}),
+    corroborationCount: item.corroborationCount ?? item.storyMeta?.sourceCount,
+    storyMeta: item.storyMeta,
+  })).filter(item => item.title.length > 10);
+}
+
+export function digestItemsForInsights(digest) {
+  if (Array.isArray(digest)) return digest;
+  if (digest?.categories && typeof digest.categories === 'object') {
+    return Object.values(digest.categories)
+      .flatMap(bucket => (Array.isArray(bucket?.items) ? bucket.items : []));
+  }
+  return digest?.items || digest?.articles || digest?.headlines || [];
+}
+
+/**
+ * Acceptance gate for the synthesis provider walk. Exported so the composer-
+ * fault contract is directly testable — the #7248 review found the contained
+ * composer sentinel riding the ordinary-rejection path, and the fix lived in
+ * an inline closure no test could reach.
+ *
+ * Contract:
+ *   - editorial rejection -> returns null and records {code, detail} for the
+ *     resample-feedback path;
+ *   - composer FAULT (the contained INSIGHTS_COMPOSER_THREW sentinel) ->
+ *     THROWS, so callLLM takes its faulted-acceptor path: no temperature bump,
+ *     no correction note, no resample. The sample may have been fine; the
+ *     fault is in OUR gate. resolveInsightsSynthesis still classifies the run
+ *     as COMPOSER_ERROR from its own contained composer call.
+ */
+export function createSynthesisAcceptor(topStories, composerOptions) {
+  let lastSynthesisRejection = null;
+  return {
+    accept: (text) => {
+      const result = composeInsightsSynthesis(text, topStories, composerOptions);
+      if (result?.rejection === INSIGHTS_COMPOSER_THREW) {
+        lastSynthesisRejection = null;
+        throw new Error(`composer fault: ${INSIGHTS_COMPOSER_THREW}`);
+      }
+      lastSynthesisRejection = result?.brief
+        ? null
+        : { code: result?.rejection ?? null, detail: result?.rejectionDetail ?? null };
+      return result?.brief ?? null;
+    },
+    lastRejection: () => lastSynthesisRejection,
+  };
 }
 
 async function fetchInsights() {
@@ -707,17 +1303,7 @@ async function fetchInsights() {
   });
 
   // Digest shape: { categories: { politics: { items: [...] }, ... }, feedStatuses, generatedAt }
-  let items;
-  if (Array.isArray(digest)) {
-    items = digest;
-  } else if (digest.categories && typeof digest.categories === 'object') {
-    items = [];
-    for (const bucket of Object.values(digest.categories)) {
-      if (Array.isArray(bucket.items)) items.push(...bucket.items);
-    }
-  } else {
-    items = digest.items || digest.articles || digest.headlines || [];
-  }
+  const items = digestItemsForInsights(digest);
 
   if (items.length === 0) {
     const keys = typeof digest === 'object' && digest !== null ? Object.keys(digest).join(', ') : typeof digest;
@@ -726,21 +1312,11 @@ async function fetchInsights() {
 
   console.log(`  Digest items: ${items.length}`);
 
-  const normalizedItems = items.map(item => ({
-    title: sanitizeTitle(item.title || item.headline || ''),
-    source: item.source || item.feed || '',
-    link: item.link || item.url || '',
-    pubDate: item.pubDate || item.publishedAt || item.date || new Date().toISOString(),
-    isAlert: item.isAlert || false,
-    tier: item.tier,
-    threat: normalizeThreat(item.threat),
-    importanceScore: item.importanceScore,
-    corroborationCount: item.corroborationCount ?? item.storyMeta?.sourceCount,
-    storyMeta: item.storyMeta,
-  })).filter(item => item.title.length > 10);
+  const normalizedItems = normalizeDigestItemsForInsights(items);
 
   const clusters = clusterItems(normalizedItems);
   console.log(`  Clusters: ${clusters.length}`);
+  const threatHistoryRun = await buildThreatHistoryForRun(clusters, normalizedItems, digest);
 
   // #4920 coverage ledger: capture what the selection gates dropped.
   const selectionStats = {};
@@ -799,37 +1375,84 @@ async function fetchInsights() {
   }
   // The acceptance gate is the composer itself (#6001), so the chain can never
   // accept output the composer would later reject.
+  // One read drives BOTH the prompt and the gate: symmetry between what the
+  // model sees and what grounds it is the whole point of the flag, and two
+  // separate reads could drift.
+  const promptMemberTitlesEnabled = process.env.INSIGHTS_PROMPT_MEMBER_TITLES === '1';
   const synthesisComposerOptions = {
     briefCluster,
     validatorMode: BRIEF_VALIDATOR_MODE,
     sanitizeTitle,
     sourceFromStory: briefSourceFromStory,
+    promptScopedMembers: promptMemberTitlesEnabled,
   };
-  const composeFromText = (text) =>
-    composeInsightsSynthesis(text, topStories, synthesisComposerOptions).brief;
+  const { accept: composeFromText, lastRejection } = createSynthesisAcceptor(topStories, synthesisComposerOptions);
 
   // #6001: L1 may now walk the whole provider chain, and L2 below makes a
   // SECOND callLLM. Stamp the run's LLM start so L2 gets only the remainder —
   // otherwise two full 60s budgets could outlast the 120s seed lock.
   const llmRunStartedAtMs = Date.now();
-  const synthesisResult = hasBriefCluster
+  // Repeat breaker: same gate failure, same story set, three cycles running —
+  // a fourth identical paid call cannot succeed where three did not, and the
+  // resample/repair machinery has already had its chance on each. Re-arms the
+  // moment the story set (and therefore the prompt) changes.
+  const previousFreshnessMeta = await readExistingSeedMeta('news', 'insights');
+  // The signature hashes the exact prompts callLLM is about to send — computed
+  // here, passed there, one source of truth.
+  const synthesisSystem = synthesisSystemPrompt(new Date().toISOString().split('T')[0]);
+  const synthesisUser = synthesisUserPrompt(topStories, {
+    includeMemberTitles: promptMemberTitlesEnabled,
+  });
+  const storiesSignature = insightsSynthesisSignature(synthesisSystem, synthesisUser);
+  const synthesisBreakerOpen = hasBriefCluster && shouldSkipInsightsSynthesis({
+    previousMeta: previousFreshnessMeta,
+    synthesisSignature: storiesSignature,
+  });
+  if (synthesisBreakerOpen) {
+    console.warn(formatInsightsBreakerOpenWarning(previousFreshnessMeta));
+  }
+  const synthesisResult = hasBriefCluster && !synthesisBreakerOpen
     ? await callLLM(null, {
-        systemPrompt: synthesisSystemPrompt(new Date().toISOString().split('T')[0]),
-        userPrompt: synthesisUserPrompt(topStories),
+        systemPrompt: synthesisSystem,
+        userPrompt: synthesisUser,
         maxTokens: 900,
         // A model whose output trips the editorial gates must not strand the
-        // run — keep the chain moving to one that passes.
+        // run. callLLM resamples this model once before demoting to a weaker
+        // one, so a single unusable sample no longer costs the better writer —
+        // and the resample carries the gate's correction plus real sampling
+        // variance, so it is a different draft rather than the same one twice.
         accept: composeFromText,
+        rejectionFeedback: () => synthesisRejectionFeedback(lastRejection()),
       })
     : null;
-  const { composed, failureCode } = resolveInsightsSynthesis({
-    synthesisResult,
-    topStories,
-    ...synthesisComposerOptions,
-  });
+  let breakerCarriedDetail = null;
+  const { composed, failureCode, failureDetail } = synthesisBreakerOpen
+    ? { composed: null, failureCode: null, failureDetail: null }
+    : resolveInsightsSynthesis({
+      synthesisResult,
+      topStories,
+      ...synthesisComposerOptions,
+    });
   synthesisFailureCode = failureCode;
 
-  if (composed) {
+  if (synthesisBreakerOpen) {
+    // Preserve the TRUE cause. Classifying this run's null synthesisResult
+    // would report PROVIDER — but no provider was asked; the standing failure
+    // is whatever kept failing before the breaker opened. L2 is skipped as
+    // well: it is a second paid call, and the LKG it would lose to is already
+    // being served.
+    synthesisFailureCode = normalizeInsightsFailureCode(previousFreshnessMeta?.lastSynthesisFailureCode)
+      ?? INSIGHTS_SYNTHESIS_FAILURE_CODES.PROVIDER;
+    status = 'degraded';
+    // Carry the standing detail too: a skipped run repeats the previous
+    // failure identically, and the per-signature counter downstream matches on
+    // (code, detail, signature) — a null detail here would read as a CHANGED
+    // failure, reset the counter, and flap the breaker open/closed every other
+    // run.
+    breakerCarriedDetail = typeof previousFreshnessMeta?.lastSynthesisFailureDetail === 'string'
+      ? previousFreshnessMeta.lastSynthesisFailureDetail
+      : null;
+  } else if (composed) {
     worldBrief = composed.lead;
     briefStoryLines = composed.lines;
     worldBriefSources = composed.sources;
@@ -838,13 +1461,29 @@ async function fetchInsights() {
     if (composed.strippedCitations > 0) {
       console.warn(`  [brief_citation ENFORCE] stripped ${composed.strippedCitations} out-of-range citation(s)`);
     }
+    if (composed.droppedLeadSentences > 0) {
+      // Bounded vocabulary only — the detail may quote model output, and this
+      // line reaches Railway logs, so name the gate, not the text.
+      console.warn(`  [brief_repair ${BRIEF_VALIDATOR_MODE.toUpperCase()}] dropped ${composed.droppedLeadSentences} lead sentence(s) (first: ${composed.droppedLeadRejection}) — published the surviving lead`);
+    }
     if (composed.hallucinatedLines > 0) {
       console.warn(`  [brief_hallucination ${BRIEF_VALIDATOR_MODE.toUpperCase()}] ${composed.hallucinatedLines}/${topStories.length} synthesis lines flagged`);
+    }
+    if (composed.sourceAttributions > 0) {
+      // Accept-side counterpart to the `validate_reject` reason below: how many
+      // lead sentences named their own outlet. Only the reject path was ever
+      // reported, so a quiet alarm could not be told apart from a gate that had
+      // started accepting too much. A count is enough to see that — the reason
+      // vocabulary stays a bounded literal on purpose (these reach seed-meta and
+      // Railway logs, where the payload may be sensitive), so no offending text
+      // is logged here either.
+      console.log(`  [brief_attribution] ${composed.sourceAttributions} lead sentence(s) named their source outlet`);
     }
     console.log(`  Brief synthesized (top-${topStories.length}) via ${briefProvider} (${briefModel})`);
   } else {
     console.warn(
-      `  [brief_synthesis] rejected (${synthesisFailureCode || INSIGHTS_SYNTHESIS_FAILURE_CODES.PROVIDER}) — `
+      `  [brief_synthesis] rejected (${synthesisFailureCode || INSIGHTS_SYNTHESIS_FAILURE_CODES.PROVIDER})`
+      + `${failureDetail ? ` on "${failureDetail}"` : ''} — `
       + 'falling back to single-headline brief',
     );
     const legacy = await generateLegacySingleHeadlineBrief(topStories, {
@@ -873,42 +1512,7 @@ async function fetchInsights() {
   ).length;
   const fastMovingCount = 0; // velocity not available in digest items
 
-  const enrichedStories = topStories.map(story => {
-    // Use digest threat when present and not keyword-sourced (keyword threat uses old taxonomy).
-    // Fall back to categorizeStory() for legacy/incomplete payloads.
-    const hasDigestThreat = story.threat?.level && story.threat?.source !== 'keyword';
-    const { category, threatLevel } = hasDigestThreat
-      ? { category: story.threat.category ?? 'general', threatLevel: story.threat.level }
-      : categorizeStory(story.primaryTitle);
-    const countryCode = extractCountryCode(story.primaryTitle) ?? null;
-    return {
-      primaryTitle: story.primaryTitle,
-      primarySource: story.primarySource,
-      primaryLink: story.primaryLink,
-      pubDate: story.pubDate,
-      sourceCount: story.sourceCount,
-      // #6428: uniqueSourceCount is the corroboration breadth number every
-      // consumer (InsightsPanel badge, MCP get_news_intelligence) quotes back
-      // to a user, so it counts PUBLISHERS. `sources` stays the label list —
-      // it is what the UI credits and links, and collapsing it would drop
-      // attribution the publisher is owed.
-      uniqueSourceCount: story.uniquePublisherCount ?? 0,
-      sources: Array.isArray(story.sources) ? story.sources : [],
-      lastUpdated: story.lastUpdated,
-      memberTitles: Array.isArray(story.memberTitles) ? story.memberTitles : [story.primaryTitle],
-      sourceTier: story.sourceTier,
-      upstreamImportanceScore: story.upstreamImportanceScore,
-      entityCorroboration: story.entityCorroboration === true,
-      corroborationSourceCount: story.corroborationSourceCount ?? 0,
-      importanceScore: story.importanceScore,
-      effectiveImportanceScore: story.effectiveImportanceScore,
-      velocity: { level: 'normal', sourcesPerHour: 0 },
-      isAlert: story.isAlert,
-      category,
-      threatLevel,
-      countryCode,
-    };
-  });
+  const enrichedStories = topStories.map(enrichInsightStory);
 
   // #4920: user-facing provenance — "compiled from N stories across M
   // sources" — plus the selection-gate drop counts. Read by
@@ -938,6 +1542,10 @@ async function fetchInsights() {
     ? { newestMs: Math.max(...pubTimes), oldestMs: Math.min(...pubTimes) }
     : null;
 
+  const generatedAt = new Date().toISOString();
+  const storyPool = buildStoryPool(clusters, { generatedAt });
+  console.log(`  Story pool: ${storyPool.stories.length}/${storyPool.clusterCount} clusters (dropped for size ${storyPool.droppedForSize})`);
+
   const payload = {
     worldBrief,
     briefStoryLines,
@@ -947,13 +1555,15 @@ async function fetchInsights() {
     briefModel,
     status,
     topStories: enrichedStories,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     clusterCount: clusters.length,
     multiSourceCount,
     fastMovingCount,
     importanceSignals: observability,
     provenance,
     chinaNewsCoverage,
+    storyPool,
+    ...threatTimelineFields(threatHistoryRun, threatHistoryRun ? null : await readExistingInsightsOrNull()),
   };
 
   // LKG preservation: don't overwrite "ok" with "degraded"
@@ -962,10 +1572,15 @@ async function fetchInsights() {
     if (existing?.status === 'ok') {
       console.log('  LKG preservation: existing payload is "ok", skipping degraded overwrite');
       return decorateInsightsRun(
-        preserveChinaNewsCoverageInLkg(existing, chinaNewsCoverage),
+        preserveThreatHistoryInLkg(
+          preserveStoryPoolInLkg(preserveChinaNewsCoverageInLkg(existing, chinaNewsCoverage), storyPool),
+          threatHistoryRun?.threatHistory,
+        ),
         {
           outcome: INSIGHTS_RUN_OUTCOMES.LKG_PRESERVED,
           failureCode: synthesisFailureCode || INSIGHTS_SYNTHESIS_FAILURE_CODES.PROVIDER,
+          failureDetail: breakerCarriedDetail ?? failureDetail,
+          storiesSignature,
           briefEligibleClusters,
         },
       );
@@ -975,6 +1590,8 @@ async function fetchInsights() {
   return decorateInsightsRun(payload, {
     outcome: status === 'ok' ? INSIGHTS_RUN_OUTCOMES.PUBLISHED : INSIGHTS_RUN_OUTCOMES.DEGRADED,
     failureCode: synthesisFailureCode,
+    failureDetail: breakerCarriedDetail ?? failureDetail,
+    storiesSignature,
     briefEligibleClusters,
   });
 }
@@ -1005,18 +1622,43 @@ export function insightsFreshnessPatchArgs(data, outcome, previousMeta, nowMs = 
     previousMeta,
     outcome,
     failureCode: runMeta?.failureCode,
+    failureDetail: runMeta?.failureDetail ?? null,
+    storiesSignature: runMeta?.storiesSignature ?? null,
     nowMs,
     servedGeneratedAt: data?.generatedAt,
     briefEligibleClusters: runMeta?.briefEligibleClusters ?? null,
   };
 }
 
-async function finalizeInsightsRun(data, outcome, { previousMeta } = {}) {
+async function writeInsightsStoryPool(data) {
+  if (!data?.storyPool) {
+    // Digest unavailable: keep the last pool readable. Its own generatedAt
+    // lets the MCP reader refuse it once it is too old.
+    await extendExistingTtl([STORY_POOL_KEY], CACHE_TTL);
+    return;
+  }
+  await writeExtraKey(STORY_POOL_KEY, data.storyPool, CACHE_TTL);
+}
+
+async function writeInsightsThreatHistory(data, { lockFence } = {}) {
+  if (!data?.threatHistory) {
+    // Digest unavailable or the history read failed: keep the stored week.
+    await extendExistingTtl([THREAT_HISTORY_KEY], THREAT_HISTORY_TTL);
+    return;
+  }
+  // Read-merge-write: fenced so a run that lost its lease cannot overwrite a
+  // newer run's history with its stale merge.
+  await writeExtraKey(THREAT_HISTORY_KEY, data.threatHistory, THREAT_HISTORY_TTL, undefined, { lockFence });
+}
+
+async function finalizeInsightsRun(data, outcome, { previousMeta, lockFence } = {}) {
   const [resolvedPreviousMeta] = await Promise.all([
     previousMeta === undefined
       ? readExistingSeedMeta('news', 'insights')
       : Promise.resolve(previousMeta),
     writeInsightsChinaCoverage(data),
+    writeInsightsStoryPool(data),
+    writeInsightsThreatHistory(data, { lockFence }),
   ]);
   return {
     freshnessMetaPatch: buildInsightsFreshnessMetaPatch(
@@ -1025,7 +1667,7 @@ async function finalizeInsightsRun(data, outcome, { previousMeta } = {}) {
   };
 }
 
-export { callLLM, __setInsightsLlmTransportForTests };
+export { callLLM, generateLegacySingleHeadlineBrief, __setInsightsLlmTransportForTests };
 
 if (_isDirectRun) {
   runSeed('news', 'insights', CANONICAL_KEY, fetchInsights, {
@@ -1039,20 +1681,23 @@ if (_isDirectRun) {
     // The source-status projection is not user-facing digest content. It is
     // retained separately so the China audit can distinguish an unavailable
     // source from a globally outranked one without changing the public payload.
-    preserveKeys: [CHINA_COVERAGE_KEY],
+    preserveKeys: [CHINA_COVERAGE_KEY, STORY_POOL_KEY],
+    preserveKeyTtls: [{ key: THREAT_HISTORY_KEY, ttlSeconds: THREAT_HISTORY_TTL }],
     publishTransform: publishInsightsPayload,
-    afterPublish: async (data) => {
+    afterPublish: async (data, context) => {
       const runMeta = insightsRunMeta(data);
       return finalizeInsightsRun(
         data,
         runMeta?.outcome === INSIGHTS_RUN_OUTCOMES.PUBLISHED
           ? INSIGHTS_RUN_OUTCOMES.PUBLISHED
           : INSIGHTS_RUN_OUTCOMES.DEGRADED,
+        { lockFence: context?.lockFence },
       );
     },
     afterValidationSkip: async (data, context) => {
       return finalizeInsightsRun(data, INSIGHTS_RUN_OUTCOMES.LKG_PRESERVED, {
         previousMeta: context.existingSeedMeta,
+        lockFence: context.lockFence,
       });
     },
   }).catch(async (err) => {

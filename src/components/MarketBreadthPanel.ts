@@ -1,7 +1,11 @@
 import { Panel } from './Panel';
+import { createLazyClient, getRpcBaseUrl, rpcFetch } from '@/services/rpc-client';
+import { MarketServiceClient } from '@/services/generated-rpc-clients';
 import { t } from '@/services/i18n';
 import { escapeHtml, unsafeRawHtml } from '@/utils/sanitize';
 import { getHydratedData } from '@/services/bootstrap';
+
+const getMarketClient = createLazyClient(() => new MarketServiceClient(getRpcBaseUrl(), { fetch: rpcFetch }));
 
 interface BreadthSnapshot {
   date: string;
@@ -73,9 +77,9 @@ type NumericSeriesKey = 'pctAbove20d' | 'pctAbove50d' | 'pctAbove200d';
 type SeriesRun = Array<{ x: number; y: number }>;
 
 const SERIES: { key: NumericSeriesKey; color: string; label: string; fillOpacity: number }[] = [
-  { key: 'pctAbove20d',  color: '#3b82f6', label: '20-day SMA', fillOpacity: 0.08 },
-  { key: 'pctAbove50d',  color: '#f59e0b', label: '50-day SMA', fillOpacity: 0.06 },
-  { key: 'pctAbove200d', color: '#22c55e', label: '200-day SMA', fillOpacity: 0.04 },
+  { key: 'pctAbove20d',  color: '#3b82f6', label: 'Stocks above 20-day moving average (%)', fillOpacity: 0.08 },
+  { key: 'pctAbove50d',  color: '#f59e0b', label: 'Stocks above 50-day moving average (%)', fillOpacity: 0.06 },
+  { key: 'pctAbove200d', color: '#22c55e', label: 'Stocks above 200-day moving average (%)', fillOpacity: 0.04 },
 ];
 
 function xPos(i: number, total: number): number {
@@ -170,7 +174,7 @@ function buildChart(points: BreadthSnapshot[]): string {
   const midLine = yPos(50);
   const mid = `<line x1="${ML}" y1="${midLine.toFixed(1)}" x2="${SVG_W - MR}" y2="${midLine.toFixed(1)}" stroke="rgba(255,255,255,0.12)" stroke-width="1" stroke-dasharray="4 3"/>`;
 
-  return `<svg viewBox="0 0 ${SVG_W} ${SVG_H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block">${yAxis}${mid}${xAxis}${areas}${lines}</svg>`;
+  return `<svg viewBox="0 0 ${SVG_W} ${SVG_H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Market breadth: advancing versus declining issues over time" style="width:100%;height:auto;display:block">${yAxis}${mid}${xAxis}${areas}${lines}</svg>`;
 }
 
 function readingBadge(val: number, color: string): string {
@@ -204,9 +208,7 @@ export class MarketBreadthPanel extends Panel {
 
   private async refreshFromRpc(): Promise<boolean> {
     try {
-      const { MarketServiceClient } = await import('@/generated/client/worldmonitor/market/v1/service_client');
-      const { getRpcBaseUrl } = await import('@/services/rpc-client');
-      const client = new MarketServiceClient(getRpcBaseUrl(), { fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args) });
+      const client = getMarketClient();
       const resp = await client.getMarketBreadthHistory({});
       if (resp.unavailable) {
         if (!this.data) this.showError(t('common.noDataShort'), () => void this.fetchData());
@@ -247,14 +249,14 @@ export class MarketBreadthPanel extends Panel {
       return `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0">
         <span style="display:flex;align-items:center;gap:6px;font-size:calc(11px * var(--wm-panel-effective-scale, 1));color:var(--text-dim)">
           <span style="width:8px;height:3px;border-radius:1px;background:${s.color}"></span>
-          % Above ${escapeHtml(s.label)}
+          ${escapeHtml(s.label)}
         </span>
         ${hasCurrent ? readingBadge(val as number, s.color) : '<span style="font-size:calc(11px * var(--wm-panel-effective-scale, 1));color:var(--text-dim)">\u2014</span>'}
       </div>`;
     }).join('');
 
     const html = `
-      <div style="padding:12px 14px">
+      <div style="padding:12px 0">
         <div style="margin-bottom:8px">${legend}</div>
         <div style="border-radius:6px;background:rgba(255,255,255,0.02);padding:4px 0">${chart}</div>
         ${d.updatedAt ? `<div style="text-align:right;font-size:calc(9px * var(--wm-panel-effective-scale, 1));color:var(--text-dim);margin-top:4px">${escapeHtml(new Date(d.updatedAt).toLocaleString())}</div>` : ''}

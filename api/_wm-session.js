@@ -1,9 +1,13 @@
+// GET /api/wm-session — reports, as booleans only, which HttpOnly tester-key
+// sessions this browser currently holds a valid key for. It lets a reloaded tab
+// restore Pro without the raw key ever becoming JS-readable again.
+//
 // POST /api/wm-session — issues short-lived HttpOnly session cookies for
 // browser access. Anonymous sessions get an HMAC-signed wms_ token cookie; if a
 // caller submits legacy tester keys during migration, those keys are moved into
 // short-lived HttpOnly cookies so they stop living in JS-readable storage.
 
-import { getCorsHeaders, isDisallowedOrigin } from './_cors.js';
+import { getCorsHeaders, getOriginDeniedCorsHeaders, isDisallowedOrigin } from './_cors.js';
 import { timingSafeEqualSecret, timingSafeIncludes } from './_crypto.js';
 import { checkRateLimit } from './_rate-limit.js';
 import { issueSessionToken, validateSessionToken } from './_session.js';
@@ -12,13 +16,18 @@ import { emitWmSessionUsage } from './_usage-telemetry.js';
 export const config = { runtime: 'edge' };
 
 const SESSION_COOKIE = 'wm-session';
-const WIDGET_KEY_COOKIE = 'wm-widget-key';
-const PRO_KEY_COOKIE = 'wm-pro-key';
+const WIDGET_KEY_COOKIE = '__Host-wm-widget-key';
+const PRO_KEY_COOKIE = '__Host-wm-pro-key';
 const COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60;
 const LEGACY_KEY_MAX_LEN = 512;
 const SESSION_RATE_LIMIT_SCOPE = 'wm-session';
 const SESSION_RATE_LIMIT_PER_MINUTE = 30;
 const SESSION_RATE_LIMIT_WINDOW = '60 s';
+// Separate budget so a status read on page load never spends the mint budget.
+const STATUS_RATE_LIMIT_SCOPE = 'wm-session-status';
+const STATUS_RATE_LIMIT_PER_MINUTE = 30;
+const STATUS_RATE_LIMIT_WINDOW = '60 s';
+const ALLOWED_METHODS = 'GET, POST, OPTIONS';
 
 function jsonResponse(body, status, headers) {
   const out = headers instanceof Headers ? headers : new Headers(headers);
@@ -86,7 +95,7 @@ function cookieDomainAttribute(req) {
 }
 
 function sessionCookie(req, name, value) {
-  return `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}${cookieDomainAttribute(req)}; HttpOnly; Secure; SameSite=Lax`;
+  return `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}${name === SESSION_COOKIE ? cookieDomainAttribute(req) : ''}; HttpOnly; Secure; SameSite=Lax`;
 }
 
 /**
@@ -167,20 +176,32 @@ export default async function handler(req, ctx) {
     return response;
   };
 
+  // Preflight must succeed even for origins we refuse on POST — otherwise the
+  // browser never sends the actual request and the client sees a network error
+  // instead of a readable 403 (#6411). Allowed origins get normal CORS;
+  // disallowed origins get refusal-specific headers that echo their Origin.
+  if (req.method === 'OPTIONS') {
+    const preflight = isDisallowedOrigin(req)
+      ? getOriginDeniedCorsHeaders(req, ALLOWED_METHODS)
+      : getCorsHeaders(req, ALLOWED_METHODS);
+    return new Response(null, { status: 204, headers: preflight });
+  }
+
   if (isDisallowedOrigin(req)) {
-    const response = new Response('Forbidden', { status: 403 });
+    const deniedCors = getOriginDeniedCorsHeaders(req, ALLOWED_METHODS);
+    const response = new Response('Forbidden', { status: 403, headers: deniedCors });
     emitWmSessionUsage(ctx, req, response, startedAt, 'origin_403');
     return response;
   }
 
-  const cors = getCorsHeaders(req, 'POST, OPTIONS');
+  const cors = getCorsHeaders(req, ALLOWED_METHODS);
 
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: cors });
+  if (req.method === 'GET') {
+    return handleStatus(req, ctx, cors, respond);
   }
 
   if (req.method !== 'POST') {
-    return respond({ error: 'Method not allowed' }, 405, cors, 'method_not_allowed');
+    return respond({ error: 'Method not allowed' }, 405, { ...cors, Allow: ALLOWED_METHODS }, 'method_not_allowed');
   }
 
   // Rate-limit per IP. Without this, an attacker can farm tokens cheaply.
@@ -224,6 +245,8 @@ export default async function handler(req, ctx) {
     (submittedLegacyKey(body.widgetKey) && !(await isValidWidgetKey(widgetKey))) ||
     (submittedLegacyKey(body.proKey) && !(await isValidProKey(proKey)))
   ) {
+    // The browser matches this exact body (src/services/wm-session.ts,
+    // KEY_REJECTED_ERROR) to decide a legacy key is revoked and clear it.
     return respond({ error: 'Invalid session key' }, 401, cors, 'auth_401');
   }
 
@@ -234,15 +257,23 @@ export default async function handler(req, ctx) {
   }
   headers = appendHeader(headers, 'Set-Cookie', sessionCookie(req, SESSION_COOKIE, issued.token));
 
-  // Best-effort cleanup for old JS-readable cookies only when replacing that
-  // key. A no-key session refresh must preserve existing HttpOnly key cookies.
-  if (widgetKey) {
-    headers = appendHeader(headers, 'Set-Cookie', clearReadableCookie(WIDGET_KEY_COOKIE));
-    headers = appendHeader(headers, 'Set-Cookie', sessionCookie(req, WIDGET_KEY_COOKIE, widgetKey));
+  // Retire both old scopes on every refresh. Never consume these names: a
+  // parent-domain cookie cannot prove which sibling issued it. __Host- also
+  // prevents siblings from planting a Domain cookie under the replacement name.
+  for (const name of ['wm-widget-key', 'wm-pro-key']) {
+    headers = appendHeader(headers, 'Set-Cookie', clearReadableCookie(name));
+    headers = appendHeader(headers, 'Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
   }
-  if (proKey) {
-    headers = appendHeader(headers, 'Set-Cookie', clearReadableCookie(PRO_KEY_COOKIE));
-    headers = appendHeader(headers, 'Set-Cookie', sessionCookie(req, PRO_KEY_COOKIE, proKey));
+  for (const [field, name, key] of [
+    ['widgetKey', WIDGET_KEY_COOKIE, widgetKey],
+    ['proKey', PRO_KEY_COOKIE, proKey],
+  ]) {
+    if (key) {
+      headers = appendHeader(headers, 'Set-Cookie', sessionCookie(req, name, key));
+    } else if (typeof body[field] === 'string' && !body[field].trim()) {
+      // Explicit empty string clears; an omitted field preserves the session.
+      headers = appendHeader(headers, 'Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
+    }
   }
 
   // The HttpOnly cookie remains the primary transport. The anonymous token is
@@ -256,4 +287,28 @@ export default async function handler(req, ctx) {
     hadSession,
     token: issued.token,
   }, 200, headers, 'ok');
+}
+
+/**
+ * Which tester-key sessions does this browser hold a currently valid key for?
+ *
+ * Booleans only: the key itself never leaves the HttpOnly cookie. Uses the same
+ * validators as the POST exchange, so a key revoked since it was exchanged
+ * reads false here even though its cookie has not expired yet.
+ */
+async function handleStatus(req, ctx, cors, respond) {
+  const limited = await checkRateLimit(req, cors, {
+    failClosed: true,
+    ctx,
+    scope: STATUS_RATE_LIMIT_SCOPE,
+    limit: STATUS_RATE_LIMIT_PER_MINUTE,
+    window: STATUS_RATE_LIMIT_WINDOW,
+  });
+  if (limited) return limited;
+
+  const widgetKey = normalizeLegacyKey(readCookie(req, WIDGET_KEY_COOKIE));
+  const proKey = normalizeLegacyKey(readCookie(req, PRO_KEY_COOKIE));
+  const widget = widgetKey ? await isValidWidgetKey(widgetKey) : false;
+  const pro = proKey ? await isValidProKey(proKey) : false;
+  return respond({ widget, pro }, 200, cors, 'status');
 }

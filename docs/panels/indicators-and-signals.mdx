@@ -85,6 +85,7 @@ These panels visualise cross-domain correlation over a rolling window — useful
 | `economic-correlation` | Economic Warfare | Sanctions × markets |
 | `disaster-correlation` | Disaster Cascade | Natural × infra |
 | `cross-source-signals` | Cross-Source Signals | Multi-source signal agreement |
+| `news-market-correlation` | News ↔ Markets | GDELT topic volume × hourly returns for six assets, with a ±6h lead/lag scan. See [News ↔ Markets](/panels/news-market-correlation). |
 
 ## Misc signals
 
@@ -92,7 +93,7 @@ These panels visualise cross-domain correlation over a rolling window — useful
 |---|---|---|
 | `geo-hubs` | Geopolitical Hubs | Hotspot concentration map. |
 | `social-velocity` | Social Velocity | Reddit r/worldnews + r/geopolitics velocity; same feed as the MCP `get_social_velocity` tool. |
-| `population-exposure` | Population Exposure | Population within a buffer of active events. |
+| `population-exposure` | Population Exposure | Estimated residents within 50 km of precisely located ACLED and UCDP events in countries with density data. Each estimate uses the country's average population density. The panel shows individual estimates because circles can overlap. Events at the same location share one row with their event count. Each source lists up to 10 places. A footer counts the events shown and the events left out, by reason: no precise location, no density data for the country, or past the first 10 places. |
 | `satellite-fires` | Fires | FIRMS/VIIRS thermal detections on the map. See [Thermal Escalation](/panels/thermal-escalation) for the clustered + baseline-aware view. |
 | `ucdp-events` | UCDP Conflict Events | UCDP georeferenced conflict event dataset. |
 | `internet-disruptions` | Internet Disruptions | Cloudflare Radar outages + service status. |
@@ -117,7 +118,7 @@ The compact infrastructure tiles use the generated InfrastructureService client.
 | `GET` | `/api/infrastructure/v1/get-ip-geo` | Caller IP geolocation utility for infrastructure-aware experiences; no panel hydrates from it directly. |
 | `GET` | `/api/infrastructure/v1/reverse-geocode` | Coordinate-to-place lookup utility for API consumers and v1 callers; some UI paths still use the legacy thin `/api/reverse-geocode` helper. |
 | `GET` | `/api/infrastructure/v1/get-bootstrap-data` | Batch cache read RPC for selected bootstrap/cache keys; complements the top-level bootstrap hydration path. |
-| `POST` | `/api/infrastructure/v1/record-baseline-snapshot` | Background baseline update used by temporal anomaly tracking; it writes observations and does not render a visible tile by itself. |
+| `POST` | `/api/infrastructure/v1/record-baseline-snapshot` | Deprecated compatibility route. Client-supplied shared baseline writes are disabled. |
 
 ## Shared behaviour
 

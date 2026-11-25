@@ -55,9 +55,14 @@ export function extractProperNounSequences(text: string): string[][];
 export function validateNoHallucinatedProperNouns(
   summary: unknown,
   headline: unknown,
+  options?: { failClosed?: boolean },
 ): { ok: true } | { ok: false; hallucinated: string[] };
-export function extractNumericFacts(text: string): Set<string>;
+export function extractNumericFacts(text: string, options?: { dateParts?: boolean }): Set<string>;
 export function validateNoHallucinatedFacts(
+  summary: unknown,
+  groundText: unknown,
+): { ok: true } | { ok: false; hallucinated: string[] };
+export function validateNoHallucinatedStatusQualifiers(
   summary: unknown,
   groundText: unknown,
 ): { ok: true } | { ok: false; hallucinated: string[] };
@@ -69,6 +74,7 @@ export function checkLeadGrounding(
   synthesis: { lead?: string; threads?: Array<{ tag?: string; teaser?: string }> },
   stories: Array<{ headline?: string }>,
   storyCap?: number,
+  opts?: { combinedThreshold?: number | null },
 ): boolean;
 export function leadGroundsAgainstStory(lead: string, headline: string): boolean;
 export function verifyCitationIndexes(

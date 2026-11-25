@@ -4,6 +4,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readlinkSync,
   symlinkSync,
 } from 'node:fs';
@@ -91,7 +92,9 @@ Options:
   --skip-install      Do not run npm ci, even when installation is not verified.
   --force-install     Run npm ci even when node_modules already exists.
   --hooks-only        Normalize core.hooksPath, then exit without other bootstrap work.
-  --ignore-scripts    Pass --ignore-scripts to npm ci for docs/test-only work.
+  --ignore-scripts    Pass --ignore-scripts to npm ci for docs/test-only work, then
+                      run only the root package's own postinstall (it writes the
+                      generated files the pre-push hook needs).
   --dry-run           Print what would happen without changing files.
   -h, --help          Show this help text.`);
 }
@@ -209,6 +212,18 @@ export function shouldInstallDependencies({
   return forceInstall || !existsSync(resolve(rootDir, 'node_modules/.package-lock.json'));
 }
 
+export function assertNodeModulesNotSymlink(rootDir = process.cwd(), label = 'node_modules') {
+  const target = resolve(rootDir, 'node_modules');
+  try {
+    if (lstatSync(target).isSymbolicLink()) {
+      throw new Error(`${label} is a symlink; copy, hardlink, or npm ci — never symlink`);
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+}
+
 export function installDependencies({
   cacheDir = DEFAULT_NPM_CACHE,
   dryRun = false,
@@ -216,11 +231,16 @@ export function installDependencies({
   log = console.log,
   rootDir = process.cwd(),
 } = {}) {
-  const args = ['ci', '--cache', cacheDir];
+  assertNodeModulesNotSymlink(
+    rootDir,
+    basename(rootDir) === 'pro-test' ? 'pro-test/node_modules' : 'node_modules',
+  );
+  const args = ['ci', '--cache', cacheDir, '--prefer-offline'];
   if (ignoreScripts) args.push('--ignore-scripts');
 
   if (dryRun) {
     log(`[worktree] would run: npm ${args.join(' ')}`);
+    if (ignoreScripts) runOwnPostinstall({ dryRun, log, rootDir });
     return { status: 0 };
   }
 
@@ -229,10 +249,7 @@ export function installDependencies({
 
   const result = spawnSync('npm', args, {
     cwd: rootDir,
-    env: {
-      ...process.env,
-      npm_config_cache: cacheDir,
-    },
+    env: createInstallEnvironment(process.env, cacheDir),
     stdio: 'inherit',
   });
 
@@ -240,7 +257,52 @@ export function installDependencies({
     throw new Error(`npm ${args.join(' ')} failed with exit code ${result.status}`);
   }
 
+  if (ignoreScripts) runOwnPostinstall({ log, rootDir });
+
   return result;
+}
+
+/**
+ * --ignore-scripts also skips the package's own postinstall, which writes
+ * gitignored files the pre-push hook needs (api/_inventory-facts.generated.js
+ * for the edge bundle check). Run it alone; dependency scripts stay skipped.
+ */
+function hasOwnPostinstall(rootDir) {
+  try {
+    return Boolean(JSON.parse(readFileSync(resolve(rootDir, 'package.json'), 'utf8')).scripts?.postinstall);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function runOwnPostinstall({ dryRun = false, log, rootDir }) {
+  if (!hasOwnPostinstall(rootDir)) return;
+  if (dryRun) {
+    log('[worktree] would run: npm run postinstall');
+    return;
+  }
+  log('[worktree] running: npm run postinstall');
+  const result = spawnSync('npm', ['run', 'postinstall'], { cwd: rootDir, env: process.env, stdio: 'inherit' });
+  if (result.status !== 0) {
+    throw new Error(`npm run postinstall failed with exit code ${result.status}`);
+  }
+}
+
+/**
+ * Builds the child npm environment without the parent's project-scoped script policy.
+ *
+ * @param {NodeJS.ProcessEnv} environment Parent process environment.
+ * @param {string} cacheDir Shared npm cache directory.
+ * @returns {NodeJS.ProcessEnv} Environment for a project-scoped child npm install.
+ */
+export function createInstallEnvironment(environment, cacheDir) {
+  return {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(([key]) => key !== 'npm_config_allow_scripts'),
+    ),
+    npm_config_cache: cacheDir,
+  };
 }
 
 // Relative, so git resolves it against whichever worktree the hook runs from.
@@ -451,16 +513,30 @@ export function bootstrapWorktree(options = {}) {
   assertNoForbiddenEnvDumps(rootDir);
 
   if (!options.skipInstall) {
+    const installOpts = {
+      cacheDir: options.cacheDir || DEFAULT_NPM_CACHE,
+      dryRun: options.dryRun,
+      ignoreScripts: options.ignoreScripts,
+      log,
+    };
     if (shouldInstallDependencies({ forceInstall: options.forceInstall, rootDir })) {
-      installDependencies({
-        cacheDir: options.cacheDir || DEFAULT_NPM_CACHE,
-        dryRun: options.dryRun,
-        ignoreScripts: options.ignoreScripts,
-        log,
-        rootDir,
-      });
+      installDependencies({ ...installOpts, rootDir });
     } else {
+      assertNodeModulesNotSymlink(rootDir, 'node_modules');
       log('[worktree] verified npm install present; skipping npm ci');
+      // A kept install may come from an --ignore-scripts run that predates
+      // the postinstall step, so its generated files can be missing.
+      if (options.ignoreScripts) runOwnPostinstall({ dryRun: options.dryRun, log, rootDir });
+    }
+
+    const proTestRoot = resolve(rootDir, 'pro-test');
+    if (existsSync(resolve(proTestRoot, 'package.json'))) {
+      if (shouldInstallDependencies({ forceInstall: options.forceInstall, rootDir: proTestRoot })) {
+        installDependencies({ ...installOpts, rootDir: proTestRoot });
+      } else {
+        assertNodeModulesNotSymlink(proTestRoot, 'pro-test/node_modules');
+        log('[worktree] verified pro-test npm install present; skipping npm ci');
+      }
     }
   }
 

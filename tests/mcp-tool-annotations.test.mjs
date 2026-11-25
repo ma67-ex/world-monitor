@@ -1,18 +1,3 @@
-// Parity test for the per-tool spec `Tool.annotations` object (v1.7.0).
-//
-// Covers:
-//   1. Every tool in TOOL_REGISTRY declares an `annotations` object with all
-//      four spec hints (readOnlyHint, destructiveHint, idempotentHint,
-//      openWorldHint), each typed strictly as boolean. Failures name the
-//      tool + missing field so a future PR adding a tool without an
-//      explicit per-hint choice fails loudly.
-//   2. tools/list emits the full four-field annotations object on every
-//      advertised tool — surfacing the field at the wire boundary in
-//      addition to the in-process registry.
-//   3. buildPublicTool deep-clones annotations. Mutating the returned
-//      object must not corrupt the registry's source-of-truth literal —
-//      same isolation guarantee as inputSchema.properties + outputSchema.
-
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 
@@ -47,7 +32,12 @@ describe('api/mcp.ts — per-tool annotations coverage (v1.7.0)', () => {
   // --------------------------------------------------------------------
   it('every tool in TOOL_REGISTRY declares all four annotation hints as strict booleans (no undefined, no defaulting)', () => {
     const registry = mod.__testing__.TOOL_REGISTRY ?? [];
-    assert.ok(registry.length >= 40, `expected ≥40 tools, got ${registry.length}`);
+    assert.ok(registry.length > 0, 'TOOL_REGISTRY extraction must not be empty');
+    assert.equal(
+      new Set(registry.map((tool) => tool.name)).size,
+      registry.length,
+      'TOOL_REGISTRY tool identities must be unique',
+    );
     const failures = [];
     for (const tool of registry) {
       const ann = tool.annotations;
@@ -79,7 +69,11 @@ describe('api/mcp.ts — per-tool annotations coverage (v1.7.0)', () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     const tools = body.result?.tools ?? [];
-    assert.ok(tools.length >= 40, `expected ≥40 tools, got ${tools.length}`);
+    assert.deepEqual(
+      tools.map((tool) => tool.name).sort(),
+      mod.__testing__.TOOL_REGISTRY.map((tool) => tool.name).sort(),
+      'tools/list names must match TOOL_REGISTRY exactly',
+    );
     const failures = [];
     for (const t of tools) {
       if (!t.annotations || typeof t.annotations !== 'object') {
@@ -93,6 +87,52 @@ describe('api/mcp.ts — per-tool annotations coverage (v1.7.0)', () => {
       }
     }
     assert.deepEqual(failures, [], `tools on the wire missing annotations:\n  ${failures.join('\n  ')}`);
+  });
+
+  // The Claude Connectors Directory requires a `title` on every tool and
+  // flags any tool without one before submission.
+  it('tools/list emits a distinct human-readable title on every tool', async () => {
+    const res = await mod.default(new Request('https://worldmonitor.app/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-WorldMonitor-Key': VALID_KEY },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    }));
+    assert.equal(res.status, 200);
+    const tools = (await res.json()).result?.tools ?? [];
+    assert.ok(tools.length > 0, 'tools/list must not be empty');
+    const failures = [];
+    for (const t of tools) {
+      if (typeof t.title !== 'string' || t.title.trim() === '') {
+        failures.push(`${t.name}: title missing`);
+      } else if (t.title.length > 60 || t.title.includes('_')) {
+        failures.push(`${t.name}: title ${JSON.stringify(t.title)} must be ≤60 chars of prose, not an identifier`);
+      }
+    }
+    assert.deepEqual(failures, [], `tools without a usable title:\n  ${failures.join('\n  ')}`);
+    const titles = tools.map((t) => t.title.toLowerCase());
+    assert.equal(new Set(titles).size, titles.length, 'tool titles must be distinct');
+    // The Connectors Directory portal reads the spec's annotations.title, not
+    // the top-level title, and flags every tool without it.
+    const mismatched = tools.filter((t) => t.annotations?.title !== t.title).map((t) => t.name);
+    assert.deepEqual(mismatched, [], 'annotations.title must repeat the tool title');
+  });
+
+  it('tools/list marks company intelligence as read-only and open-world for SEC filings search', async () => {
+    const res = await mod.default(new Request('https://worldmonitor.app/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-WorldMonitor-Key': VALID_KEY },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    }));
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const tool = body.result.tools.find(tool => tool.name === 'get_company_intelligence');
+    assert.deepEqual(tool.annotations, {
+      title: 'Company intelligence',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
   });
 
   // --------------------------------------------------------------------

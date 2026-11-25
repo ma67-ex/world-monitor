@@ -1,7 +1,8 @@
 // U1 (#3199) — apiDailyAllowance catalog field + Business marketing copy.
 // The per-account rate-limit layer reads features.apiDailyAllowance; these
-// values are the single source of truth for the included allowance and the
-// 10× safety ceiling, and feed the /pro marketing + docs/usage-rate-limits.mdx.
+// values are the single source of truth for the included allowance (enforced
+// at the sold cap since #4635), and feed the /pro marketing +
+// docs/usage-rate-limits.mdx.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,8 +21,8 @@ describe('#3199 U1 — apiDailyAllowance per tier', () => {
     assert.equal(getEntitlementFeatures('api_business').apiDailyAllowance, 10000);
   });
 
-  it('Enterprise is unlimited (-1)', () => {
-    assert.equal(getEntitlementFeatures('enterprise').apiDailyAllowance, -1);
+  it('Enterprise has the finite 10,000/day contract default, not -1', () => {
+    assert.equal(getEntitlementFeatures('enterprise').apiDailyAllowance, 10000);
   });
 
   it('Free and Pro have no API allowance (0 — they cannot mint wm_ keys)', () => {
@@ -70,7 +71,7 @@ describe('dashboard-AI allowance is separate from MCP', () => {
     assert.equal(getEntitlementFeatures('pro_business_monthly').planLimits?.dashboardAiCallsPerDay, 2500);
     assert.equal(getEntitlementFeatures('api_starter').planLimits?.dashboardAiCallsPerDay, 1000);
     assert.equal(getEntitlementFeatures('api_business').planLimits?.dashboardAiCallsPerDay, 10000);
-    assert.equal(getEntitlementFeatures('enterprise').planLimits?.dashboardAiCallsPerDay, null);
+    assert.equal(getEntitlementFeatures('enterprise').planLimits?.dashboardAiCallsPerDay, 10000);
   });
 
   it('does not change the existing MCP allowances', () => {

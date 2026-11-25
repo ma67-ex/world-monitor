@@ -12,6 +12,8 @@ import {
   makeProDeps,
   proReq,
 } from './helpers/mcp-pro-deps.mjs';
+import { documentedOutputSchema } from './helpers/mcp-output-schema.mjs';
+import { PUBLISHER_FAMILIES } from '../shared/publisher-families.js';
 
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
@@ -36,7 +38,7 @@ const digestResponse = {
     politics: {
       items: [
         { source: 'Reuters', title: 'Iran closes Strait of Hormuz to all tanker traffic', link: 'https://n/1', publishedAt: 1785405600000, isAlert: true, threat: { level: 'THREAT_LEVEL_CRITICAL', category: 'conflict', confidence: 0.9, source: 'llm' } },
-        { source: 'AP News', title: 'Iran closes Strait of Hormuz, tanker traffic halted', link: 'https://n/2', publishedAt: 1785405900000, isAlert: false, threat: { level: 'THREAT_LEVEL_HIGH', category: 'conflict', confidence: 0.8, source: 'keyword' } },
+        { source: 'AP News', title: 'Iran closes Strait of Hormuz, tanker traffic halted', link: 'https://n/2', publishedAt: 1785405900000, isAlert: false, credibilityScore: 73, threat: { level: 'THREAT_LEVEL_HIGH', category: 'conflict', confidence: 0.8, source: 'keyword' } },
       ],
     },
     tech: {
@@ -77,9 +79,9 @@ function upstashPipelineResponder(commands, state) {
   }
   if (first === 'HMGET') {
     return commands.map((cmd) => {
-      assert.deepEqual(cmd.slice(2), ['title'], 'HMGET must request exactly the title field');
+      assert.deepEqual(cmd.slice(2), ['title', 'link'], 'HMGET must request title and link');
       const hash = String(cmd[1]).replace('story:track:v1:', '');
-      return { result: [state.titlesByHash.get(hash) ?? null] };
+      return { result: [state.titlesByHash.get(hash) ?? null, state.linksByHash.get(hash) ?? null] };
     });
   }
   if (first === 'SMEMBERS') {
@@ -111,6 +113,7 @@ describe('#5697 NLP MCP tools', () => {
     upstashState = {
       zrangeFlat: [],
       titlesByHash: new Map(),
+      linksByHash: new Map(),
       sourcesByHash: new Map(),
       storedPayloads: new Map(),
       // Command verbs whose pipelines should fail (partial-outage simulation).
@@ -171,7 +174,12 @@ describe('#5697 NLP MCP tools', () => {
     return { response, body, result, pipe };
   }
 
-  async function withDigestCategories(categories, run, feedStatuses = { fixture: 'empty' }) {
+  async function withDigestCategories(
+    categories,
+    run,
+    feedStatuses = { fixture: 'empty' },
+    coverage = undefined,
+  ) {
     const previousFetch = globalThis.fetch;
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input);
@@ -181,6 +189,7 @@ describe('#5697 NLP MCP tools', () => {
           generatedAt: '2026-07-28T12:00:00.000Z',
           feedStatuses,
           categories,
+          ...(coverage ? { coverage } : {}),
         });
       }
       return previousFetch(input, init);
@@ -237,16 +246,59 @@ describe('#5697 NLP MCP tools', () => {
       byName.get('get_news_clusters')?.inputSchema.properties.category.enum?.includes('accelerators'),
       'get_news_clusters category enum must include Tech-only buckets',
     );
-    const clusterSchema = byName.get('get_news_clusters')?.outputSchema.properties.clusters.items;
+    const clusterSchema = documentedOutputSchema(byName.get('get_news_clusters')).properties.clusters.items;
     assert.ok(clusterSchema.required.includes('primarySourceProvenance'));
     assert.ok(clusterSchema.required.includes('sourceProvenance'));
+    assert.ok(clusterSchema.required.includes('credibilityScore'));
+    assert.equal(clusterSchema.properties.credibilityScore.type, 'number');
     assert.equal(clusterSchema.properties.primarySourceProvenance.type, 'object');
     assert.equal(clusterSchema.properties.sourceProvenance.type, 'array');
     assert.equal(clusterSchema.properties.sourceProvenance.items.properties.source.type, 'string');
     assert.equal(clusterSchema.properties.sourceProvenance.items.properties.risk.type, 'string');
     assert.equal(clusterSchema.properties.sourceProvenance.items.properties.stateAffiliated.type, 'string');
+    assert.ok(clusterSchema.properties.sourceProvenance.items.required.includes('knownBiases'));
+    assert.ok(clusterSchema.properties.sourceProvenance.items.required.includes('summary'));
+    assert.deepEqual(clusterSchema.properties.primarySourceProvenance.properties.knownBiases.items, { type: 'string' });
+    assert.ok(clusterSchema.properties.sourceProvenance.items.required.includes('tier'));
+    assert.deepEqual(clusterSchema.properties.sourceProvenance.items.properties.tier.enum, [1, 2, 3, 4, null]);
+    assert.ok(clusterSchema.required.includes('publishers'));
+    assert.ok(clusterSchema.required.includes('publishersUnlisted'));
+    assert.deepEqual(clusterSchema.properties.publishers.items.required, ['name', 'tier', 'labels', 'labelsUnlisted']);
+    assert.deepEqual(clusterSchema.properties.publishers.items.properties.tier.enum, [1, 2, 3, 4, null]);
+    assert.equal(clusterSchema.properties.publishersUnlisted.type, 'integer');
+    const digestCoverageFields = [
+      'state',
+      'servedItems',
+      'servedPublishers',
+      'feedsCompleted',
+      'feedsTotal',
+      'categoriesCompleted',
+      'categoriesTotal',
+      'missingCategories',
+      'stale',
+      'staleAgeSeconds',
+      'staleReason',
+    ];
+    for (const toolName of ['extract_entities', 'get_news_clusters']) {
+      const coverageSchema = documentedOutputSchema(byName.get(toolName)).properties.digestCoverage;
+      assert.equal(coverageSchema?.type, 'object', `${toolName} must advertise digestCoverage`);
+      assert.equal(coverageSchema?.additionalProperties, false);
+      assert.deepEqual(coverageSchema?.required, digestCoverageFields);
+      assert.deepEqual(
+        coverageSchema?.properties.state.enum,
+        ['complete', 'partial', 'stale', 'unavailable'],
+      );
+      assert.equal(coverageSchema?.properties.servedItems.type, 'integer');
+      assert.equal(coverageSchema?.properties.servedPublishers.type, 'integer');
+      assert.equal(coverageSchema?.properties.missingCategories.items.type, 'string');
+      assert.equal(coverageSchema?.properties.stale.type, 'boolean');
+      // #7084: the stale flag alone says the evidence is old without saying
+      // HOW old — the declared schema must carry the age and reason too.
+      assert.equal(coverageSchema?.properties.staleAgeSeconds.type, 'integer');
+      assert.equal(coverageSchema?.properties.staleReason.type, 'string');
+    }
     assert.equal(byName.get('get_keyword_spikes')?.inputSchema.properties.window_hours.maximum, 12);
-    const classifyOutput = byName.get('classify_event')?.outputSchema;
+    const classifyOutput = documentedOutputSchema(byName.get('classify_event'));
     assert.deepEqual(classifyOutput.properties.classification.required,
       ['category', 'level', 'severity', 'confidence']);
     assert.deepEqual(classifyOutput.properties.classification.properties.category.enum,
@@ -256,13 +308,197 @@ describe('#5697 NLP MCP tools', () => {
       ['critical', 'high', 'medium', 'low', 'info']);
     assert.deepEqual(classifyOutput.properties.classification.properties.severity.enum,
       ['SEVERITY_LEVEL_HIGH', 'SEVERITY_LEVEL_MEDIUM', 'SEVERITY_LEVEL_LOW']);
-    const spikeOutput = byName.get('get_keyword_spikes')?.outputSchema;
+    const spikeOutput = documentedOutputSchema(byName.get('get_keyword_spikes'));
     assert.ok(
       spikeOutput.required.includes('sample_truncated'),
       'sample_truncated must be required on every get_keyword_spikes response',
     );
     assert.deepEqual(spikeOutput.properties.spikes.items.required,
-      ['term', 'count', 'baseline', 'multiplier', 'uniqueSources', 'sampleHeadlines']);
+      ['term', 'count', 'baseline', 'multiplier', 'uniqueSources', 'sourceNames', 'sampleHeadlines']);
+    const sampleSchema = spikeOutput.properties.spikes.items.properties.sampleHeadlines;
+    assert.equal(sampleSchema.items.type, 'object');
+    assert.deepEqual(sampleSchema.items.required, ['title', 'source', 'link']);
+    assert.equal(spikeOutput.properties.spikes.items.properties.sourceNames.type, 'array');
+    assert.equal(spikeOutput.properties.spikes.items.properties.sourceNames.items.type, 'string');
+    const { result: described } = await callTool('describe_tool', { tool_name: 'get_keyword_spikes' });
+    assert.match(
+      described?.description ?? '',
+      /sourceNames/,
+      'describe_tool description must mention the attributed sourceNames field',
+    );
+    assert.match(
+      described?.description ?? '',
+      /title, source, link/,
+      'describe_tool description must describe the attributed sample headline shape',
+    );
+    const listedSpike = byName.get('get_keyword_spikes');
+    assert.match(
+      listedSpike?.description ?? '',
+      /sourceNames/,
+      'tools/list description must name sourceNames',
+    );
+    assert.match(
+      listedSpike?.description ?? '',
+      /title, source, link/,
+      'tools/list description must name the sample shape',
+    );
+  });
+
+  it('projects complete digest coverage through both digest-backed tools', async () => {
+    const coverage = {
+      state: 'complete',
+      itemsServed: 3,
+      publisherCount: 3,
+      feedCompleted: 3,
+      feedTotal: 3,
+      categoryCompleted: 2,
+      categoryTotal: 2,
+      categoryStates: { politics: 'ok', tech: 'ok' },
+    };
+    const expected = {
+      state: 'complete',
+      servedItems: 3,
+      servedPublishers: 3,
+      feedsCompleted: 3,
+      feedsTotal: 3,
+      categoriesCompleted: 2,
+      categoriesTotal: 2,
+      missingCategories: [],
+      stale: false,
+      staleAgeSeconds: 0,
+      staleReason: '',
+    };
+
+    await withDigestCategories(
+      digestResponse.categories,
+      async () => {
+        for (const toolName of ['extract_entities', 'get_news_clusters']) {
+          const { body, result } = await callTool(toolName, {});
+          assert.equal(body.error, undefined, `${toolName} must return a normal tool result`);
+          assert.deepEqual(result.digestCoverage, expected);
+        }
+      },
+      digestResponse.feedStatuses,
+      coverage,
+    );
+  });
+
+  it('projects a stale replay with its age and reason -- a bare flag hides how old the evidence is', async () => {
+    // #7084: a stale digest replay is legitimate evidence, but 90 seconds
+    // and 6 hours warrant different conclusions. The tools must pass the
+    // server's age and reason through, not just the boolean.
+    const coverage = {
+      state: 'stale',
+      itemsServed: 3,
+      publisherCount: 3,
+      feedCompleted: 3,
+      feedTotal: 3,
+      categoryCompleted: 2,
+      categoryTotal: 2,
+      categoryStates: { politics: 'ok', tech: 'ok' },
+      servedStale: true,
+      staleAgeSeconds: 5400,
+      staleReason: 'build-error',
+    };
+    const expected = {
+      state: 'stale',
+      servedItems: 3,
+      servedPublishers: 3,
+      feedsCompleted: 3,
+      feedsTotal: 3,
+      categoriesCompleted: 2,
+      categoriesTotal: 2,
+      missingCategories: [],
+      stale: true,
+      staleAgeSeconds: 5400,
+      staleReason: 'build-error',
+    };
+
+    await withDigestCategories(
+      digestResponse.categories,
+      async () => {
+        for (const toolName of ['extract_entities', 'get_news_clusters']) {
+          const { body, result } = await callTool(toolName, {});
+          assert.equal(body.error, undefined, `${toolName} must return a normal tool result`);
+          assert.deepEqual(result.digestCoverage, expected);
+        }
+      },
+      digestResponse.feedStatuses,
+      coverage,
+    );
+  });
+
+  it('returns explicit unavailable coverage as a normal empty result for both tools', async () => {
+    const coverage = {
+      state: 'unavailable',
+      itemsServed: 0,
+      publisherCount: 0,
+      feedCompleted: 0,
+      feedTotal: 4,
+      categoryCompleted: 0,
+      categoryTotal: 1,
+      categoryStates: { accelerators: 'missing' },
+    };
+    const expected = {
+      state: 'unavailable',
+      servedItems: 0,
+      servedPublishers: 0,
+      feedsCompleted: 0,
+      feedsTotal: 4,
+      categoriesCompleted: 0,
+      categoriesTotal: 1,
+      missingCategories: ['accelerators'],
+      stale: false,
+      staleAgeSeconds: 0,
+      staleReason: '',
+    };
+
+    await withDigestCategories(
+      {},
+      async () => {
+        const entities = await callTool('extract_entities', {
+          variant: 'tech',
+          category: 'accelerators',
+        });
+        assert.equal(entities.body.error, undefined);
+        assert.equal(entities.result.mode, 'headlines');
+        assert.equal(entities.result.headlineCount, 0);
+        assert.deepEqual(entities.result.entities, []);
+        assert.deepEqual(entities.result.patternEntities, []);
+        assert.equal(entities.result.note, undefined);
+        assert.deepEqual(entities.result.digestCoverage, expected);
+
+        const clusters = await callTool('get_news_clusters', {
+          variant: 'tech',
+          category: 'accelerators',
+        });
+        assert.equal(clusters.body.error, undefined);
+        assert.equal(clusters.result.headlineCount, 0);
+        assert.equal(clusters.result.totalClusters, 0);
+        assert.deepEqual(clusters.result.clusters, []);
+        assert.equal(clusters.result.note, undefined);
+        assert.deepEqual(clusters.result.digestCoverage, expected);
+      },
+      {},
+      coverage,
+    );
+  });
+
+  it('keeps empty malformed coverage on the retryable source-outage path', async () => {
+    await withDigestCategories(
+      {},
+      async () => {
+        for (const toolName of ['extract_entities', 'get_news_clusters']) {
+          const { body, result } = await callTool(toolName, { variant: 'tech' });
+          assert.equal(result, null);
+          assert.equal(body.error?.code, -32003);
+          assert.equal(body.error?.data?.retryable, true);
+          assert.deepEqual(body.error?.data?.unavailable_inputs, ['news:digest:v1:tech:en']);
+        }
+      },
+      {},
+      { state: 'unknown' },
+    );
   });
 
   describe('classify_event', () => {
@@ -281,11 +517,11 @@ describe('#5697 NLP MCP tools', () => {
 
     it('rejects missing and oversized text without reaching the route', async () => {
       const missing = await callTool('classify_event', {});
-      assert.match(missing.result.error, /text is required/);
-      assert.equal(missing.result.classification, null, 'error envelopes keep the required member present');
+      assert.equal(missing.body.error?.code, -32602);
+      assert.equal(missing.pipe.count, 0);
       const oversized = await callTool('classify_event', { text: 'x'.repeat(501) });
-      assert.match(oversized.result.error, /500-character limit/);
-      assert.equal(oversized.result.classification, null);
+      assert.equal(oversized.body.error?.code, -32602);
+      assert.equal(oversized.pipe.count, 0);
       assert.equal(requests.length, 0, 'validation failures must not fetch');
     });
 
@@ -332,13 +568,20 @@ describe('#5697 NLP MCP tools', () => {
       }
     });
 
-    it('enforces the Pro entitlement gate before fetching', async () => {
+    it('is outside the free allowance entirely — it fetches downstream (#6716)', async () => {
+      // classify_event routes through server/gateway.ts, whose own
+      // checkProMcpAccess re-check refuses a free entitlement. Charging an
+      // allowance slot here would spend one of five daily calls on a gateway
+      // 401, so the refusal happens first — before the meter and before any
+      // upstream request.
       const { response, body } = await callTool('classify_event', { text: 'headline' }, {
         getEntitlements: async () => ({ planKey: 'free', features: { tier: 0, mcpAccess: false }, validUntil: Date.now() + 86_400_000 }),
       });
-      assert.equal(response.status, 401);
-      assert.equal(body.error.code, -32001);
-      assert.equal(requests.length, 0);
+      assert.equal(response.status, 403);
+      assert.equal(body.error.code, -32002);
+      assert.equal(body.error.data?.reason, 'upgrade-required');
+      assert.ok(body.error.data?.upgradeUrl);
+      assert.equal(requests.length, 0, 'no upstream request');
     });
   });
 
@@ -359,13 +602,9 @@ describe('#5697 NLP MCP tools', () => {
 
     it('rejects oversized text and non-string text while honoring its own outputSchema', async () => {
       for (const args of [{ text: 'y'.repeat(2049) }, { text: 42 }]) {
-        const { result } = await callTool('extract_entities', args);
-        assert.ok(result.error, `expected a validation error for ${JSON.stringify(args)}`);
-        // outputSchema declares mode/entities/patternEntities required — a bare
-        // {error} envelope breaks schema-validating agent clients.
-        assert.equal(result.mode, 'text');
-        assert.deepEqual(result.entities, []);
-        assert.deepEqual(result.patternEntities, []);
+        const { body, pipe } = await callTool('extract_entities', args);
+        assert.equal(body.error?.code, -32602);
+        assert.equal(pipe.count, 0);
       }
       assert.equal(requests.length, 0);
     });
@@ -453,10 +692,9 @@ describe('#5697 NLP MCP tools', () => {
 
     it('rejects an unknown digest variant without fetching', async () => {
       const requestCount = requests.length;
-      const { result } = await callTool('extract_entities', { variant: 'finance' });
-      assert.equal(result.mode, 'headlines');
-      assert.equal(result.headlineCount, 0);
-      assert.match(result.error, /variant must be one of: full, tech/);
+      const { body, pipe } = await callTool('extract_entities', { variant: 'finance' });
+      assert.equal(body.error?.code, -32602);
+      assert.equal(pipe.count, 0);
       assert.equal(requests.length, requestCount);
     });
 
@@ -536,7 +774,7 @@ describe('#5697 NLP MCP tools', () => {
       }, {});
     });
 
-    it('returns a corrective note when category is unknown', async () => {
+    it('rejects an unknown category before charging', async () => {
       await withDigestCategories({
         politics: {
           items: [
@@ -549,14 +787,10 @@ describe('#5697 NLP MCP tools', () => {
           ],
         },
       }, async () => {
-        const { result } = await callTool('extract_entities', { category: 'commodity' });
-        assert.equal(result.mode, 'headlines');
-        assert.equal(result.headlineCount, 0);
-        assert.equal(result.category, 'commodity');
-        assert.match(result.note, /Unknown digest category "commodity"/);
-        assert.match(result.note, /commodities/);
-        assert.match(result.note, /politics/);
-        assert.deepEqual(result.entities, []);
+        const { body, pipe } = await callTool('extract_entities', { category: 'commodity' });
+        assert.equal(body.error?.code, -32602);
+        assert.equal(body.error.data.violations[0].field, 'category');
+        assert.equal(pipe.count, 0);
       });
     });
   });
@@ -578,6 +812,11 @@ describe('#5697 NLP MCP tools', () => {
       assert.ok(hormuz.topKeywords.includes('hormuz'));
       assert.equal(hormuz.threatLevel, 'critical');
       assert.equal(hormuz.isAlert, true);
+      assert.equal(
+        hormuz.credibilityScore,
+        73,
+        'cluster must preserve the digest score for its primary headline',
+      );
       assert.ok(hormuz.firstSeen.endsWith('Z') && hormuz.lastUpdated.endsWith('Z'));
     });
 
@@ -597,17 +836,50 @@ describe('#5697 NLP MCP tools', () => {
         );
         assert.equal(provenanceBySource.get('The Astana Times').stateAffiliated, 'Kazakhstan');
         assert.equal(provenanceBySource.get('The Astana Times').riskReviewed, true);
+        assert.deepEqual(provenanceBySource.get('The Astana Times').knownBiases, []);
+        assert.match(provenanceBySource.get('The Astana Times').summary, /State-affiliated: Kazakhstan\. Perspective: none recorded\./);
         assert.equal(provenanceBySource.get('Unreviewed Local Desk').risk, 'unknown');
         assert.equal(provenanceBySource.get('Unreviewed Local Desk').riskReviewed, false);
         assert.equal(provenanceBySource.get('Unreviewed Local Desk').typeReviewed, false);
       });
     });
 
+    it('counts same copy under two mastheads once, matching the digest (#9095)', async () => {
+      const title = 'Zaporizhzhia airstrikes kill 17 as Russia intensifies attacks across Ukraine';
+      const snippet = 'Zaporizhzhia was hit by deadly Russian airstrikes on Saturday, 10 October, killing at least 17 people, including three children, Ukrainian officials said. Rescuers searched rubble for survivors as the city faced renewed strikes on residential areas.';
+      await withDigestCategories({
+        europe: {
+          items: [
+            { source: 'EuroNews', title, snippet, link: 'https://n/euronews', publishedAt: 1785405600000, corroborationCount: 1 },
+            { source: 'Africanews', title, snippet, link: 'https://n/africanews', publishedAt: 1785405700000, corroborationCount: 1 },
+          ],
+        },
+      }, async () => {
+        const { result } = await callTool('get_news_clusters', { category: 'europe' });
+        const [cluster] = result.clusters;
+        assert.equal(cluster.memberCount, 2);
+        assert.equal(cluster.distinctSourceCount, 1);
+        assert.equal(cluster.corroboration.publishers, 1);
+        assert.equal(cluster.publishers.length, 1);
+      });
+    });
+
     it('stays inside the dispatcher budget at the maximum provenance-rich shape', async () => {
-      const sources = Array.from(
-        { length: 8 },
-        (_, sourceIndex) => `source${sourceIndex}-${'s'.repeat(5_000)}`,
-      );
+      // 25 clusters x 40 members fills MAX_CLUSTER_NEWS_ITEMS. Eight publisher
+      // families per cluster: Reuters with twelve curated labels, past the
+      // wire's label cap, and seven uncurated families at the cap, whose
+      // labels differ only in case and so fold into one family each. Twelve,
+      // not every label: a new Reuters desk would push the fixture past the
+      // 1000-item cap and stop it being the maximum shape.
+      const caseVariant = (base, variant) => [...base]
+        .map((char, index) => (index < 6 && (variant >> index) & 1 ? char.toUpperCase() : char)).join('');
+      const sources = [
+        ...PUBLISHER_FAMILIES.reuters.labels.slice(0, 12),
+        ...Array.from({ length: 7 }, (_, family) => Array.from(
+          { length: 4 },
+          (_, variant) => caseVariant(`source${family}-${'s'.repeat(5_000)}`, variant),
+        )).flat(),
+      ];
       const items = Array.from({ length: 25 }, (_, clusterIndex) => (
         sources.map((source, sourceIndex) => ({
           source,
@@ -629,6 +901,17 @@ describe('#5697 NLP MCP tools', () => {
           result.clusters.every((cluster) => cluster.sourceProvenance.length === 8),
           'the fixture must actually exercise all eight provenance slots',
         );
+        assert.ok(
+          result.clusters.every((cluster) => cluster.publishers.length === 8),
+          'the fixture must actually exercise all eight roster slots',
+        );
+        for (const cluster of result.clusters) {
+          assert.deepEqual(
+            cluster.publishers.map((publisher) => [publisher.labels.length, publisher.labelsUnlisted]),
+            [[4, 8], ...Array.from({ length: 7 }, () => [4, 0])],
+            'every family lists its first four labels and counts the rest',
+          );
+        }
         for (const cluster of result.clusters) {
           assert.ok(Buffer.byteLength(cluster.title, 'utf8') <= 512);
           assert.ok(Buffer.byteLength(cluster.link, 'utf8') <= 2_048);
@@ -732,10 +1015,9 @@ describe('#5697 NLP MCP tools', () => {
 
     it('rejects an unknown clustering variant without fetching', async () => {
       const requestCount = requests.length;
-      const { result } = await callTool('get_news_clusters', { variant: 'finance' });
-      assert.deepEqual(result.clusters, []);
-      assert.equal(result.headlineCount, 0);
-      assert.match(result.error, /variant must be one of: full, tech/);
+      const { body, pipe } = await callTool('get_news_clusters', { variant: 'finance' });
+      assert.equal(body.error?.code, -32602);
+      assert.equal(pipe.count, 0);
       assert.equal(requests.length, requestCount);
     });
 
@@ -784,7 +1066,7 @@ describe('#5697 NLP MCP tools', () => {
       });
     });
 
-    it('returns a corrective note when category is unknown', async () => {
+    it('rejects an unknown category before charging', async () => {
       await withDigestCategories({
         finance: {
           items: [
@@ -792,13 +1074,11 @@ describe('#5697 NLP MCP tools', () => {
           ],
         },
       }, async () => {
-        const { result } = await callTool('get_news_clusters', { category: 'markets' });
-        assert.equal(result.headlineCount, 0);
-        assert.equal(result.totalClusters, 0);
-        assert.equal(result.category, 'markets');
-        assert.deepEqual(result.clusters, []);
-        assert.match(result.note, /Unknown digest category "markets"/);
-        assert.match(result.note, /finance/);
+        // markets is a finance category, so the enum takes it; sports is in no edition.
+        const { body, pipe } = await callTool('get_news_clusters', { category: 'sports' });
+        assert.equal(body.error?.code, -32602);
+        assert.equal(body.error.data.violations[0].field, 'category');
+        assert.equal(pipe.count, 0);
       });
     });
 
@@ -903,6 +1183,108 @@ describe('#5697 NLP MCP tools', () => {
         globalThis.fetch = originalFetchImpl;
       }
     });
+
+    it('reports corroboration per cluster and picks the primary by real source tier (#6419)', async () => {
+      const originalFetchImpl = globalThis.fetch;
+      const serve = (items) => {
+        globalThis.fetch = async (input, init = {}) => {
+          const url = String(input);
+          if (url.includes('/api/news/v1/list-feed-digest')) {
+            requests.push({ url, init });
+            return Response.json({
+              generatedAt: '2026-09-20T12:00:00.000Z',
+              categories: {
+                politics: {
+                  items: items.map(([source, corroborationCount], i) => ({
+                    source,
+                    title: `Sanctions package advances through committee ${'vote '.repeat(i)}`.trim(),
+                    link: `https://s/${i}`,
+                    // The tier-4 outlet is the newest, so a recency-only primary would pick it.
+                    publishedAt: 1785405600000 - i * 1000,
+                    isAlert: false,
+                    ...(corroborationCount ? { corroborationCount } : {}),
+                  })),
+                },
+              },
+            });
+          }
+          return originalFetchImpl(input, init);
+        };
+      };
+      const corroborationOf = async (items) => {
+        serve(items);
+        const { result } = await callTool('get_news_clusters', {});
+        assert.equal(result.totalClusters, 1, 'fixture must cluster into one story');
+        return result.clusters[0];
+      };
+
+      try {
+        assert.deepEqual((await corroborationOf([['Reuters World'], ['Reuters US']])).corroboration,
+          { state: 'single-publisher', publishers: 1 });
+        assert.deepEqual((await corroborationOf([['The Verge'], ['Hacker News']])).corroboration,
+          { state: 'tier4-only', publishers: 2 });
+        const aboveSeen = await corroborationOf([['The Verge', 3], ['Hacker News', 3]]);
+        assert.deepEqual(aboveSeen.corroboration, { state: 'corroborated', publishers: 3 },
+          'a digest count above the seen families means unseen publishers of unknown tier');
+        assert.equal(aboveSeen.distinctSourceCount, 2, 'distinctSourceCount stays the member-family count min_sources filters on');
+        assert.equal(aboveSeen.publishers.length, 2);
+        assert.equal(aboveSeen.publishersUnlisted, 1, 'the roster names 2 of the 3 publishers the verdict counts');
+
+        const mixed = await corroborationOf([['The Verge'], ['Reuters World']]);
+        assert.deepEqual(mixed.corroboration, { state: 'corroborated', publishers: 2 });
+        assert.equal(mixed.primarySource, 'Reuters World', 'tier 1 outranks a newer tier-4 member');
+      } finally {
+        globalThis.fetch = originalFetchImpl;
+      }
+    });
+
+    it('declares each source tier and lists the publisher roster, never defaulting an undeclared tier to 4 (#6419 step 3)', async () => {
+      const labels = ['The Verge', 'Reuters World', 'Reuters US', 'The Vergecast', 'Unreviewed Local Desk'];
+      await withDigestCategories({
+        politics: {
+          items: labels.map((source, i) => ({
+            source,
+            title: 'Sanctions package advances through committee vote',
+            link: `https://n/roster/${i}`,
+            publishedAt: 1785405600000 - i * 1000,
+          })),
+        },
+      }, async () => {
+        const { result } = await callTool('get_news_clusters', {});
+        assert.equal(result.totalClusters, 1, 'fixture must cluster into one story');
+        const [cluster] = result.clusters;
+        assert.deepEqual(
+          Object.fromEntries(cluster.sourceProvenance.map((entry) => [entry.source, entry.tier])),
+          { 'The Verge': 4, 'Reuters World': 1, 'Reuters US': 1, 'The Vergecast': 3, 'Unreviewed Local Desk': null },
+        );
+        assert.deepEqual(cluster.publishers, [
+          { name: 'Reuters', tier: 1, labels: ['Reuters World', 'Reuters US'], labelsUnlisted: 0 },
+          { name: 'The Verge', tier: 3, labels: ['The Verge', 'The Vergecast'], labelsUnlisted: 0 },
+          { name: 'Unreviewed Local Desk', tier: null, labels: ['Unreviewed Local Desk'], labelsUnlisted: 0 },
+        ]);
+        assert.equal(cluster.publishersUnlisted, 0);
+        assert.equal(cluster.publishers.length, cluster.distinctSourceCount, 'roster and count read the same members');
+      });
+    });
+
+    it('caps the roster at eight publishers and counts the rest', async () => {
+      await withDigestCategories({
+        politics: {
+          items: Array.from({ length: 11 }, (_, i) => ({
+            source: `Unreviewed Desk ${i}`,
+            title: 'Sanctions package advances through committee vote',
+            link: `https://n/cap/${i}`,
+            publishedAt: 1785405600000 - i * 1000,
+          })),
+        },
+      }, async () => {
+        const { result } = await callTool('get_news_clusters', {});
+        const [cluster] = result.clusters;
+        assert.equal(cluster.distinctSourceCount, 11);
+        assert.equal(cluster.publishers.length, 8);
+        assert.equal(cluster.publishersUnlisted, 3);
+      });
+    });
   });
 
   describe('get_keyword_spikes', () => {
@@ -914,6 +1296,7 @@ describe('#5697 NLP MCP tools', () => {
         const lastSeen = now - i * 10 * 60 * 1000;
         flat.push(hash, String(lastSeen));
         upstashState.titlesByHash.set(hash, `Zaporizhzhia plant shelling escalates (${i})`);
+        upstashState.linksByHash.set(hash, `https://example.test/spike-${i}`);
         upstashState.sourcesByHash.set(hash, [`source-${i % 3}`]);
       }
       for (let i = 0; i < 30; i++) {
@@ -924,6 +1307,45 @@ describe('#5697 NLP MCP tools', () => {
       }
       upstashState.zrangeFlat = flat;
     }
+
+    it('returns attributed sample headlines and source names, not title-only counts', async () => {
+      seedAccumulator();
+      const { response, result } = await callTool('get_keyword_spikes', {});
+      assert.equal(response.status, 200);
+      const spike = result.spikes.find((s) => s.term === 'zaporizhzhia');
+      assert.ok(spike, 'expected zaporizhzhia spike');
+      assert.equal(spike.uniqueSources, 3);
+      assert.deepEqual([...spike.sourceNames].sort(), ['source-0', 'source-1', 'source-2']);
+      assert.ok(Array.isArray(spike.sampleHeadlines) && spike.sampleHeadlines.length > 0);
+      assert.ok(
+        spike.sampleHeadlines.every((sample) => typeof sample !== 'string'),
+        'sampleHeadlines must not remain title-only strings',
+      );
+      assert.deepEqual(
+        spike.sampleHeadlines.map((sample) => ({
+          title: sample.title,
+          source: sample.source,
+          link: sample.link,
+        })),
+        [
+          {
+            title: 'Zaporizhzhia plant shelling escalates (0)',
+            source: 'source-0',
+            link: 'https://example.test/spike-0',
+          },
+          {
+            title: 'Zaporizhzhia plant shelling escalates (1)',
+            source: 'source-1',
+            link: 'https://example.test/spike-1',
+          },
+          {
+            title: 'Zaporizhzhia plant shelling escalates (2)',
+            source: 'source-2',
+            link: 'https://example.test/spike-2',
+          },
+        ],
+      );
+    });
 
     it('computes spikes from the story accumulator and caches the result', async () => {
       seedAccumulator();
@@ -940,6 +1362,7 @@ describe('#5697 NLP MCP tools', () => {
       const spike = first.result.spikes.find((s) => s.term === 'zaporizhzhia');
       assert.equal(spike.count, 5);
       assert.equal(spike.uniqueSources, 3);
+      assert.equal(spike.sourceNames.length, spike.uniqueSources);
       assert.ok(upstashState.storedPayloads.size === 1, 'result must be cached');
       assert.ok(pipelineCalls > 0);
 
@@ -971,15 +1394,12 @@ describe('#5697 NLP MCP tools', () => {
       assert.match(result.note, /accumulator unavailable or empty/);
     });
 
-    it('clamps malformed window/min_count/limit params to defaults', async () => {
+    it('rejects malformed window/min_count/limit params before charging', async () => {
       seedAccumulator();
-      const { result } = await callTool('get_keyword_spikes', { window_hours: 99.5, min_count: -3, limit: 'many' });
-      assert.equal(result.window_hours, 2, 'non-integer window falls back to the default');
-      // The cache key embeds the clamped minCount, so it proves the clamp
-      // applied rather than the raw -3 reaching the spike math.
-      assert.deepEqual([...upstashState.storedPayloads.keys()], ['intelligence:keyword-spikes:mcp:v2:2h:2'],
-        'out-of-range integer min_count clamps to the schema minimum (2); the raw -3 must never reach the spike math');
-      assert.ok(result.spikes.length <= 10, 'non-integer limit falls back to the default 10');
+      const { body, pipe } = await callTool('get_keyword_spikes', { window_hours: 99.5, min_count: -3, limit: 'many' });
+      assert.equal(body.error?.code, -32602);
+      assert.equal(pipe.count, 0);
+      assert.deepEqual([...upstashState.storedPayloads.keys()], []);
     });
 
     it('fetches a separately bounded baseline cohort when the newest 800 rows are all recent', async () => {
@@ -1110,12 +1530,25 @@ describe('#5697 NLP MCP tools', () => {
     it('treats a missing HMGET title as degraded and never caches it', async () => {
       seedAccumulator();
       upstashState.pipelineReplyTransforms.set('HMGET', (reply) => reply.map((item, index) => (
-        index === 0 ? { result: [null] } : item
+        index === 0 ? { result: [null, 'https://example.test/missing-title'] } : item
       )));
 
       const { result } = await callTool('get_keyword_spikes', {});
       assert.match(result.note, /partial story-store read/);
       assert.equal(upstashState.storedPayloads.size, 0);
+    });
+
+    it('treats a missing HMGET link as an empty string and still caches', async () => {
+      seedAccumulator();
+      upstashState.pipelineReplyTransforms.set('HMGET', (reply) => reply.map((item, index) => (
+        index === 0 ? { result: ['Zaporizhzhia plant shelling escalates (0)', null] } : item
+      )));
+
+      const { result } = await callTool('get_keyword_spikes', {});
+      assert.equal(result.note, undefined);
+      assert.equal(upstashState.storedPayloads.size, 1);
+      const spike = result.spikes.find((s) => s.term === 'zaporizhzhia');
+      assert.equal(spike.sampleHeadlines[0].link, '');
     });
 
     it('falls back to live computation when the cache read fails', async () => {

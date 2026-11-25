@@ -152,8 +152,8 @@ function assertLazyLoaderHandlesFailedImports(source: string) {
 }
 
 function assertSharedImportPanelGuard(source: string) {
-  const callback = findCallbackBody(source, /return\s+importer\(\)\.then\(\(module\)\s*=>\s*\{/);
-  assert.ok(callback, 'importPanel helper must call importer().then(onFulfilled, onRejected)');
+  const callback = findCallbackBody(source, /return\s+readChunkModule\(importer\(\)\)\.then\(\(module\)\s*=>\s*\{/);
+  assert.ok(callback, 'importPanel helper must pass the import through readChunkModule and use two-arg .then(onFulfilled, onRejected)');
   assert.match(
     callback.body,
     /const PanelClass = module\[exportName\];/,
@@ -321,6 +321,35 @@ describe('panel-layout lazy dynamic-import guard (WORLDMONITOR-R4)', () => {
   it('destroy() isolates a single panel destroy() throw from the rest of teardown', async () => {
     const source = await readFile(filePath, 'utf8');
     assertDestroyOnceIsolatesPanelThrows(source);
+  });
+
+  it('persistent layout tools honor storage write receipts', async () => {
+    const source = await readFile(filePath, 'utf8');
+    assert.match(
+      source,
+      /return applyLayoutPersistReceipt\(this\.savePanelOrder\(\), layoutMutationApplied\('move'/,
+      'move_panel must convert savePanelOrder receipts into persist_failed instead of hard-coding persisted: true',
+    );
+    assert.match(
+      source,
+      /const orderPersisted = saveToStorage\(this\.ctx\.PANEL_ORDER_KEY,\s*allOrder\);/,
+      'savePanelOrder must keep the unified-order write receipt',
+    );
+    assert.match(
+      source,
+      /const bottomPersisted = saveToStorage\(this\.ctx\.PANEL_ORDER_KEY \+ '-bottom-set',\s*Array\.from\(this\.bottomSetMemory\)\);/,
+      'savePanelOrder must keep the bottom-set write receipt',
+    );
+    assert.match(
+      source,
+      /return \{ persisted: orderPersisted && bottomPersisted \};/,
+      'savePanelOrder must fail closed when either layout key write fails',
+    );
+    assert.match(
+      source,
+      /if \(!applied\.ok && applied\.persisted === false\) \{[\s\S]*layoutMutationDenied\(\s*'set_collapsed',\s*'persist_failed'/,
+      'set_panel_collapsed must return persist_failed when collapse storage rejects the write',
+    );
   });
 
   it('token-aware brace walker skips strings/templates/comments', () => {

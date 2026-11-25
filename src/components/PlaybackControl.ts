@@ -1,6 +1,7 @@
-import { getSnapshotTimestamps, getSnapshotAt, type DashboardSnapshot } from '@/services/storage';
+import { getSnapshotTimestamps, getSnapshotAt, isStorageAvailable, type DashboardSnapshot } from '@/services/storage';
 import { t } from '@/services/i18n';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { LatestRequestGuard } from '@/utils/latest-request-guard';
 
 
 export class PlaybackControl {
@@ -9,6 +10,8 @@ export class PlaybackControl {
   private timestamps: number[] = [];
   private currentIndex = 0;
   private onSnapshotChange: ((snapshot: DashboardSnapshot | null) => void) | null = null;
+  private snapshotGuard = new LatestRequestGuard();
+  private timestampGuard = new LatestRequestGuard();
 
   constructor() {
     this.element = document.createElement('div');
@@ -22,8 +25,9 @@ export class PlaybackControl {
           <span>${t('components.playback.historicalPlayback')}</span>
           <button class="playback-close" aria-label="${t('components.playback.close')}">×</button>
         </div>
+        <p class="playback-notice" role="status" hidden></p>
         <div class="playback-slider-container">
-          <input type="range" class="playback-slider" min="0" max="100" value="100">
+          <input type="range" class="playback-slider" min="0" max="100" value="100" aria-label="${t('components.playback.historicalPlayback')}">
           <div class="playback-time">${t('components.playback.live')}</div>
         </div>
         <div class="playback-controls">
@@ -49,10 +53,13 @@ export class PlaybackControl {
       panel.classList.toggle('hidden');
       if (!panel.classList.contains('hidden')) {
         await this.loadTimestamps();
+      } else {
+        this.timestampGuard.begin();
       }
     });
 
     closeBtn.addEventListener('click', () => {
+      this.timestampGuard.begin();
       panel.classList.add('hidden');
       this.goLive();
     });
@@ -72,8 +79,14 @@ export class PlaybackControl {
   }
 
   private async loadTimestamps(): Promise<void> {
-    this.timestamps = await getSnapshotTimestamps();
-    if (!this.element?.isConnected) return;
+    const requestId = this.timestampGuard.begin();
+    // Checked on every open: storage the browser blocks now may be allowed
+    // later in the same session.
+    const available = await isStorageAvailable().catch(() => true);
+    const timestamps = available ? await getSnapshotTimestamps() : [];
+    if (!this.timestampGuard.isCurrent(requestId) || !this.element?.isConnected) return;
+    this.setStorageUnavailable(!available);
+    this.timestamps = timestamps;
     this.timestamps.sort((a, b) => a - b);
 
     const slider = this.element.querySelector('.playback-slider') as HTMLInputElement;
@@ -82,6 +95,24 @@ export class PlaybackControl {
     this.currentIndex = this.timestamps.length - 1;
 
     this.updateTimeDisplay();
+  }
+
+  /**
+   * Explain a blocked database instead of showing an empty slider. Stepping
+   * is disabled because there is nothing to step through; Live and close
+   * stay usable.
+   */
+  private setStorageUnavailable(unavailable: boolean): void {
+    const notice = this.element.querySelector<HTMLElement>('.playback-notice');
+    if (notice) {
+      // Translated at show time: the control is built during first paint,
+      // when only the English shell dictionary may be loaded.
+      notice.textContent = unavailable ? t('components.playback.storageUnavailable') : '';
+      notice.hidden = !unavailable;
+    }
+    this.element
+      .querySelectorAll<HTMLInputElement | HTMLButtonElement>('.playback-slider, .playback-btn:not(.playback-live)')
+      .forEach((control) => { control.disabled = unavailable; });
   }
 
   private async loadSnapshot(index: number): Promise<void> {
@@ -96,11 +127,12 @@ export class PlaybackControl {
       return;
     }
 
+    const requestId = this.snapshotGuard.begin();
     this.isPlaybackMode = true;
     this.updateTimeDisplay();
 
     const snapshot = await getSnapshotAt(timestamp);
-    if (!this.element?.isConnected) return;
+    if (!this.snapshotGuard.isCurrent(requestId) || !this.isPlaybackMode || !this.element?.isConnected) return;
     this.onSnapshotChange?.(snapshot);
 
     document.body.classList.add('playback-mode');
@@ -108,6 +140,7 @@ export class PlaybackControl {
   }
 
   private goLive(): void {
+    this.snapshotGuard.begin();
     this.isPlaybackMode = false;
     this.currentIndex = this.timestamps.length - 1;
 

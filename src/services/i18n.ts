@@ -2,7 +2,9 @@ import i18next from 'i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 
 import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
-import { readQueryLanguage, stripQueryLanguage } from '@/utils/i18n-url';
+import { resolveLanguageTag } from '@/shared/language-tags';
+import { EXPLICIT_LOCALE_KEY, readQueryLanguage, stripQueryLanguage } from '@/utils/i18n-url';
+import { LatestRequestGuard } from '@/utils/latest-request-guard';
 
 // Keep only first-paint English strings in the entry chunk. The full English
 // dictionary is loaded through localeModules so it can split like other locales.
@@ -14,7 +16,6 @@ import enShellTranslation from '../locales/en.shell.json';
 // longer poison localStorage and override the user's actual browser locale on
 // future visits. Anyone whose browser is French now sees French automatically;
 // the moment they pick another language explicitly, that choice persists here.
-const EXPLICIT_LOCALE_KEY = 'wm-locale-explicit';
 
 const SUPPORTED_LANGUAGES = ['en', 'bg', 'cs', 'fr', 'de', 'el', 'es', 'hr', 'hu', 'it', 'pl', 'pt', 'nl', 'sv', 'ru', 'uk', 'ar', 'fa', 'zh', 'zh-TW', 'ja', 'ko', 'ro', 'tr', 'th', 'vi', 'hi', 'sw'] as const;
 type SupportedLanguage = typeof SUPPORTED_LANGUAGES[number];
@@ -31,6 +32,7 @@ export interface I18nResourcesLoadedDetail {
 
 const SUPPORTED_LANGUAGE_SET = new Set<SupportedLanguage>(SUPPORTED_LANGUAGES);
 const loadedLanguages = new Set<SupportedLanguage>();
+const languageChangeGuard = new LatestRequestGuard();
 
 // Lazy-load only the locale that's actually needed — all others stay out of the bundle.
 const localeModules = import.meta.glob<TranslationDictionary>(
@@ -40,21 +42,8 @@ const localeModules = import.meta.glob<TranslationDictionary>(
 
 const RTL_LANGUAGES = new Set(['ar', 'fa']);
 
-// Traditional-Chinese tags must be resolved before the region suffix is
-// stripped — zh-TW/zh-HK/zh-Hant would otherwise collapse to `zh` and serve the
-// Simplified dictionary to readers who asked for Traditional.
-const TRADITIONAL_CHINESE_TAGS = new Set(['zh-tw', 'zh-hk', 'zh-mo', 'zh-hant']);
-
 function normalizeLanguage(lng: string): SupportedLanguage {
-  const tag = (lng || 'en').toLowerCase();
-  if (TRADITIONAL_CHINESE_TAGS.has(tag) || tag.startsWith('zh-hant')) {
-    return 'zh-TW';
-  }
-  const base = tag.split('-')[0] || 'en';
-  if (SUPPORTED_LANGUAGE_SET.has(base as SupportedLanguage)) {
-    return base as SupportedLanguage;
-  }
-  return 'en';
+  return resolveLanguageTag(lng, SUPPORTED_LANGUAGE_SET) as SupportedLanguage;
 }
 
 function applyDocumentDirection(lang: string): void {
@@ -126,9 +115,9 @@ function notifyLanguageResourcesLoaded(language: SupportedLanguage): void {
 const ENGLISH_PRELOAD_MAX_ATTEMPTS = 3;
 const ENGLISH_PRELOAD_BASE_DELAY_MS = 2000;
 
-function preloadEnglishTranslation(attempt = 0): void {
+async function preloadEnglishTranslation(attempt = 0): Promise<void> {
   if (loadedLanguages.has('en')) return;
-  void ensureLanguageLoaded('en')
+  return ensureLanguageLoaded('en')
     .then((language) => notifyLanguageResourcesLoaded(language))
     .catch((error) => {
       // English now lives in its own lazy chunk. If that chunk fails, the eager
@@ -153,7 +142,7 @@ function preloadEnglishTranslation(attempt = 0): void {
 }
 
 // Initialize i18n
-export async function initI18n(): Promise<void> {
+export async function initI18n({ waitForFullTranslation = false }: { waitForFullTranslation?: boolean } = {}): Promise<void> {
   if (i18next.isInitialized) {
     const currentLanguage = normalizeLanguage(i18next.language || 'en');
     await ensureLanguageLoaded(currentLanguage);
@@ -213,7 +202,8 @@ export async function initI18n(): Promise<void> {
 
   const detectedLanguage = normalizeLanguage(i18next.language || 'en');
   if (detectedLanguage === 'en') {
-    preloadEnglishTranslation();
+    if (waitForFullTranslation) await preloadEnglishTranslation();
+    else void preloadEnglishTranslation();
   } else {
     await Promise.all([
       ensureLanguageLoaded(detectedLanguage),
@@ -239,10 +229,15 @@ export function t(key: string, options?: Record<string, unknown>): string {
 // `localStorage.removeItem(EXPLICIT_LOCALE_KEY)` and reload — the next
 // initI18n() will fall through `wmExplicit` and detect from navigator.
 // We deliberately don't ship that helper now since no UI consumes it.
-export async function changeLanguage(lng: string): Promise<void> {
+export async function changeLanguage(lng: string): Promise<boolean> {
+  const request = languageChangeGuard.begin();
   const normalized = await ensureLanguageLoaded(lng);
-  try { localStorage.setItem(EXPLICIT_LOCALE_KEY, normalized); } catch { /* private mode */ }
+  if (!languageChangeGuard.isCurrent(request)) return false;
+
   await i18next.changeLanguage(normalized);
+  if (!languageChangeGuard.isCurrent(request)) return false;
+
+  try { localStorage.setItem(EXPLICIT_LOCALE_KEY, normalized); } catch { /* private mode */ }
   applyDocumentDirection(normalized);
   // Drop any `?lang=` from the URL before reloading. `wmQuery` is first in
   // detection.order, so a stale query param would out-rank the explicit choice
@@ -254,6 +249,7 @@ export async function changeLanguage(lng: string): Promise<void> {
     }
   } catch { /* history unavailable */ }
   window.location.reload(); // Simple reload to update all components for now
+  return true;
 }
 
 // Helper to get current language (normalized to short code)
@@ -262,12 +258,25 @@ export function getCurrentLanguage(): string {
   return lang.split('-')[0]!;
 }
 
-export function isRTL(): boolean {
-  return RTL_LANGUAGES.has(getCurrentLanguage());
+/**
+ * The active language as a full catalogue tag — `zh-TW`, never collapsed to `zh`.
+ *
+ * `getCurrentLanguage()` strips the region because most callers want the FEED
+ * language, where Traditional and Simplified readers want the same thing: both
+ * read the same Chinese-language sources. Use this accessor instead where the
+ * caller is sensitive to the SCRIPT — which entry the language picker marks as
+ * selected, and how dates and numbers format, differ between the two even though
+ * the feeds do not.
+ */
+export function getCurrentLanguageTag(): string {
+  return normalizeLanguage(i18next.language || 'en');
 }
 
 export function getLocale(): string {
-  const lang = getCurrentLanguage();
+  // Script-sensitive: zh-TW formats dates, numbers and relative times differently
+  // from zh-CN. Tags that are already full BCP-47 locales fall through the map
+  // unchanged — it exists only to expand bare base codes.
+  const lang = getCurrentLanguageTag();
   const map: Record<string, string> = { en: 'en-US', bg: 'bg-BG', cs: 'cs-CZ', el: 'el-GR', fa: 'fa-IR', zh: 'zh-CN', pt: 'pt-BR', ja: 'ja-JP', ko: 'ko-KR', ro: 'ro-RO', tr: 'tr-TR', th: 'th-TH', vi: 'vi-VN', hi: 'hi-IN' };
   return map[lang] || lang;
 }

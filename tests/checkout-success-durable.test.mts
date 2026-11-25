@@ -126,6 +126,23 @@ describe('/pro funnel replay across the Dodo redirect (#4934 rounds 5+6)', () =>
     assert.equal(storage.getItem('wm-pro-funnel-pending'), null, 'marker clears after the retry delivers');
   });
 
+  it('keeps a boolean newAccount and drops any other value', async () => {
+    const analytics = await import('../src/services/analytics.ts');
+    analytics.resetAnalyticsForTesting();
+    const storage = new MemoryStorage();
+    storage.setItem('wm-pro-funnel-pending', JSON.stringify([
+      { event: 'checkout-start', data: { productId: 'pdt_0Nbtt71uObulf7fGXhQup', surface: 'pro-resume', authed: true, newAccount: true } },
+      { event: 'checkout-start', data: { productId: 'pdt_0Nbtt71uObulf7fGXhQup', surface: 'pro-resume', authed: true, newAccount: false } },
+      { event: 'checkout-start', data: { productId: 'pdt_0Nbtt71uObulf7fGXhQup', surface: 'pro-resume', authed: true, newAccount: 'true' } },
+    ]));
+    const calls = installWindow(storage, { withUmami: true });
+
+    analytics.replayPendingProFunnelEvents();
+
+    assert.deepEqual(calls.map((call) => call.data?.newAccount), [true, false, undefined]);
+    assert.equal('newAccount' in (calls[2]?.data ?? {}), false, 'a non-boolean newAccount must not reach analytics');
+  });
+
   it('is a no-op on ordinary boots and clears malformed/unreplayable storage', async () => {
     const analytics = await import('../src/services/analytics.ts');
     analytics.resetAnalyticsForTesting();
@@ -186,5 +203,47 @@ describe('durable checkout-success', () => {
       { name: 'checkout-success', data: { source: 'url-return', replayed: true } },
     ]);
     assert.equal(storage.getItem(PENDING_KEY), null, 'marker must clear once the replay delivers');
+  });
+});
+
+describe('durable mission return', () => {
+  afterEach(() => {
+    delete (globalThis as { window?: unknown }).window;
+  });
+
+  it('replays after a reload and clears only after delivery', async () => {
+    const analytics = await import('../src/services/analytics.ts');
+    const returns = await import('../src/services/checkout-return-state.ts');
+    analytics.resetAnalyticsForTesting();
+    const storage = new MemoryStorage();
+    installWindow(storage, { withUmami: false });
+    returns.armCheckoutReturnState({
+      eventSurface: 'mission-preview',
+      origin: {
+        kind: 'mission-preview',
+        missionId: 'energy-security',
+        panelKey: 'pipeline-status',
+      },
+    }, 'url-return');
+
+    analytics.replayPendingMissionReturn();
+    assert.equal(returns.loadCheckoutReturnState()?.delivery.missionReturn, 'pending');
+
+    analytics.resetAnalyticsForTesting();
+    const calls = installWindow(storage, { withUmami: true });
+    analytics.replayPendingMissionReturn();
+
+    assert.deepEqual(calls, [{
+      name: 'mission-returned-after-purchase',
+      data: {
+        variant: 'full',
+        deviceClass: 'desktop',
+        missionId: 'energy-security',
+        panelKey: 'pipeline-status',
+        surface: 'mission-preview',
+      },
+    }]);
+    assert.equal(returns.loadCheckoutReturnState()?.delivery.missionReturn, 'settled');
+    assert.equal(returns.loadCheckoutReturnState()?.delivery.panelFocus, 'pending');
   });
 });

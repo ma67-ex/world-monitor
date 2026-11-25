@@ -9,6 +9,8 @@
  * - claimSubscription: mutation to migrate entitlements from anon ID to authed user
  */
 
+import { assertAccountWritable, isAccountDeleting } from "../accountDeletion/guard";
+import { redactBillingPayload, tombstoneUserId } from "../accountDeletion/registry";
 import { ConvexError, v } from "convex/values";
 import { action, mutation, query, internalAction, internalMutation, internalQuery, type ActionCtx, type MutationCtx, type QueryCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
@@ -18,13 +20,28 @@ import type { Doc, Id } from "../_generated/dataModel";
 import { resolveUserId, requireUserId } from "../lib/auth";
 import { getFeaturesForPlan } from "../lib/entitlements";
 import { ANON_ID_V4_REGEX, verifyAnonClaimToken } from "../lib/identitySigning";
+import { ResendSendError, sendResendEmail } from "../lib/resendEmail";
+import { findEmailSuppression } from "../emailSuppressions";
 import { PLAN_PRECEDENCE, PRODUCT_CATALOG, resolveProductToPlan } from "../config/productCatalog";
 import { proActivationStepIdValidator } from "../constants";
+import { EMAIL_AMBER, emailButton, emailCard, emailFrame, emailHeading, emailNote, emailParagraph, escapeEmailHtml } from "../../shared/email-frame";
 import {
+  accessEndAt,
+  billingDeletionForUser,
+  failedRenewalAccessEndsAt,
+  handleSubscriptionCancelled,
+  handleSubscriptionExpired,
+  handleSubscriptionPlanChanged,
+  handleSubscriptionRenewed,
+  hasAccessAt,
+  isCancellationScheduled,
   isCoveringAt,
   isNewerEvent,
+  recomputeAcceptedBusinessInvitees,
   recomputeEntitlementFromAllSubs,
+  resolveBillingRecipient,
   resolvePlanKey,
+  revokeBusinessProGrantsForSubscription,
   type SubscriptionStatus,
 } from "./subscriptionHelpers";
 
@@ -332,6 +349,11 @@ function normalizeDodoStatus(status: string): SubscriptionStatus | null {
       // (a local-active row would otherwise keep full entitlement forever via
       // `isCoveringAt`).
       return "expired";
+    case "paused":
+      // Dodo revokes access on pause and sends no webhook, so reconciliation
+      // is the only place a paused row stops covering. Not yet in the SDK's
+      // `SubscriptionStatus` union.
+      return "expired";
     default:
       // `pending` and any unknown status → caller skips + escalates. `pending`
       // is a real SDK status (initial payment in flight) but not a state we act
@@ -415,9 +437,9 @@ function normalizeRemoteSubscription(
  * race. Tier 3 only kicks in when both sub-side tiers miss AND the
  * customers row's `userId` happens to match the requester.
  *
- * Result: every Clerk account with a valid subscription opens the
- * right portal regardless of how many other Clerk accounts share the
- * same Dodo customer. No Clerk REST lookup needed.
+ * A per-user subscription identifies a candidate, not exclusive customer
+ * ownership. The resolver rejects customers linked to another user before
+ * this action creates a customer-wide portal session.
  *
  * WORLDMONITOR-R5: the original opaque `[Request ID: X] Server Error`
  * came from this path throwing on a missing customers row when both
@@ -486,6 +508,31 @@ function getSubscriptionStatusPriority(status: string): number {
   }
 }
 
+function getSubscriptionSelectionPriority(
+  subscription: Pick<Doc<"subscriptions">, "status" | "currentPeriodEnd">,
+  at: number,
+): number {
+  if (subscription.status === "active") return 0;
+  if (isCoveringAt(subscription, at)) {
+    return subscription.status === "on_hold" ? 1 : 2;
+  }
+  return 3;
+}
+
+function compareSubscriptionsForSelection(
+  a: Pick<Doc<"subscriptions">, "status" | "currentPeriodEnd" | "updatedAt">,
+  b: Pick<Doc<"subscriptions">, "status" | "currentPeriodEnd" | "updatedAt">,
+  at: number,
+): number {
+  const priorityDelta =
+    getSubscriptionSelectionPriority(a, at) - getSubscriptionSelectionPriority(b, at);
+  if (priorityDelta !== 0) return priorityDelta;
+  if (a.currentPeriodEnd !== b.currentPeriodEnd) {
+    return b.currentPeriodEnd - a.currentPeriodEnd;
+  }
+  return b.updatedAt - a.updatedAt;
+}
+
 // Pro Business buyers get the same day-0 activation interstitial as Pro
 // (KTD9) — the tier is a larger Pro, not a separate product line. Mirrored by
 // the client allowlist in src/services/pro-activation-state.ts.
@@ -551,7 +598,9 @@ async function hasActivatedServerProFunctionality(
       rule.channels.some((channelType) => verifiedChannels.has(channelType)),
   );
   const hasApiSetup = apiKeys.some((key) => key.revokedAt === undefined);
-  const hasMcpSetup = mcpTokens.some((token) => token.revokedAt === undefined);
+  const hasMcpSetup = mcpTokens.some(
+    (token) => token.revokedAt === undefined && token.lastUsedAt !== undefined,
+  );
   return hasConfiguredDelivery || hasApiSetup || hasMcpSetup;
 }
 
@@ -611,8 +660,9 @@ export const getSubscriptionForUser = query({
       return null;
     }
 
-    // Fetch all subscriptions for user and prefer active/on_hold over cancelled/expired.
-    // Avoids the bug where a cancelled sub created after an active one hides the active one.
+    // Fetch all subscriptions for user and prefer current coverage over ended rows.
+    // Avoids a newer ended row hiding an active subscription, or a stale hold
+    // hiding a cancelled subscription that is still paid through.
     const allSubs = await ctx.db
       .query("subscriptions")
       .withIndex("by_userId", (q) => q.eq("userId", userId))
@@ -620,19 +670,8 @@ export const getSubscriptionForUser = query({
 
     if (allSubs.length === 0) return null;
 
-    allSubs.sort((a, b) => {
-      // Ended subscriptions are equivalent for display selection. Prefer the
-      // one whose coverage ended most recently so returning-subscriber links
-      // preserve the latest plan instead of always favoring cancelled.
-      const pa = a.status === "active" ? 0 : a.status === "on_hold" ? 1 : 2;
-      const pb = b.status === "active" ? 0 : b.status === "on_hold" ? 1 : 2;
-      if (pa !== pb) return pa - pb; // active first
-      if (pa === 2) {
-        const periodDelta = b.currentPeriodEnd - a.currentPeriodEnd;
-        if (periodDelta !== 0) return periodDelta;
-      }
-      return b.updatedAt - a.updatedAt;
-    });
+    const now = Date.now();
+    allSubs.sort((a, b) => compareSubscriptionsForSelection(a, b, now));
 
     // Safe: we checked length > 0 above
     const subscription = allSubs[0]!;
@@ -645,10 +684,18 @@ export const getSubscriptionForUser = query({
     const firstProBillingCycle =
       isProActivationPlan(subscription.planKey) &&
       isFirstBillingCycle(subscription) &&
-      isCoveringAt(subscription, Date.now());
+      isCoveringAt(subscription, now);
     const activationOnboardingEligible =
       firstProBillingCycle &&
       !(await hasConfirmedActivationPresentation(ctx, subscription._id));
+    const billingEmail = await resolveBillingRecipient(ctx, subscription);
+    // Only a hard bounce, and only while the row still gets billing mail. A
+    // complaint or manual suppression is not something a new address repairs,
+    // and an ended subscription has no receipts or payment alerts to lose.
+    const billingEmailBounced =
+      (subscription.status === "active" || subscription.status === "on_hold") &&
+      billingEmail !== "" &&
+      (await findEmailSuppression(ctx, billingEmail))?.reason === "bounce";
 
     return {
       // Purpose-built opaque identity for Pro Activation fire-once keying.
@@ -664,11 +711,20 @@ export const getSubscriptionForUser = query({
       displayName: productPlan?.displayName ?? subscription.planKey,
       status: subscription.status,
       currentPeriodEnd: subscription.currentPeriodEnd,
+      // A portal cancel stays `active` until period end; without this the
+      // settings panel shows "Renews" to a user who just cancelled.
+      cancelAtPeriodEnd: isCancellationScheduled(subscription),
       // #4771: request-path renewal verification verdict (#4770), so the
       // frontend can show "verifying your renewal" instead of a generic
       // Upgrade CTA when local paid evidence goes stale. Normalized to null
       // (not undefined) for a stable wire shape.
       renewalVerificationState: subscription.renewalVerificationState ?? null,
+      // The address dunning would mail (same resolution), so the banner can
+      // name it, and whether Resend hard-bounced it. The welcome email bounces
+      // within seconds of a typo'd checkout, so this is known before any
+      // renewal fails.
+      billingEmail: billingEmail || null,
+      billingEmailBounced,
     };
   },
 });
@@ -684,6 +740,7 @@ export const claimProActivationPresentation = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, userId);
     const now = Date.now();
     const subscription = await ctx.db.get(args.activationKey);
     if (
@@ -740,6 +797,7 @@ export const confirmProActivationPresentation = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, userId);
     // Retro cohort only: presentation confirmation is the lease handshake, and
     // the day-0 path has no lease to confirm.
     const presentation = await activationPresentationForCohort(ctx, args.activationKey, undefined);
@@ -804,6 +862,7 @@ export const openProActivationDay0Presentation = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, userId);
     const subscription = await ctx.db.get(args.activationKey);
     // Ownership and plan identity only. Deliberately NOT gated on
     // isFirstBillingCycle/isCoveringAt like the retro claim is: those decide
@@ -945,6 +1004,7 @@ export const recordProActivationOutcome = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, userId);
     const presentation = await activationPresentationForCohort(
       ctx,
       args.activationKey,
@@ -1032,6 +1092,48 @@ export const getCustomerByUserId = internalQuery({
   },
 });
 
+async function requireExclusivePortalCustomer(
+  ctx: QueryCtx,
+  userId: string,
+  customerId: string,
+): Promise<string> {
+  const deletedOwner = await ctx.db.query("deletedSubscriptionCustomers")
+    .withIndex("by_customer_user", (q) => q.eq("dodoCustomerId", customerId))
+    .filter((q) => q.neq(q.field("userId"), userId))
+    .first();
+  if (deletedOwner) {
+    throw new ConvexError({ kind: "NO_CUSTOMER", reason: "SHARED_CUSTOMER" });
+  }
+  const linkedSubscription = await ctx.db.query("subscriptions")
+    .withIndex("by_dodoCustomerId", (q) => q.eq("dodoCustomerId", customerId))
+    .filter((q) => q.neq(q.field("userId"), userId))
+    .first();
+  const linkedCustomer = await ctx.db.query("customers")
+    .withIndex("by_dodoCustomerId", (q) => q.eq("dodoCustomerId", customerId))
+    .filter((q) => q.neq(q.field("userId"), userId))
+    .first();
+  if (linkedSubscription || linkedCustomer) {
+    throw new ConvexError({ kind: "NO_CUSTOMER", reason: "SHARED_CUSTOMER" });
+  }
+
+  // Legacy rows can identify the customer only in rawPayload. Keep this
+  // check until all legacy customer IDs have been backfilled; never limit
+  // by subscription status because ended subscriptions still expose invoices.
+  for (const missingId of [undefined, ""] as const) {
+    const legacyOwner = await ctx.db.query("subscriptions")
+      .withIndex("by_dodoCustomerId", (q) => q.eq("dodoCustomerId", missingId))
+      .filter((q) => q.and(
+        q.neq(q.field("userId"), userId),
+        q.eq(q.field("rawPayload.customer.customer_id"), customerId),
+      ))
+      .first();
+    if (legacyOwner) {
+      throw new ConvexError({ kind: "NO_CUSTOMER", reason: "SHARED_CUSTOMER" });
+    }
+  }
+  return customerId;
+}
+
 /**
  * Resolve the Dodo customer_id this user's "Manage Billing" click
  * should open a portal session for.
@@ -1054,14 +1156,16 @@ export const getCustomerByUserId = internalQuery({
  *      when it DOES match the requesting userId, it's the best
  *      remaining signal — better than NO_CUSTOMER for a paying user.
  *
- * Subscription preference (within tier 1+2): active → on_hold →
- * cancelled → other; tie-break by newest `updatedAt`. A given userId
- * may have multiple subscription rows over time (cancelled + new), so
- * sorting is required — there's no per-userId uniqueness invariant.
+ * Subscription preference (within tier 1+2): active → paid-through
+ * on_hold → paid-through cancelled → ended; tie-break by latest period end,
+ * then newest `updatedAt`. A given userId may have multiple subscription rows
+ * over time (cancelled + new), so sorting is required — there's no per-userId
+ * uniqueness invariant.
  *
  * Returns null only when all three tiers fail (no subs at all OR no
  * customer_id anywhere across subs/customers). Caller throws
- * NO_CUSTOMER → client surfaces the "contact support" toast.
+ * NO_CUSTOMER → client surfaces the "contact support" toast. A candidate
+ * linked to another user throws NO_CUSTOMER with reason SHARED_CUSTOMER.
  */
 export const getDodoCustomerIdForUserPortal = internalQuery({
   args: { userId: v.string() },
@@ -1072,17 +1176,15 @@ export const getDodoCustomerIdForUserPortal = internalQuery({
       .take(50);
 
     if (subs.length > 0) {
-      const sorted = [...subs].sort((a, b) => {
-        const pa = getSubscriptionStatusPriority(a.status);
-        const pb = getSubscriptionStatusPriority(b.status);
-        if (pa !== pb) return pa - pb;
-        return b.updatedAt - a.updatedAt;
-      });
+      const now = Date.now();
+      const sorted = [...subs].sort((a, b) =>
+        compareSubscriptionsForSelection(a, b, now),
+      );
 
       for (const sub of sorted) {
         // Tier 1: stable column populated by the webhook handler.
         if (typeof sub.dodoCustomerId === "string" && sub.dodoCustomerId.length > 0) {
-          return sub.dodoCustomerId;
+          return requireExclusivePortalCustomer(ctx, args.userId, sub.dodoCustomerId);
         }
         // Tier 2: rawPayload fallback for pre-schema-change rows whose
         // rawPayload still carries the customer field.
@@ -1091,7 +1193,9 @@ export const getDodoCustomerIdForUserPortal = internalQuery({
           | null
           | undefined;
         const id = payload?.customer?.customer_id;
-        if (typeof id === "string" && id.length > 0) return id;
+        if (typeof id === "string" && id.length > 0) {
+          return requireExclusivePortalCustomer(ctx, args.userId, id);
+        }
       }
     }
 
@@ -1111,7 +1215,7 @@ export const getDodoCustomerIdForUserPortal = internalQuery({
       typeof customer.dodoCustomerId === "string" &&
       customer.dodoCustomerId.length > 0
     ) {
-      return customer.dodoCustomerId;
+      return requireExclusivePortalCustomer(ctx, args.userId, customer.dodoCustomerId);
     }
 
     return null;
@@ -1204,9 +1308,11 @@ export const getOnDemandRenewalFallbackState = internalQuery({
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .collect();
 
+    // accessEndAt, not currentPeriodEnd: a failed renewal's unpaid month must
+    // not come back through this fallback after its access grace.
     const currentSubscription = subscriptions
       .filter((subscription) =>
-        subscription.currentPeriodEnd >= args.now &&
+        accessEndAt(subscription) >= args.now &&
         (
           subscription.status === "active" ||
           subscription.status === "on_hold" ||
@@ -1215,8 +1321,8 @@ export const getOnDemandRenewalFallbackState = internalQuery({
       )
       .sort((a, b) =>
         compareEntitlementPlans(
-          { planKey: b.planKey, validUntil: b.currentPeriodEnd },
-          { planKey: a.planKey, validUntil: a.currentPeriodEnd },
+          { planKey: b.planKey, validUntil: accessEndAt(b) },
+          { planKey: a.planKey, validUntil: accessEndAt(a) },
         ),
       )[0];
 
@@ -1239,12 +1345,19 @@ export const getOnDemandRenewalFallbackState = internalQuery({
         ? {
             planKey: currentSubscription.planKey,
             features: getFeaturesForPlan(currentSubscription.planKey),
-            validUntil: currentSubscription.currentPeriodEnd,
+            validUntil: accessEndAt(currentSubscription),
           }
         : null,
       strongestRecentlyStaleFeatures: strongestRecentlyStaleSubscription
         ? getFeaturesForPlan(strongestRecentlyStaleSubscription.planKey)
         : null,
+      // A failed renewal past its access grace that Dodo is still retrying:
+      // the subscription is paused, not ended, and checkout stays blocked.
+      paymentFailedHold: subscriptions.some((subscription) =>
+        subscription.status === "on_hold" &&
+        isCoveringAt(subscription, args.now) &&
+        !hasAccessAt(subscription, args.now),
+      ),
     };
   },
 });
@@ -1593,14 +1706,26 @@ export const applyDodoSubscriptionReconciliation = internalMutation({
     // every cycle with a fresh clean slate.
     const stillStaleAfterPatch =
       args.remote.status === "active" && args.remote.currentPeriodEnd < args.observedAt;
+    const deletion = await billingDeletionForUser(ctx, existing.userId);
+    // The row is local-active (guarded above), so a remote on_hold is the
+    // transition into a hold the webhook never delivered. Anchor it like the
+    // on_hold handler does: the dunning episode starts now, and the access
+    // grace is decided from the period Dodo reports.
+    const enteringHold = args.remote.status === "on_hold";
+    const accessEndsAt = enteringHold
+      ? await failedRenewalAccessEndsAt(ctx, existing, args.remote.currentPeriodStart, args.observedAt)
+      : undefined;
     await ctx.db.patch(existing._id, {
       status: args.remote.status,
+      ...(enteringHold ? { onHoldAt: args.observedAt } : {}),
+      accessEndsAt,
       dodoProductId: args.remote.productId,
       planKey,
       currentPeriodStart: args.remote.currentPeriodStart,
       currentPeriodEnd: args.remote.currentPeriodEnd,
       dodoCustomerId: args.remote.dodoCustomerId ?? existing.dodoCustomerId,
-      rawPayload: args.remote.rawPayload,
+      ...(deletion ? { userId: tombstoneUserId(deletion.userIdHash) } : {}),
+      rawPayload: deletion ? redactBillingPayload(args.remote.rawPayload) : args.remote.rawPayload,
       updatedAt: args.observedAt,
       // A successful lookup proves the sub EXISTS in Dodo → any 404 streak is
       // broken (reset to 0 while still stale, cleared once it leaves the set).
@@ -1629,12 +1754,193 @@ export const applyDodoSubscriptionReconciliation = internalMutation({
     });
 
     await recomputeEntitlementFromAllSubs(ctx, existing.userId, args.observedAt);
+    // A Business subscription's accepted invitees follow the owner's new
+    // period and grace, as they do when the webhook delivers the change.
+    await recomputeAcceptedBusinessInvitees(ctx, existing.dodoSubscriptionId, args.observedAt);
     return {
       kind: "reconciled",
       status: args.remote.status,
       planKey,
       currentPeriodEnd: args.remote.currentPeriodEnd,
     };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Locked-hold recovery. A failed renewal loses access at its `accessEndsAt`
+// while Dodo keeps retrying the card. If a retry succeeds but the recovery
+// webhook is lost, nothing else moves the row off on_hold: the missed-renewal
+// reconciler above only scans local-active rows. This sweep asks Dodo about
+// each locked hold and, when Dodo says active, applies it through the same
+// handler a `subscription.renewed` webhook uses.
+// ---------------------------------------------------------------------------
+
+const ON_HOLD_RECOVERY_RECHECK_MS = 6 * 60 * 60 * 1000;
+const ON_HOLD_RECOVERY_BATCH_SIZE = 50;
+// Dodo retries for 30 days from the hold, which can outlast a short period
+// (a 28-day February, or a hold that settled days late), so keep checking a
+// locked hold for this long after its local period end.
+const ON_HOLD_RECOVERY_TAIL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * on_hold rows whose access grace has ended but whose unpaid period has not,
+ * (or ended less than `ON_HOLD_RECOVERY_TAIL_MS` ago), so Dodo may still
+ * recover them, and that were not checked in the last
+ * `ON_HOLD_RECOVERY_RECHECK_MS`. Bounded by the period window: only holds
+ * from roughly the last month qualify.
+ */
+export const listLockedOnHoldForRecovery = internalQuery({
+  args: { now: v.number() },
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_status_currentPeriodEnd", (q) =>
+        q.eq("status", "on_hold").gt("currentPeriodEnd", args.now - ON_HOLD_RECOVERY_TAIL_MS),
+      )
+      .take(500);
+    return rows
+      .filter((row) =>
+        row.accessEndsAt !== undefined &&
+        row.accessEndsAt <= args.now &&
+        (row.lastReconcileAttemptAt === undefined ||
+          args.now - row.lastReconcileAttemptAt >= ON_HOLD_RECOVERY_RECHECK_MS),
+      )
+      // Least recently checked first, so a backlog larger than one batch
+      // rotates instead of re-checking the same rows every run.
+      .sort((a, b) => (a.lastReconcileAttemptAt ?? 0) - (b.lastReconcileAttemptAt ?? 0))
+      .slice(0, ON_HOLD_RECOVERY_BATCH_SIZE)
+      .map((row) => ({ _id: row._id, dodoSubscriptionId: row.dodoSubscriptionId }));
+  },
+});
+
+/**
+ * Applies a Dodo lookup to a locked hold. While the row is still on_hold and
+ * no webhook wrote it at or after the lookup, an `active` remote recovers it
+ * and a `cancelled` or `expired` remote closes it through the matching webhook
+ * handler; anything else records the check so the row waits for the next
+ * window. Never touches `updatedAt` on a no-op (it carries webhook ordering).
+ */
+export const applyOnHoldRecovery = internalMutation({
+  args: {
+    subscriptionId: v.id("subscriptions"),
+    observedAt: v.number(),
+    remoteStatus: v.optional(v.string()),
+    remoteRaw: v.optional(v.any()),
+    remoteCurrentPeriodStart: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<"recovered" | "closed" | "checked" | "skipped"> => {
+    const existing = await ctx.db.get(args.subscriptionId);
+    if (!existing || existing.status !== "on_hold") return "skipped";
+    if (
+      args.remoteStatus === "active" &&
+      args.remoteRaw !== undefined &&
+      isNewerEvent(existing.updatedAt, args.observedAt)
+    ) {
+      await handleSubscriptionRenewed(ctx, args.remoteRaw, args.observedAt);
+      // Dodo allows a plan change on a held subscription. If its webhook was
+      // lost too, apply it in this transaction (grants and entitlement
+      // included) so access is restored on the plan Dodo actually bills.
+      const remoteProductId = (args.remoteRaw as { product_id?: unknown }).product_id;
+      if (typeof remoteProductId === "string" && remoteProductId !== existing.dodoProductId) {
+        await handleSubscriptionPlanChanged(ctx, args.remoteRaw, args.observedAt);
+      }
+      return "recovered";
+    }
+    // Dodo ended the subscription while it was held and that webhook was lost.
+    // Apply it, or the row keeps blocking a new checkout until its period ends.
+    if (
+      (args.remoteStatus === "cancelled" || args.remoteStatus === "expired") &&
+      args.remoteRaw !== undefined &&
+      isNewerEvent(existing.updatedAt, args.observedAt)
+    ) {
+      if (args.remoteStatus === "cancelled") {
+        // A late retry may have paid the period before the cancel, with its
+        // recovery webhook lost. The cancel keeps the stored cutoff, so drop
+        // it first when a succeeded charge covers the period Dodo reports.
+        if (
+          existing.accessEndsAt !== undefined &&
+          args.remoteCurrentPeriodStart !== undefined &&
+          (await failedRenewalAccessEndsAt(ctx, existing, args.remoteCurrentPeriodStart, args.observedAt)) === undefined
+        ) {
+          await ctx.db.patch(existing._id, { accessEndsAt: undefined });
+        }
+        await handleSubscriptionCancelled(ctx, args.remoteRaw, args.observedAt);
+        // Accepted invitees still hold the grace date from the hold; bring
+        // them to the owner's (possibly restored) coverage.
+        await recomputeAcceptedBusinessInvitees(ctx, existing.dodoSubscriptionId, args.observedAt);
+      } else {
+        await handleSubscriptionExpired(ctx, args.remoteRaw, args.observedAt);
+      }
+      return "closed";
+    }
+    await ctx.db.patch(existing._id, { lastReconcileAttemptAt: args.observedAt });
+    return "checked";
+  },
+});
+
+export const reconcileLockedOnHoldSubscriptions = internalAction({
+  args: {
+    now: v.optional(v.number()),
+    remoteSubscriptionsForTest: v.optional(
+      v.array(dodoReconciliationRemoteSubscriptionValidator),
+    ),
+  },
+  handler: async (ctx, args): Promise<{ inspected: number; recovered: number; failed: number }> => {
+    if (args.remoteSubscriptionsForTest !== undefined && process.env.NODE_ENV !== "test") {
+      throw new Error("[billing/on-hold-recovery] test injection args are only allowed under test");
+    }
+    const now = args.now ?? Date.now();
+    const rows = (await ctx.runQuery(
+      internal.payments.billing.listLockedOnHoldForRecovery,
+      { now },
+    )) as Array<{ _id: Id<"subscriptions">; dodoSubscriptionId: string }>;
+    const remoteById = new Map(
+      (args.remoteSubscriptionsForTest ?? []).map((remote) => [remote.subscription_id, remote]),
+    );
+    const client = args.remoteSubscriptionsForTest !== undefined
+      ? null
+      : rows.length > 0
+        ? getDodoClient({ timeout: DODO_RENEWAL_RECONCILIATION_TIMEOUT_MS, maxRetries: 0 })
+        : null;
+
+    const summary = { inspected: 0, recovered: 0, failed: 0 };
+    for (const row of rows) {
+      summary.inspected++;
+      try {
+        const remote = client
+          ? await client.subscriptions.retrieve(row.dodoSubscriptionId)
+          : remoteById.get(row.dodoSubscriptionId);
+        if (!remote) throw new Error("missing test remote subscription");
+        const normalized = normalizeRemoteSubscription(remote);
+        const outcome = (await ctx.runMutation(internal.payments.billing.applyOnHoldRecovery, {
+          subscriptionId: row._id,
+          observedAt: now,
+          ...(normalized.kind === "supported"
+            ? {
+                remoteStatus: normalized.value.status,
+                remoteRaw: normalized.value.rawPayload,
+                remoteCurrentPeriodStart: normalized.value.currentPeriodStart,
+              }
+            : {}),
+        })) as "recovered" | "closed" | "checked" | "skipped";
+        if (outcome === "recovered") summary.recovered++;
+      } catch (err) {
+        summary.failed++;
+        // sentry-coverage-ok: structured console.error is forwarded by Convex
+        // auto-Sentry; one failed lookup must not stop the rest of the sweep.
+        console.error(
+          `[billing/on-hold-recovery] Failed to check dodoSubscriptionId=${row.dodoSubscriptionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await ctx.runMutation(internal.payments.billing.applyOnHoldRecovery, {
+          subscriptionId: row._id,
+          observedAt: now,
+        });
+      }
+    }
+    if (summary.inspected > 0) {
+      console.log(`[billing/on-hold-recovery] ${JSON.stringify(summary)}`);
+    }
+    return summary;
   },
 });
 
@@ -2573,6 +2879,7 @@ export const inspectCustomerOwnership = internalQuery({
 export const repairCustomerFromSubscriptionPayload = internalMutation({
   args: { userId: v.string() },
   handler: async (ctx, args) => {
+    if (await billingDeletionForUser(ctx, args.userId)) return null;
     const subs = await ctx.db
       .query("subscriptions")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
@@ -2700,6 +3007,7 @@ export const backfillMissingCustomers = internalMutation({
     const summary = {
       usersInspected: userIds.size,
       alreadyHadCustomer: 0,
+      skippedDeleted: 0,
       repaired: 0,
       couldNotRepair: 0,
       // userIds that need manual support touch — rawPayload didn't carry
@@ -2708,6 +3016,10 @@ export const backfillMissingCustomers = internalMutation({
     };
 
     for (const userId of userIds) {
+      if (await billingDeletionForUser(ctx, userId)) {
+        summary.skippedDeleted++;
+        continue;
+      }
       const existing = await ctx.db
         .query("customers")
         .withIndex("by_userId", (q) => q.eq("userId", userId))
@@ -2873,12 +3185,12 @@ function isCancelledProBeforeProBusinessUpgrade(
 /**
  * Internal query used by checkout creation to prevent duplicate subscriptions.
  *
- * Blocks new checkout sessions when the user already has an active/on_hold
+ * Blocks new checkout sessions when the user already has an active
  * subscription in the same billing family (see checkoutBillingFamily —
  * api_starter and api_business count as one family, as do pro and
- * pro_business), or a cancelled subscription that still has time remaining in
- * the current billing period — except for the cancelled-Pro → Pro Business
- * upgrade carve-out (isCancelledProBeforeProBusinessUpgrade).
+ * pro_business), or an on_hold/cancelled subscription that still has time
+ * remaining in the current billing period — except for the cancelled-Pro →
+ * Pro Business upgrade carve-out (isCancelledProBeforeProBusinessUpgrade).
  * This is an app-side guard only; Dodo's "Allow Multiple Subscriptions"
  * setting is still the provider-side backstop for races before webhook
  * ingestion updates Convex.
@@ -2914,8 +3226,12 @@ export const getCheckoutBlockingSubscription = internalQuery({
             targetCatalogEntry.tierGroup,
           )
         ) return false;
-        if (sub.status === "active" || sub.status === "on_hold") return true;
-        return sub.status === "cancelled" && sub.currentPeriodEnd > now;
+        // An on_hold row blocks for its whole retry window: Dodo may still
+        // charge it, and a second subscription would bill twice. A cancelled
+        // row will never charge again, so it blocks only while it still
+        // grants access (a cancel during a failed-renewal hold ends at the
+        // hold's grace, not the unpaid period end).
+        return sub.status === "cancelled" ? hasAccessAt(sub, now) : isCoveringAt(sub, now);
       })
       .sort((a, b) => {
         const pa = getSubscriptionStatusPriority(a.status);
@@ -2958,7 +3274,6 @@ export const STUCK_PAYMENT_RECONCILIATION_BATCH_SIZE = 25;
 export const STUCK_PAYMENT_CUSTOMER_EMAIL_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_STUCK_PAYMENT_RECONCILIATION_BATCH_SIZE = 100;
 const MAX_STUCK_PAYMENT_RECONCILIATION_SCAN_ROWS = 500;
-const RESEND_EMAILS_URL = "https://api.resend.com/emails";
 const STUCK_PAYMENT_EMAIL_FROM = "World Monitor <noreply@worldmonitor.app>";
 const STUCK_PAYMENT_SUPPORT_EMAIL = "support@worldmonitor.app";
 // Bound the Resend POST so a hung socket can't stall the batch (a known repo
@@ -3037,12 +3352,19 @@ function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+/** The stuck-checkout customer email body. Exported for tests. */
+export function stuckPaymentEmailHtml(args: { planName: string; checkoutUrl: string; supportEmail: string }): string {
+  const support = escapeEmailHtml(args.supportEmail);
+  return emailFrame({
+    preheader: "Your payment is still waiting for bank or card verification.",
+    kicker: "Billing",
+    accent: EMAIL_AMBER,
+    bodyHtml: `${emailHeading("Your World Monitor checkout still needs action")}
+      ${emailCard(emailParagraph(`Your <strong style="color: #fff;">${escapeEmailHtml(args.planName)}</strong> payment is still waiting for bank or card verification. You can safely continue checkout from the button below.`), { color: EMAIL_AMBER })}
+      ${emailButton(args.checkoutUrl, "Continue checkout", EMAIL_AMBER)}
+      ${emailNote(`If you already completed payment, you can ignore this email or contact <a href="mailto:${support}" style="color: ${EMAIL_AMBER};">${support}</a>.`)}`,
+    footerNote: "You're receiving this because a World Monitor checkout was started with this address.",
+  });
 }
 
 function extractDodoPaymentStatus(payment: unknown): string | null {
@@ -3060,6 +3382,7 @@ async function retrieveDodoPayment(dodoPaymentId: string): Promise<unknown> {
 }
 
 async function sendStuckPaymentEmail(
+  ctx: Pick<ActionCtx, "runQuery">,
   payment: DodoPaymentLookup,
   planKey: string | undefined,
 ): Promise<"customer_notified" | "ops_notified"> {
@@ -3074,37 +3397,32 @@ async function sendStuckPaymentEmail(
   }
 
   const planName = planKey ? PRODUCT_CATALOG[planKey]?.displayName ?? "World Monitor" : "World Monitor";
-  const safePlanName = escapeHtml(planName);
-  const safeCheckoutUrl = escapeHtml(checkoutUrl);
-  const safeSupportEmail = escapeHtml(STUCK_PAYMENT_SUPPORT_EMAIL);
-  const html = `
-    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111; line-height: 1.5;">
-      <h1 style="font-size: 20px;">Your World Monitor checkout still needs action</h1>
-      <p>Your ${safePlanName} payment is still waiting for bank or card verification.</p>
-      <p>You can safely continue checkout here:</p>
-      <p><a href="${safeCheckoutUrl}" style="display: inline-block; background: #111; color: #fff; padding: 10px 14px; text-decoration: none;">Continue checkout</a></p>
-      <p>If you already completed payment, you can ignore this email or contact <a href="mailto:${safeSupportEmail}">${safeSupportEmail}</a>.</p>
-    </div>`;
+  const html = stuckPaymentEmailHtml({ planName, checkoutUrl, supportEmail: STUCK_PAYMENT_SUPPORT_EMAIL });
 
-  const res = await fetch(RESEND_EMAILS_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
+  // Shared helper: checks local suppression (this sender used to skip it)
+  // and keeps reply_to on support@.
+  let result;
+  try {
+    result = await sendResendEmail(ctx, {
+      apiKey,
       from: STUCK_PAYMENT_EMAIL_FROM,
-      to: [email],
+      to: email,
       subject: "Complete your World Monitor checkout",
       html,
-      reply_to: STUCK_PAYMENT_SUPPORT_EMAIL,
-    }),
-    signal: AbortSignal.timeout(STUCK_PAYMENT_RESEND_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
+      replyTo: STUCK_PAYMENT_SUPPORT_EMAIL,
+      purpose: "transactional",
+      timeoutMs: STUCK_PAYMENT_RESEND_TIMEOUT_MS,
+    });
+  } catch (err) {
+    // Network errors propagate (the caller counts them as emailFailed);
+    // a non-2xx response falls back to the ops path, as before.
+    if (!(err instanceof ResendSendError)) throw err;
     // Log the status only — the response body can echo the recipient email.
-    console.warn(`[billing/reconciliation] Resend stuck-payment email failed with HTTP ${res.status}.`);
+    console.warn(`[billing/reconciliation] Resend stuck-payment email failed with HTTP ${err.status}.`);
+    return "ops_notified";
+  }
+  if (!result.sent) {
+    console.log("[billing/reconciliation] Stuck-payment customer email skipped: recipient is suppressed.");
     return "ops_notified";
   }
 
@@ -3332,10 +3650,15 @@ export const claimStuckPaymentReconciliation = internalMutation({
       return { action: "already_terminal" as const };
     }
 
+    const deletion = await billingDeletionForUser(ctx, args.userId);
+    const retainedUserId = deletion ? tombstoneUserId(deletion.userIdHash) : args.userId;
+    if (deletion && !isTerminalPaymentStatus(args.observedStatus)) {
+      return { action: "account_deleted" as const };
+    }
     const now = Date.now();
     if (isTerminalPaymentStatus(args.observedStatus)) {
       await ctx.db.insert("paymentEvents", {
-        userId: args.userId,
+        userId: retainedUserId,
         dodoPaymentId: args.dodoPaymentId,
         type: "charge",
         amount: args.amount,
@@ -3343,12 +3666,12 @@ export const claimStuckPaymentReconciliation = internalMutation({
         status: args.observedStatus,
         dodoSubscriptionId: args.dodoSubscriptionId,
         planKey: args.planKey,
-        rawPayload: args.rawPayload,
+        rawPayload: deletion ? redactBillingPayload(args.rawPayload) : args.rawPayload,
         occurredAt: now,
       });
       await ctx.db.insert("paymentReconciliationAttempts", {
         dodoPaymentId: args.dodoPaymentId,
-        userId: args.userId,
+        userId: retainedUserId,
         planKey: args.planKey,
         action: "terminal_reconciled",
         observedStatus: args.observedStatus,
@@ -3362,7 +3685,7 @@ export const claimStuckPaymentReconciliation = internalMutation({
       // never-activated sub (#4794's renewal reconciler only scans active
       // rows). Silently closing the case here would bury it. Page ops when a
       // succeeded charge has a subscription id but no subscription row at all.
-      if (args.observedStatus === "succeeded" && args.dodoSubscriptionId) {
+      if (!deletion && args.observedStatus === "succeeded" && args.dodoSubscriptionId) {
         const sub = await ctx.db
           .query("subscriptions")
           .withIndex("by_dodoSubscriptionId", (q) =>
@@ -3387,7 +3710,7 @@ export const claimStuckPaymentReconciliation = internalMutation({
     // would be a false alarm.
     await ctx.db.insert("paymentReconciliationAttempts", {
       dodoPaymentId: args.dodoPaymentId,
-      userId: args.userId,
+      userId: retainedUserId,
       planKey: args.planKey,
       action: "ops_notified",
       observedStatus: args.observedStatus,
@@ -3608,7 +3931,7 @@ export const reconcileStuckPendingPayments = internalAction({
       // Phase — send the customer "continue checkout" email.
       let emailResult: "customer_notified" | "ops_notified";
       try {
-        emailResult = await sendStuckPaymentEmail(dodoPayment, candidate.planKey);
+        emailResult = await sendStuckPaymentEmail(ctx, dodoPayment, candidate.planKey);
       } catch (err) {
         // sentry-coverage-ok: reportFailure schedules a throwing mutation. The
         // claimed ops_notified marker stands, so the next run won't re-email.
@@ -3682,6 +4005,532 @@ export const internalGetCustomerPortalUrl = internalAction({
 });
 
 // ---------------------------------------------------------------------------
+// Pro → Pro Business in-place upgrade
+// ---------------------------------------------------------------------------
+
+/**
+ * Same-period targets for the one upgrade the customer portal cannot do. Pro
+ * and Pro Business are separate Dodo products (not an updatable collection),
+ * so the portal shows no plan change; the Dodo change-plan API moves the
+ * existing subscription to the other product with a prorated charge instead.
+ * The billing period is kept so the renewal cadence the customer chose holds.
+ */
+export const PRO_BUSINESS_UPGRADE_TARGETS: Readonly<Record<string, string>> = {
+  pro_monthly: "pro_business_monthly",
+  pro_annual: "pro_business_annual",
+};
+
+export type ProBusinessUpgradeRefusal =
+  | "NO_UPGRADEABLE_PRO"
+  | "ALREADY_PRO_BUSINESS"
+  | "PRO_CANCEL_SCHEDULED"
+  | "ACCOUNT_DELETION_IN_PROGRESS";
+
+export type ProBusinessUpgradeCandidate =
+  | {
+      ok: true;
+      dodoSubscriptionId: string;
+      fromPlanKey: string;
+      toPlanKey: string;
+      fromProductId: string;
+      toProductId: string;
+    }
+  | { ok: false; reason: ProBusinessUpgradeRefusal };
+
+/**
+ * Pure selection over the user's subscription rows, exported for tests.
+ * Only an ACTIVE, non-cancelling Pro qualifies: a cancelled Pro already has
+ * the checkout carve-out (isCancelledProBeforeProBusinessUpgrade), on_hold
+ * means the last charge failed, and a scheduled cancellation would end the
+ * upgraded plan at period end, which is not what an upgrade buyer expects.
+ */
+export function selectProBusinessUpgradeCandidate(
+  subs: ReadonlyArray<Pick<Doc<"subscriptions">, "planKey" | "status" | "currentPeriodEnd" | "dodoSubscriptionId" | "dodoProductId" | "rawPayload">>,
+  now: number,
+): ProBusinessUpgradeCandidate {
+  const covering = subs.filter((sub) => isCoveringAt(sub, now));
+  if (covering.some((sub) => PRODUCT_CATALOG[sub.planKey]?.tierGroup === "pro_business")) {
+    return { ok: false, reason: "ALREADY_PRO_BUSINESS" };
+  }
+  const activePro = covering.filter(
+    (sub) => sub.status === "active" && PRO_BUSINESS_UPGRADE_TARGETS[sub.planKey] !== undefined,
+  );
+  const upgradeable = activePro.find((sub) => !isCancellationScheduled(sub));
+  if (!upgradeable) {
+    return { ok: false, reason: activePro.length > 0 ? "PRO_CANCEL_SCHEDULED" : "NO_UPGRADEABLE_PRO" };
+  }
+  const toPlanKey = PRO_BUSINESS_UPGRADE_TARGETS[upgradeable.planKey]!;
+  const target = PRODUCT_CATALOG[toPlanKey];
+  if (!target || !target.currentForCheckout || !target.dodoProductId) {
+    return { ok: false, reason: "NO_UPGRADEABLE_PRO" };
+  }
+  return {
+    ok: true,
+    dodoSubscriptionId: upgradeable.dodoSubscriptionId,
+    fromPlanKey: upgradeable.planKey,
+    toPlanKey,
+    fromProductId: upgradeable.dodoProductId,
+    toProductId: target.dodoProductId,
+  };
+}
+
+export const getProBusinessUpgradeCandidate = internalQuery({
+  args: { userId: v.string() },
+  handler: async (ctx, args): Promise<ProBusinessUpgradeCandidate> => {
+    if (await isAccountDeleting(ctx, args.userId)) {
+      return { ok: false, reason: "ACCOUNT_DELETION_IN_PROGRESS" };
+    }
+    const subs = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(50);
+    return selectProBusinessUpgradeCandidate(subs, Date.now());
+  },
+});
+
+export type ProBusinessUpgradeResult =
+  | {
+      kind: "preview";
+      fromPlanKey: string;
+      toPlanKey: string;
+      /** Amount charged now, lowest currency unit, tax included when Dodo reports it. */
+      chargeAmount: number;
+      currency: string;
+      /** Recurring price of the new plan before tax, lowest unit of renewalCurrency. */
+      renewalAmount: number | null;
+      /** Dodo bills the charge in the customer's currency but the plan in its own. */
+      renewalCurrency: string | null;
+      /** First renewal on the new plan, ISO 8601. The change restarts the billing period. */
+      renewalDate: string | null;
+      billingPeriod: "monthly" | "annual";
+    }
+  | { kind: "upgraded"; fromPlanKey: string; toPlanKey: string };
+
+/** Charged now; the change restarts the billing period on the upgrade day. A failed charge keeps the Pro plan. */
+const PRO_BUSINESS_CHANGE_PARAMS = {
+  quantity: 1,
+  proration_billing_mode: "prorated_immediately",
+  effective_at: "immediately",
+  on_payment_failure: "prevent_change",
+} as const;
+
+const PRO_BUSINESS_UPGRADE_TIMEOUT_MS = 15_000;
+/** Longer than retrieve + changePlan at their timeouts, so a live claim is never stolen. */
+export const PRO_BUSINESS_UPGRADE_CLAIM_TTL_MS = 120_000;
+
+const PRO_BUSINESS_UPGRADE_ADMISSION_LIMIT = 10;
+const PRO_BUSINESS_UPGRADE_ADMISSION_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Per-account fixed window over previews and confirms, shared by the dashboard
+ * action and the /pro relay. Every admitted call reaches the Dodo API.
+ */
+export const admitProBusinessUpgrade = internalMutation({
+  args: { userId: v.string(), now: v.number() },
+  handler: async (ctx, { userId, now }): Promise<boolean> => {
+    // The candidate check runs in another transaction; deletion can start in
+    // between, and this row must not be recreated after its cleanup batch.
+    if (await isAccountDeleting(ctx, userId)) {
+      throw new ConvexError({ kind: "ACCOUNT_DELETION_IN_PROGRESS" });
+    }
+    const row = await ctx.db
+      .query("proBusinessUpgradeAdmissions")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .unique();
+    if (row && now < row.windowStart + PRO_BUSINESS_UPGRADE_ADMISSION_WINDOW_MS) {
+      if (row.count >= PRO_BUSINESS_UPGRADE_ADMISSION_LIMIT) return false;
+      await ctx.db.patch(row._id, { count: row.count + 1 });
+    } else if (row) {
+      await ctx.db.patch(row._id, { windowStart: now, count: 1 });
+    } else {
+      await ctx.db.insert("proBusinessUpgradeAdmissions", { userId, windowStart: now, count: 1 });
+    }
+    return true;
+  },
+});
+
+/** Serializes confirms per subscription. Returns false while another confirm holds a live claim. */
+export const claimProBusinessUpgrade = internalMutation({
+  args: { dodoSubscriptionId: v.string(), now: v.number() },
+  handler: async (ctx, args): Promise<boolean> => {
+    const existing = await ctx.db
+      .query("proBusinessUpgradeClaims")
+      .withIndex("by_dodoSubscriptionId", (q) => q.eq("dodoSubscriptionId", args.dodoSubscriptionId))
+      .first();
+    if (existing && args.now - existing.claimedAt < PRO_BUSINESS_UPGRADE_CLAIM_TTL_MS) {
+      return false;
+    }
+    if (existing) {
+      await ctx.db.patch(existing._id, { claimedAt: args.now });
+    } else {
+      await ctx.db.insert("proBusinessUpgradeClaims", {
+        dodoSubscriptionId: args.dodoSubscriptionId,
+        claimedAt: args.now,
+      });
+    }
+    return true;
+  },
+});
+
+/** Drops the claim after a failed change so the user can retry at once. */
+export const releaseProBusinessUpgrade = internalMutation({
+  args: { dodoSubscriptionId: v.string() },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("proBusinessUpgradeClaims")
+      .withIndex("by_dodoSubscriptionId", (q) => q.eq("dodoSubscriptionId", args.dodoSubscriptionId))
+      .first();
+    if (existing) await ctx.db.delete(existing._id);
+  },
+});
+
+/**
+ * Preview (confirm=false) or apply (confirm=true) the upgrade. Entitlements
+ * follow from Dodo's `subscription.plan_changed` webhook, which patches the
+ * row's planKey and recomputes the entitlement (handleSubscriptionPlanChanged),
+ * so this action never writes billing state itself.
+ */
+export async function runProBusinessUpgrade(
+  ctx: Pick<ActionCtx, "runQuery" | "runMutation">,
+  userId: string,
+  confirm: boolean,
+): Promise<ProBusinessUpgradeResult> {
+  const candidate = await ctx.runQuery(
+    internal.payments.billing.getProBusinessUpgradeCandidate,
+    { userId },
+  );
+  if (!candidate.ok) {
+    throw new ConvexError({ kind: candidate.reason });
+  }
+  const admitted = await ctx.runMutation(internal.payments.billing.admitProBusinessUpgrade, {
+    userId,
+    now: Date.now(),
+  });
+  if (!admitted) {
+    throw new ConvexError({ kind: "UPGRADE_RATE_LIMITED" });
+  }
+
+  const client = getDodoClient({ timeout: PRO_BUSINESS_UPGRADE_TIMEOUT_MS, maxRetries: 0 });
+  const params = { product_id: candidate.toProductId, ...PRO_BUSINESS_CHANGE_PARAMS };
+
+  if (!confirm) {
+    try {
+      const preview = await client.subscriptions.previewChangePlan(candidate.dodoSubscriptionId, params);
+      const summary = preview.immediate_charge.summary;
+      return {
+        kind: "preview",
+        fromPlanKey: candidate.fromPlanKey,
+        toPlanKey: candidate.toPlanKey,
+        chargeAmount: summary.total_amount,
+        currency: String(summary.currency),
+        renewalAmount: typeof preview.new_plan?.recurring_pre_tax_amount === "number"
+          ? preview.new_plan.recurring_pre_tax_amount
+          : null,
+        renewalCurrency: preview.new_plan?.currency ? String(preview.new_plan.currency) : null,
+        renewalDate: typeof preview.new_plan?.next_billing_date === "string"
+          ? preview.new_plan.next_billing_date
+          : null,
+        billingPeriod: PRODUCT_CATALOG[candidate.toPlanKey]?.billingPeriod === "annual" ? "annual" : "monthly",
+      };
+    } catch (err) {
+      console.error(
+        `[billing] Dodo change-plan preview failed for subscription ${candidate.dodoSubscriptionId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      throw new ConvexError({ kind: "DODO_PLAN_CHANGE_ERROR" });
+    }
+  }
+
+  const claimed = await ctx.runMutation(internal.payments.billing.claimProBusinessUpgrade, {
+    dodoSubscriptionId: candidate.dodoSubscriptionId,
+    now: Date.now(),
+  });
+  if (!claimed) {
+    // Another confirm for this subscription is between retrieve and changePlan.
+    throw new ConvexError({ kind: "UPGRADE_IN_PROGRESS" });
+  }
+
+  let changePlanSent = false;
+  try {
+    // A confirm that arrives after an earlier one finished, but before the
+    // webhook lands, sees the target product here and skips the change.
+    const remote = await client.subscriptions.retrieve(candidate.dodoSubscriptionId);
+    if (remote.product_id === candidate.toProductId) {
+      return { kind: "upgraded", fromPlanKey: candidate.fromPlanKey, toPlanKey: candidate.toPlanKey };
+    }
+    // The quote was for the Pro product this row held; a provider-side change
+    // since then (portal, support) means the previewed charge no longer holds.
+    if (remote.product_id !== candidate.fromProductId) {
+      throw new Error(`subscription product changed since preview: ${remote.product_id}`);
+    }
+    changePlanSent = true;
+    await client.subscriptions.changePlan(candidate.dodoSubscriptionId, params);
+  } catch (err) {
+    // The claim stays on success so a repeat within the TTL cannot re-charge.
+    // It is released only when the change definitely did not happen: the call
+    // never went out, or Dodo refused it with a 4xx. A 5xx, a timeout or a
+    // dropped connection after sending may still be applying the change, so
+    // the claim holds until its TTL and a retry cannot send a second one.
+    const status = (err as { status?: unknown } | null)?.status;
+    const providerRefused = typeof status === "number" && status >= 400 && status < 500;
+    if (!changePlanSent || providerRefused) {
+      await ctx.runMutation(internal.payments.billing.releaseProBusinessUpgrade, {
+        dodoSubscriptionId: candidate.dodoSubscriptionId,
+      });
+    }
+    console.error(
+      `[billing] Dodo change-plan failed for subscription ${candidate.dodoSubscriptionId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    throw new ConvexError({ kind: "DODO_PLAN_CHANGE_ERROR" });
+  }
+  console.log(JSON.stringify({
+    event: "pro_business_upgrade_applied",
+    fromPlanKey: candidate.fromPlanKey,
+    toPlanKey: candidate.toPlanKey,
+  }));
+  return { kind: "upgraded", fromPlanKey: candidate.fromPlanKey, toPlanKey: candidate.toPlanKey };
+}
+
+/** Dashboard entry point. Auth-gated via requireUserId(ctx). */
+export const upgradeToProBusiness = action({
+  args: { confirm: v.boolean() },
+  handler: async (ctx, args): Promise<ProBusinessUpgradeResult> => {
+    const userId = await requireUserId(ctx);
+    return runProBusinessUpgrade(ctx, userId, args.confirm);
+  },
+});
+
+/** /pro entry point, reached through the edge relay after Clerk verification. */
+export const internalUpgradeToProBusiness = internalAction({
+  args: { userId: v.string(), confirm: v.boolean() },
+  handler: async (ctx, args): Promise<ProBusinessUpgradeResult> => {
+    if (!args.userId) {
+      throw new ConvexError({ kind: "USER_ID_REQUIRED" });
+    }
+    return runProBusinessUpgrade(ctx, args.userId, args.confirm);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Billing email repair
+// ---------------------------------------------------------------------------
+
+const BILLING_EMAIL_MAX_LENGTH = 254;
+// Shape only; Dodo and Resend judge deliverability. Catches what a checkout
+// typo looks like (whitespace, no domain) without rejecting unusual mailboxes.
+const BILLING_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Room to correct a typo, not to loop Dodo customer updates.
+const BILLING_EMAIL_UPDATE_COOLDOWN_MS = 10_000;
+
+/** Trimmed address, or a structured INVALID_EMAIL throw the client can show. */
+export function parseBillingEmail(raw: string): string {
+  const email = raw.trim();
+  if (
+    email.length === 0 ||
+    email.length > BILLING_EMAIL_MAX_LENGTH ||
+    !BILLING_EMAIL_PATTERN.test(email)
+  ) {
+    throw new ConvexError({ kind: "INVALID_EMAIL" });
+  }
+  return email;
+}
+
+function customerIdOfSubscription(sub: Doc<"subscriptions">): string | null {
+  if (typeof sub.dodoCustomerId === "string" && sub.dodoCustomerId.length > 0) {
+    return sub.dodoCustomerId;
+  }
+  const id = (sub.rawPayload as { customer?: { customer_id?: unknown } } | null)
+    ?.customer?.customer_id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * Every refusal the email change can hit before Dodo is touched, plus the
+ * distinct Dodo customers the user owns. Each candidate goes through the same
+ * exclusivity check as the portal: a customer another Clerk user is linked to
+ * must not have its address rewritten by this one. Ownership is settled
+ * before the suppression lookup so a caller with nothing to repair cannot
+ * use this as an oracle for which addresses are suppressed. A mutation so the
+ * per-user cooldown is claimed atomically: each attempt spends Dodo calls on
+ * the shared API key. An address already on file returns no customers, so
+ * the action skips Dodo entirely.
+ */
+export const claimBillingEmailUpdate = internalMutation({
+  args: { userId: v.string(), email: v.string() },
+  handler: async (ctx, args): Promise<{ customerIds: string[]; onFile?: string }> => {
+    if (await isAccountDeleting(ctx, args.userId)) {
+      throw new ConvexError({ kind: "ACCOUNT_DELETION_IN_PROGRESS" });
+    }
+
+    const subs = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(50);
+    const customers = await ctx.db
+      .query("customers")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(10);
+    const customerIds = new Set<string>();
+    for (const sub of subs) {
+      const id = customerIdOfSubscription(sub);
+      if (id) customerIds.add(id);
+    }
+    for (const customer of customers) {
+      if (customer.dodoCustomerId) customerIds.add(customer.dodoCustomerId);
+    }
+    if (customerIds.size === 0) {
+      throw new ConvexError({ kind: "NO_CUSTOMER" });
+    }
+    for (const customerId of customerIds) {
+      await requireExclusivePortalCustomer(ctx, args.userId, customerId);
+    }
+
+    const suppression = await findEmailSuppression(ctx, args.email);
+    // unsubscribe only withdraws broadcasts; billing mail still delivers there.
+    if (suppression && suppression.reason !== "unsubscribe") {
+      throw new ConvexError({ kind: "EMAIL_SUPPRESSED" });
+    }
+
+    const requested = args.email.toLowerCase();
+    const onFile = await Promise.all(subs.map((sub) => resolveBillingRecipient(ctx, sub)));
+    const unchanged =
+      customers.every((customer) => customer.email.trim().toLowerCase() === requested) &&
+      onFile.every((email) => email.toLowerCase() === requested);
+    if (unchanged) return { customerIds: [], onFile: onFile[0] || customers[0]?.email.trim() };
+
+    const now = Date.now();
+    const attempt = await ctx.db
+      .query("billingEmailUpdateAttempts")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .first();
+    if (attempt && now - attempt.attemptedAt < BILLING_EMAIL_UPDATE_COOLDOWN_MS) {
+      throw new ConvexError({ kind: "BILLING_EMAIL_RATE_LIMITED" });
+    }
+    if (attempt) await ctx.db.patch(attempt._id, { attemptedAt: now });
+    else await ctx.db.insert("billingEmailUpdateAttempts", { userId: args.userId, attemptedAt: now });
+    return { customerIds: [...customerIds] };
+  },
+});
+
+/**
+ * Local mirror of one Dodo customer's email as read back after the update:
+ * the user's customers rows for that customer and the subscriptions linked to
+ * it (plus, with `includeUnlinked`, subscriptions that name no customer), so
+ * the reactive query drops the bounce flag and dunning resolves the new
+ * address. A row whose recorded observation is at least as new is left alone,
+ * so two tabs applying out of order converge on the later read. The old
+ * address keeps its suppression row. Subscription `updatedAt` is left alone
+ * because it anchors the dunning episode; `billingEmailOverride` carries the
+ * repair past delayed webhooks instead.
+ */
+export const applyBillingEmailUpdate = internalMutation({
+  args: {
+    userId: v.string(),
+    customerId: v.string(),
+    email: v.string(),
+    observedAt: v.number(),
+    includeUnlinked: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
+    const customers = await ctx.db
+      .query("customers")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(10);
+    for (const customer of customers) {
+      if (customer.dodoCustomerId !== args.customerId || customer.updatedAt >= args.observedAt) continue;
+      await ctx.db.patch(customer._id, {
+        email: args.email,
+        normalizedEmail: args.email.toLowerCase(),
+        updatedAt: args.observedAt,
+      });
+    }
+    const subs = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(50);
+    for (const sub of subs) {
+      const linkedId = customerIdOfSubscription(sub);
+      const linked = linkedId === args.customerId || (linkedId === null && args.includeUnlinked);
+      if (!linked || (sub.billingEmailOverride?.observedAt ?? 0) >= args.observedAt) continue;
+      const payload = sub.rawPayload;
+      const customer = (payload as { customer?: unknown } | null)?.customer;
+      const priorCustomer = customer && typeof customer === "object" ? customer : {};
+      const patchablePayload = payload && typeof payload === "object" && !Array.isArray(payload);
+      await ctx.db.patch(sub._id, {
+        ...(patchablePayload
+          ? { rawPayload: { ...payload, customer: { ...priorCustomer, email: args.email } } }
+          : {}),
+        billingEmailOverride: { email: args.email, observedAt: args.observedAt },
+      });
+    }
+  },
+});
+
+/**
+ * Change the signed-in user's billing email at Dodo and locally. Dodo first:
+ * a local change without the provider would hide the bounce while Dodo's own
+ * receipts and dunning kept going to the dead address. Each customer is
+ * mirrored locally as soon as its update succeeds, with the address Dodo
+ * reads back (a concurrent change elsewhere may already have won there), so
+ * a later customer failing never discards what Dodo already changed.
+ */
+export const updateBillingEmail = action({
+  args: { email: v.string() },
+  handler: async (ctx, args): Promise<{ email: string }> => {
+    const userId = await requireUserId(ctx);
+    const email = parseBillingEmail(args.email);
+    const { customerIds, onFile } = await ctx.runMutation(
+      internal.payments.billing.claimBillingEmailUpdate,
+      { userId, email },
+    );
+    if (customerIds.length === 0) return { email: onFile ?? email };
+
+    const client = getDodoClient();
+    const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+    let appliedEmail: string | null = null;
+    let failures = 0;
+    for (const customerId of customerIds) {
+      try {
+        await client.customers.update(customerId, { email });
+      } catch (err) {
+        // sentry-coverage-ok: Convex auto-Sentry captures console.error; the
+        // action still throws DODO_CUSTOMER_UPDATE_ERROR after the loop.
+        console.error(`[billing/updateBillingEmail] Dodo customer update failed for ${customerId}: ${describe(err)}`);
+        failures += 1;
+        continue;
+      }
+      let held = email;
+      try {
+        const customer = await client.customers.retrieve(customerId);
+        if (typeof customer.email === "string" && customer.email.includes("@")) held = customer.email.trim();
+      } catch (err) {
+        // sentry-coverage-ok: Convex auto-Sentry captures console.error; the
+        // requested address is applied instead.
+        console.error(`[billing/updateBillingEmail] Dodo customer read-back failed for ${customerId}: ${describe(err)}`);
+      }
+      // Stamped after the read so the guard orders applies by what Dodo held.
+      const observedAt = Date.now();
+      await ctx.runMutation(internal.payments.billing.applyBillingEmailUpdate, {
+        userId,
+        customerId,
+        email: held,
+        observedAt,
+        includeUnlinked: appliedEmail === null,
+      });
+      appliedEmail ??= held;
+    }
+    if (failures > 0) {
+      // Structured so the browser gets a kind instead of the masked
+      // `[Request ID: X] Server Error`; the provider message stays in logs.
+      throw new ConvexError({ kind: "DODO_CUSTOMER_UPDATE_ERROR" });
+    }
+    return { email: appliedEmail ?? email };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Subscription claim (anon ID → authenticated user migration)
 // ---------------------------------------------------------------------------
 
@@ -3706,8 +4555,8 @@ export const claimSubscription = mutation({
   args: { anonId: v.string(), claimToken: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const realUserId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, realUserId);
 
-    // Validate anonId is a UUID v4 (format produced by crypto.randomUUID() in user-identity.ts).
     // Rejects injected Clerk IDs ("user_xxx") which are structurally distinct from UUID v4,
     // preventing cross-user subscription theft via localStorage injection.
     if (!ANON_ID_V4_REGEX.test(args.anonId) || args.anonId === realUserId) {
@@ -3719,18 +4568,20 @@ export const claimSubscription = mutation({
     }
 
     // Parallel reads for all anonId data — bounded to prevent runaway memory
-    const [subs, anonEntitlement, customers, payments] = await Promise.all([
+    const [subs, anonEntitlement, customers, payments, deletedCustomers] = await Promise.all([
       ctx.db.query("subscriptions").withIndex("by_userId", (q) => q.eq("userId", args.anonId)).take(50),
       ctx.db.query("entitlements").withIndex("by_userId", (q) => q.eq("userId", args.anonId)).first(),
       ctx.db.query("customers").withIndex("by_userId", (q) => q.eq("userId", args.anonId)).take(10),
       ctx.db.query("paymentEvents").withIndex("by_userId", (q) => q.eq("userId", args.anonId)).take(1000),
+      ctx.db.query("deletedSubscriptionCustomers").withIndex("by_userId", (q) => q.eq("userId", args.anonId)).collect(),
     ]);
 
     const hasClaimableRows =
       subs.length > 0 ||
       anonEntitlement !== null ||
       customers.length > 0 ||
-      payments.length > 0;
+      payments.length > 0 ||
+      deletedCustomers.length > 0;
     if (!hasClaimableRows) {
       return { claimed: { subscriptions: 0, entitlements: 0, customers: 0, payments: 0 } };
     }
@@ -3739,6 +4590,10 @@ export const claimSubscription = mutation({
       throw new ConvexError({ kind: "ANON_CLAIM_PROOF_REQUIRED" });
     }
 
+    // Transfer retained ownership only after the same proof used for live rows.
+    for (const deletedCustomer of deletedCustomers) {
+      await ctx.db.patch(deletedCustomer._id, { userId: realUserId });
+    }
     // Reassign subscriptions
     for (const sub of subs) {
       await ctx.db.patch(sub._id, { userId: realUserId });
@@ -3757,25 +4612,40 @@ export const claimSubscription = mutation({
       if (existingEntitlement) {
         const anonCompUntil = anonEntitlement.compUntil ?? 0;
         const existingCompUntil = existingEntitlement.compUntil ?? 0;
-        if (anonCompUntil > existingCompUntil && anonCompUntil > recomputeTimestamp) {
+        const anonCompActive = anonCompUntil > recomputeTimestamp;
+        const existingCompActive = existingCompUntil > recomputeTimestamp;
+        if (anonCompActive && existingCompActive
+          && Boolean(anonEntitlement.compPlanKey) !== Boolean(existingEntitlement.compPlanKey)) {
+          throw new ConvexError({ kind: "LEGACY_COMP_SOURCE_REQUIRES_AUDIT" });
+        }
+        if (anonEntitlement.compPlanKey && anonCompUntil > recomputeTimestamp) {
+          const existingCompIsStronger = existingEntitlement.compPlanKey
+            && existingCompUntil > recomputeTimestamp
+            && compareEntitlementPlans(
+              { planKey: existingEntitlement.compPlanKey, validUntil: existingCompUntil },
+              { planKey: anonEntitlement.compPlanKey, validUntil: anonCompUntil },
+            ) >= 0;
+          await ctx.db.patch(existingEntitlement._id, {
+            compPlanKey: existingCompIsStronger
+              ? existingEntitlement.compPlanKey
+              : anonEntitlement.compPlanKey,
+            compUntil: Math.max(existingCompUntil, anonCompUntil),
+          });
+        } else if (anonCompUntil > existingCompUntil && anonCompUntil > recomputeTimestamp) {
           const realSubscriptions = await ctx.db
             .query("subscriptions")
             .withIndex("by_userId", (q) => q.eq("userId", realUserId))
             .collect();
           let bestCoveringSubscription: (typeof realSubscriptions)[number] | null = null;
           for (const candidate of realSubscriptions) {
-            const covers =
-              candidate.status === "active" ||
-              candidate.status === "on_hold" ||
-              (candidate.status === "cancelled" && candidate.currentPeriodEnd > recomputeTimestamp);
-            if (!covers) continue;
+            if (!hasAccessAt(candidate, recomputeTimestamp)) continue;
             if (
               bestCoveringSubscription === null ||
               compareEntitlementPlans(
-                { planKey: candidate.planKey, validUntil: candidate.currentPeriodEnd },
+                { planKey: candidate.planKey, validUntil: accessEndAt(candidate) },
                 {
                   planKey: bestCoveringSubscription.planKey,
-                  validUntil: bestCoveringSubscription.currentPeriodEnd,
+                  validUntil: accessEndAt(bestCoveringSubscription),
                 },
               ) > 0
             ) {
@@ -3785,7 +4655,7 @@ export const claimSubscription = mutation({
           const strongestCurrentCoverage = bestCoveringSubscription
             ? {
                 planKey: bestCoveringSubscription.planKey,
-                validUntil: bestCoveringSubscription.currentPeriodEnd,
+                validUntil: accessEndAt(bestCoveringSubscription),
               }
             : existingEntitlement.validUntil > recomputeTimestamp
               ? { planKey: existingEntitlement.planKey, validUntil: existingEntitlement.validUntil }
@@ -3796,15 +4666,17 @@ export const claimSubscription = mutation({
               { planKey: anonEntitlement.planKey, validUntil: anonEntitlement.validUntil },
               strongestCurrentCoverage,
             ) >= 0;
-          if (anonCompOutranksCurrentCoverage) {
-            await ctx.db.patch(existingEntitlement._id, {
-              planKey: anonEntitlement.planKey,
-              features: anonEntitlement.features,
-              validUntil: Math.max(existingEntitlement.validUntil, anonEntitlement.validUntil),
-              compUntil: anonCompUntil,
-              updatedAt: recomputeTimestamp,
-            });
+          if (!anonCompOutranksCurrentCoverage) {
+            throw new ConvexError({ kind: "LEGACY_COMP_SOURCE_REQUIRES_AUDIT" });
           }
+          await ctx.db.patch(existingEntitlement._id, {
+            planKey: anonEntitlement.planKey,
+            features: anonEntitlement.features,
+            validUntil: Math.max(existingEntitlement.validUntil, anonEntitlement.validUntil),
+            compUntil: anonCompUntil,
+            compPlanKey: undefined,
+            updatedAt: recomputeTimestamp,
+          });
         }
         await ctx.db.delete(anonEntitlement._id);
       } else {
@@ -3824,6 +4696,16 @@ export const claimSubscription = mutation({
     // (already fetched above in the parallel Promise.all)
     for (const payment of payments) {
       await ctx.db.patch(payment._id, { userId: realUserId });
+    }
+
+    // Funnel rows follow the buyer so account deletion (by_user) finds them;
+    // `anonymous` stays true because it records how the checkout started.
+    const checkoutSessions = await ctx.db
+      .query("checkoutSessionEvents")
+      .withIndex("by_user", (q) => q.eq("userId", args.anonId))
+      .take(100);
+    for (const session of checkoutSessions) {
+      await ctx.db.patch(session._id, { userId: realUserId });
     }
 
     await recomputeEntitlementFromAllSubs(ctx, realUserId, recomputeTimestamp);
@@ -3875,11 +4757,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * Grants a complimentary entitlement to a user.
  *
- * Extends both validUntil and compUntil to max(existing, now + days). Never
- * shrinks — calling twice with small durations won't accidentally shorten an
- * existing longer comp. compUntil is an independent floor that
- * handleSubscriptionExpired honours, so Dodo cancellations/expirations don't
- * wipe the comp before it runs out.
+ * Records the goodwill source independently of the effective paid plan.
+ * Repeated grants retain the stronger comp plan and longest comp duration.
+ * Paid coverage is recomputed so a lower goodwill grant cannot downgrade it.
  *
  * Typical usage (CLI):
  *   npx convex run 'payments/billing:grantComplimentaryEntitlement' \
@@ -3893,6 +4773,7 @@ export const grantComplimentaryEntitlement = internalMutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
     if (args.days <= 0 || !Number.isFinite(args.days)) {
       throw new Error(`grantComplimentaryEntitlement: days must be a positive finite number, got ${args.days}`);
     }
@@ -3908,15 +4789,23 @@ export const grantComplimentaryEntitlement = internalMutation({
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .first();
     const features = getFeaturesForPlan(args.planKey);
-    const validUntil = Math.max(existing?.validUntil ?? 0, until);
-    const compUntil = Math.max(existing?.compUntil ?? 0, until);
+    const existingCompUntil = existing?.compUntil ?? 0;
+    if (existingCompUntil > now && !existing?.compPlanKey) {
+      throw new ConvexError({ kind: "LEGACY_COMP_SOURCE_REQUIRES_AUDIT" });
+    }
+    const compUntil = Math.max(existingCompUntil, until);
+    const compPlanKey = existing?.compPlanKey && existingCompUntil > now
+      && compareEntitlementPlans(
+        { planKey: existing.compPlanKey, validUntil: existingCompUntil },
+        { planKey: args.planKey, validUntil: until },
+      ) > 0
+      ? existing.compPlanKey
+      : args.planKey;
 
     if (existing) {
       await ctx.db.patch(existing._id, {
-        planKey: args.planKey,
-        features,
-        validUntil,
         compUntil,
+        compPlanKey,
         updatedAt: now,
       });
     } else {
@@ -3924,33 +4813,232 @@ export const grantComplimentaryEntitlement = internalMutation({
         userId: args.userId,
         planKey: args.planKey,
         features,
-        validUntil,
+        validUntil: until,
         compUntil,
+        compPlanKey,
         updatedAt: now,
       });
     }
 
-    // Company Monitoring is provisioned on first use, not from entitlement
-    // writes (#6256).
+    await recomputeEntitlementFromAllSubs(ctx, args.userId, now);
+    const effective = await ctx.db.query("entitlements")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId)).first();
 
     console.log(
-      `[billing] grantComplimentaryEntitlement userId=${args.userId} planKey=${args.planKey} days=${args.days} validUntil=${new Date(validUntil).toISOString()}${args.reason ? ` reason="${args.reason}"` : ""}`,
+      `[billing] grantComplimentaryEntitlement userId=${args.userId} compPlanKey=${compPlanKey} effectivePlanKey=${effective!.planKey} days=${args.days} validUntil=${new Date(effective!.validUntil).toISOString()}${args.reason ? ` reason="${args.reason}"` : ""}`,
     );
 
-    // Sync Redis cache so edge gateway sees the comp without waiting for TTL.
-    if (process.env.UPSTASH_REDIS_REST_URL) {
+    return {
+      userId: args.userId,
+      planKey: effective!.planKey,
+      validUntil: effective!.validUntil,
+      compUntil,
+    };
+  },
+});
+
+/**
+ * Removes a user's complimentary grant now and recomputes from the remaining
+ * sources (subscriptions, Business grants, Enterprise contract membership).
+ * Used when a comp holder moves onto a contract account
+ * (docs/internal/enterprise-accounts.md). Also clears a legacy comp with no
+ * recorded plan, which otherwise freezes recompute.
+ *
+ *   npx convex run 'payments/billing:revokeComplimentaryEntitlement' \
+ *     '{"userId":"user_XXX","reason":"moved to contract account"}'
+ */
+export const revokeComplimentaryEntitlement = internalMutation({
+  args: { userId: v.string(), reason: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    await assertAccountWritable(ctx, args.userId);
+    const existing = await ctx.db
+      .query("entitlements")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!existing || (existing.compUntil === undefined && existing.compPlanKey === undefined)) {
+      return { userId: args.userId, revoked: false as const };
+    }
+    const now = Date.now();
+    await ctx.db.patch(existing._id, { compUntil: undefined, compPlanKey: undefined, updatedAt: now });
+    await recomputeEntitlementFromAllSubs(ctx, args.userId, now);
+    const effective = await ctx.db.query("entitlements")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId)).first();
+    console.log(
+      `[billing] revokeComplimentaryEntitlement userId=${args.userId} effectivePlanKey=${effective!.planKey} validUntil=${new Date(effective!.validUntil).toISOString()}${args.reason ? ` reason="${args.reason}"` : ""}`,
+    );
+    return {
+      userId: args.userId,
+      revoked: true as const,
+      planKey: effective!.planKey,
+      validUntil: effective!.validUntil,
+    };
+  },
+});
+
+/**
+ * Ends a subscription's paid coverage NOW, keeping the row as a `cancelled`
+ * churn record.
+ *
+ * Ops tool for the refund case. A Dodo refund does NOT revoke access: the
+ * `refund.succeeded` handler records the payment event and (only when the sub
+ * is still uncancelled) raises the ops alert in `classifyRefundAlert` —
+ * "entitlement remains active until manual cleanup" (subscriptionHelpers.ts).
+ * `subscription.cancelled` is also deliberately paid-through: entitlements
+ * stand until `currentPeriodEnd`. So a full refund of the CURRENT period
+ * leaves the customer holding a month of Pro they were paid back for, and a
+ * refund on an already-cancelled sub doesn't even alert. This mutation is that
+ * manual cleanup — it retires the coverage the refund reversed.
+ *
+ * Prefer this over `deleteSubscriptionByDodoId` for refunds: it preserves the
+ * churn record (winback scan, billing UI, revenue reporting) instead of
+ * erasing the subscription. Reach for the delete only when the row's eventual
+ * `subscription.expired` webhook would clobber a DIFFERENT active entitlement.
+ *
+ * REQUIRES the provider cancellation to have landed first: the row must
+ * already be `cancelled` or `expired`. A still-`active`/`on_hold` row is LIVE
+ * at Dodo, and a refund does not cancel it — ending coverage locally would
+ * diverge from the provider until the next `subscription.renewed` rebilled the
+ * customer AND restored the refunded entitlement (`handleSubscriptionRenewed`
+ * patches status and period back). The local status is a trustworthy
+ * precondition because only the Dodo webhook (`handleSubscriptionCancelled`)
+ * and `applyDodoSubscriptionReconciliation` (which reads live remote state)
+ * ever write it. Cancel in Dodo first, let the webhook land, then run this.
+ *
+ * Semantics:
+ *   - `currentPeriodEnd` moves to now, never forward (an already-lapsed sub
+ *     keeps its earlier end date — this can only take access away).
+ *   - `status` is left as-is: both permitted statuses are already terminal,
+ *     and regressing `expired` to `cancelled` would falsify the churn record.
+ *   - `cancelledAt` is stamped only if absent — the original cancellation
+ *     timestamp is history and is never overwritten by cleanup.
+ *   - `updatedAt` never moves backward. Provider payload timestamps drive it,
+ *     so clock skew can leave it ahead of Convex's clock; lowering it would
+ *     drop the `isNewerEvent` fence and let a delayed lifecycle webhook
+ *     clobber this cleanup.
+ *   - A complimentary floor (`compUntil`) still wins: `recomputeEntitlement-
+ *     FromAllSubs` preserves goodwill grants, so the returned
+ *     `entitlementAfter` may legitimately still be paid. Check it.
+ *
+ * Typical usage (CLI):
+ *   npx convex run 'payments/billing:endSubscriptionCoverageNow' \
+ *     '{"dodoSubscriptionId":"sub_XXX","reason":"full refund ref_YYY"}'
+ */
+export const endSubscriptionCoverageNow = internalMutation({
+  args: {
+    dodoSubscriptionId: v.string(),
+    reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const sub = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_dodoSubscriptionId", (q) =>
+        q.eq("dodoSubscriptionId", args.dodoSubscriptionId),
+      )
+      .unique();
+    if (!sub) {
+      throw new Error(
+        `[billing] endSubscriptionCoverageNow: no subscription found with dodoSubscriptionId="${args.dodoSubscriptionId}"`,
+      );
+    }
+
+    // Provider cancellation is a hard precondition — see the header. An
+    // `active`/`on_hold` row is still live at Dodo, so ending coverage here
+    // would be silently undone (and the customer rebilled) by the next
+    // renewal. Refuse rather than write a local state the provider contradicts.
+    if (sub.status !== "cancelled" && sub.status !== "expired") {
+      throw new Error(
+        `[billing] endSubscriptionCoverageNow: subscription ${args.dodoSubscriptionId} is "${sub.status}" — still live at Dodo. ` +
+          `Cancel it in Dodo first and let the subscription.cancelled webhook land, then re-run.`,
+      );
+    }
+
+    const now = Date.now();
+    const before = {
+      status: sub.status,
+      currentPeriodEnd: sub.currentPeriodEnd,
+      cancelledAt: sub.cancelledAt ?? null,
+      updatedAt: sub.updatedAt,
+    };
+    // Only ever shortens. Math.min keeps a sub that already lapsed at its real
+    // end date so the churn record stays truthful.
+    const currentPeriodEnd = Math.min(sub.currentPeriodEnd, now);
+    // Both permitted statuses are already terminal, so cleanup never restates
+    // them — `expired` in particular must not regress to `cancelled`.
+    const status: SubscriptionStatus = sub.status;
+
+    await ctx.db.patch(sub._id, {
+      status,
+      currentPeriodEnd,
+      // Never lower the ordering fence (see header): a provider-stamped
+      // updatedAt can sit ahead of Convex's clock under skew.
+      updatedAt: Math.max(sub.updatedAt, now),
+      ...(status === "cancelled" ? { cancelledAt: sub.cancelledAt ?? now } : {}),
+      // The row can no longer be in the stale-active set, so the reconciler's
+      // backoff bookkeeping and the request-path renewal-verification lease are
+      // both meaningless — clear them exactly as the reconciliation path does
+      // when a row leaves that set. Leaving `renewalVerificationState` behind
+      // would make the billing UI show "verifying your renewal" forever (#4771).
+      lastReconcileAttemptAt: undefined,
+      reconcileFailureCount: undefined,
+      reconcileNotFoundCount: undefined,
+      renewalVerificationState: undefined,
+      renewalVerificationAttemptAt: undefined,
+    });
+
+    // Business seats: the sub no longer covers, so its invitee grants must die
+    // with it. Same shared grant-walk the cancelled/expired webhook handlers
+    // use — per-invitee error isolation and the "team access ended" email
+    // included — called inline so seat revocation commits atomically with the
+    // coverage end rather than in a second transaction that could fail alone.
+    const { revoked: revokedSeats, failed: failedSeats } =
+      await revokeBusinessProGrantsForSubscription(ctx, args.dodoSubscriptionId, now);
+
+    await recomputeEntitlementFromAllSubs(ctx, sub.userId, now);
+    const entitlementAfter = await ctx.db
+      .query("entitlements")
+      .withIndex("by_userId", (q) => q.eq("userId", sub.userId))
+      .first();
+
+    console.log(
+      `[billing] endSubscriptionCoverageNow userId=${sub.userId} dodoSubscriptionId=${args.dodoSubscriptionId} ` +
+        `planKey=${sub.planKey} status=${before.status}→${status} ` +
+        `currentPeriodEnd=${new Date(before.currentPeriodEnd).toISOString()}→${new Date(currentPeriodEnd).toISOString()} ` +
+        `revokedSeats=${revokedSeats} failedSeats=${failedSeats} ` +
+        `entitlementAfter=${entitlementAfter?.planKey ?? "none"} reason="${args.reason}"`,
+    );
+
+    // Sync the edge cache so access actually stops now instead of drifting for
+    // up to ENTITLEMENT_CACHE_TTL_SECONDS (900s) on a stale Redis entry.
+    if (process.env.UPSTASH_REDIS_REST_URL && entitlementAfter) {
       await ctx.scheduler.runAfter(
         0,
         internal.payments.cacheActions.syncEntitlementCache,
-        { userId: args.userId, planKey: args.planKey, features, validUntil },
+        {
+          userId: sub.userId,
+          planKey: entitlementAfter.planKey,
+          features: entitlementAfter.features,
+          validUntil: entitlementAfter.validUntil,
+        },
       );
     }
 
     return {
-      userId: args.userId,
-      planKey: args.planKey,
-      validUntil,
-      compUntil,
+      userId: sub.userId,
+      dodoSubscriptionId: args.dodoSubscriptionId,
+      planKey: sub.planKey,
+      before,
+      after: { status, currentPeriodEnd },
+      revokedSeats,
+      failedSeats,
+      entitlementAfter: entitlementAfter
+        ? {
+            planKey: entitlementAfter.planKey,
+            validUntil: entitlementAfter.validUntil,
+            ...(entitlementAfter.compUntil !== undefined
+              ? { compUntil: entitlementAfter.compUntil }
+              : {}),
+          }
+        : null,
     };
   },
 });
@@ -3968,7 +5056,9 @@ export const grantComplimentaryEntitlement = internalMutation({
  * Recomputes the entitlement from the user's remaining active subs after
  * deletion. If none remain, downgrades to free.
  *
- * The audit trail (paymentEvents, webhookEvents) is preserved.
+ * The audit trail (paymentEvents, webhookEvents) is preserved. Resolvable
+ * customer ownership is retained separately so cleanup cannot reopen a
+ * customer-wide portal previously blocked by this subscription's owner.
  *
  * Typical usage (CLI):
  *   npx convex run 'payments/billing:deleteSubscriptionByDodoId' \
@@ -3993,6 +5083,24 @@ export const deleteSubscriptionByDodoId = internalMutation({
     }
 
     const userId = sub.userId;
+    const rawCustomerId = (sub.rawPayload as { customer?: { customer_id?: unknown } } | null)
+      ?.customer?.customer_id;
+    const customerId = sub.dodoCustomerId ||
+      (typeof rawCustomerId === "string" ? rawCustomerId : "");
+    // A user's current customer mapping does not prove this subscription's
+    // customer: shared customer rows are reassigned by later webhooks. Preserve
+    // the subscription until its customer can be repaired from provider/audit evidence.
+    if (!customerId.trim()) {
+      throw new ConvexError({ kind: "CUSTOMER_PROVENANCE_REQUIRED" });
+    }
+    if (customerId) {
+      const retainedOwner = await ctx.db.query("deletedSubscriptionCustomers")
+        .withIndex("by_customer_user", (q) => q.eq("dodoCustomerId", customerId).eq("userId", userId))
+        .first();
+      if (!retainedOwner) {
+        await ctx.db.insert("deletedSubscriptionCustomers", { userId, dodoCustomerId: customerId });
+      }
+    }
     // Index prefix — deliberately unfiltered by cohort so deleting a
     // subscription reaps BOTH its day-0 and retro presentation rows.
     const presentations = await ctx.db

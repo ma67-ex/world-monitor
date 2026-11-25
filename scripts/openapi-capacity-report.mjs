@@ -93,7 +93,7 @@ export const TOP_N = 20;
  * 2.6 MB source YAML does not produce an empty document. The plausible failure
  * is a PARTIAL generation: a codegen or injector change that emits a handful of
  * operations, which would report a delighted 900 KB of headroom. The bundle has
- * grown monotonically through 193 -> 217 -> 218 operations; 100 is far below
+ * grown monotonically through 193 -> 217 -> 219 operations; 100 is far below
  * anything real and far above anything a broken generator would produce.
  */
 export const MIN_PLAUSIBLE_OPERATIONS = 100;
@@ -393,10 +393,31 @@ function transformEngagement(bundle) {
       ...bundle.schemaStats,
       engaged: engaged(bundle.schemaStats?.replacedRefs),
     },
+    sharedSchemaSubtrees: {
+      ...bundle.schemaSubtreeStats,
+      engaged: engaged(bundle.schemaSubtreeStats?.replacedRefs),
+    },
+    chinaDateSchemas: {
+      ...bundle.chinaDateStats,
+      engaged: engaged(bundle.chinaDateStats?.replacedRefs),
+    },
+    int64Schemas: {
+      ...bundle.int64Stats,
+      engaged: engaged(bundle.int64Stats?.replacedRefs),
+    },
+    responseHeaders: {
+      ...bundle.headerStats,
+      engaged: engaged(bundle.headerStats?.replacedRefs),
+    },
     sharedParameters: { ...bundle.paramStats, engaged: engaged(bundle.paramStats?.replacedRefs) },
     unreachableSchemas: {
       ...bundle.unreachableStats,
       engaged: engaged(bundle.unreachableStats?.dropped),
+    },
+    compactComponentKeys: {
+      renamed: bundle.compactKeyStats?.renamed ?? 0,
+      rewrittenRefs: bundle.compactKeyStats?.rewrittenRefs ?? 0,
+      engaged: engaged(bundle.compactKeyStats?.rewrittenRefs),
     },
   };
 }
@@ -405,6 +426,8 @@ function transformEngagement(bundle) {
  * Turn a built bundle into the capacity report.
  *
  * @param {{ spec: object, bytes: number, stats: object, schemaStats: object,
+ *   schemaSubtreeStats: object,
+ *   chinaDateStats: object, int64Stats: object, headerStats: object,
  *   paramStats: object, unreachableStats: object }} bundle
  */
 export function buildCapacityReport(bundle, {

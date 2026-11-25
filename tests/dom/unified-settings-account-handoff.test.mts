@@ -71,6 +71,9 @@ vi.mock('@/services/entitlements', () => ({
   hasFeature: (feature: string) => Boolean(
     (entitlementMocks.state?.features as Record<string, unknown> | undefined)?.[feature],
   ),
+  hasEmbedAccessForAccount: (role: 'free' | 'pro' | undefined) => (
+    role === 'pro' || Boolean(entitlementMocks.state?.features.embedAccess)
+  ),
   isEntitled: (planKey?: string) => (
     entitlementMocks.state !== null
     && (planKey === undefined || entitlementMocks.state.planKey === planKey)
@@ -104,7 +107,7 @@ vi.mock('@/services/widget-store', () => ({
 }));
 
 vi.mock('@/services/preferences-content', () => ({
-  renderPreferences: () => ({
+  renderPreferenceSection: () => ({
     html: '',
     attach: () => () => {},
   }),
@@ -141,6 +144,7 @@ vi.mock('@/config/variant', () => ({
 
 vi.mock('@/services/billing', () => ({
   getSubscription: () => null,
+  isSubscriptionLoaded: () => true,
   onSubscriptionChange: () => () => {},
   openBillingPortal: async () => ({ outcome: 'no-customer' as const }),
   prereserveBillingPortalTab: () => null,
@@ -154,7 +158,10 @@ vi.mock('@/services/billing', () => ({
   removeBusinessSeat: async () => ({ status: 'removed' as const }),
 }));
 
-vi.mock('@/services/billing-state', () => ({
+// Partial so the real status-tone helpers stay available: a full stub goes
+// stale the moment billing-state gains an export the panel renders (#7315).
+vi.mock('@/services/billing-state', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/billing-state')>()),
   deriveBillingUxState: () => 'active',
   getReactivationHref: () => '/pro#pricing',
 }));
@@ -180,7 +187,8 @@ const { UnifiedSettings } = await import('@/components/UnifiedSettings');
 
 type SettingsInternals = {
   overlay: HTMLElement;
-  activeTab: 'api-keys' | 'mcp-clients';
+  nav: { page: string | null } | null;
+  ensurePage(id: 'api-keys' | 'mcp-clients'): unknown;
   accountDataGeneration: number;
   accountEntitlementRefreshPending: boolean;
   apiKeys: ApiKeyInfo[];
@@ -354,7 +362,6 @@ beforeEach(() => {
   settings = new UnifiedSettings(config);
   internal = settings as unknown as SettingsInternals;
   internal.overlay.classList.add('active');
-  internal.activeTab = 'api-keys';
 });
 
 afterEach(() => {
@@ -364,6 +371,100 @@ afterEach(() => {
 });
 
 describe('UnifiedSettings real auth-subscription handoff', () => {
+  it('keeps successful zero distinct from unavailable quota and recovers', async () => {
+    settings.open('mcp-clients');
+    await internal.refreshMcpQuota();
+    const quota = () => internal.overlay.querySelector('#usMcpQuota')!;
+    expect(quota().textContent).toContain('0 / 50');
+    expect(quota().textContent).toContain('used today, resets');
+
+    mcpMocks.quota.mockRejectedValue(new Error('fixture quota unavailable'));
+    await internal.refreshMcpQuota();
+    expect(quota().textContent).toContain('Quota unavailable');
+    expect(quota().querySelector('strong')).toBeNull();
+    expect(quota().textContent).not.toContain('used today');
+    expect(quota().textContent).not.toContain('resets');
+    expect(quota().textContent).not.toContain('Loading');
+
+    mcpMocks.quota.mockResolvedValue({
+      used: 0, limit: 50, resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await internal.refreshMcpQuota();
+    expect(quota().textContent).toContain('0 / 50');
+    expect(quota().textContent).not.toContain('unavailable');
+  });
+
+  // AI Agents stays open after a downgrade, so the hidden quota must stop
+  // polling: before #10301 losing access moved the user off the page.
+  it('stops quota polling when the open AI Agents page loses mcpAccess', async () => {
+    vi.useFakeTimers();
+    try {
+      settings.open('mcp-clients');
+      expect(internal.overlay.querySelector('[data-mcp-manage]')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(30_000);
+      const callsWhilePro = mcpMocks.quota.mock.calls.length;
+      expect(callsWhilePro).toBeGreaterThan(0);
+
+      emitEntitlement(entitlement({ planKey: 'free', apiAccess: false, mcpAccess: false }));
+      expect(internal.overlay.querySelector('[data-mcp-manage]')).toBeNull();
+      expect(internal.nav?.page).toBe('mcp-clients');
+
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(mcpMocks.quota.mock.calls.length).toBe(callsWhilePro);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('offers the canonical MCP endpoint and one-click links when no clients are connected', () => {
+    settings.open('mcp-clients');
+    internal.mcpClients = [];
+    internal.mcpClientsLoading = false;
+    internal.renderMcpClientsList();
+
+    const panel = internal.overlay.querySelector<HTMLElement>('[data-settings-page="mcp-clients"]')!;
+    const copy = panel.querySelector<HTMLButtonElement>('.mcp-agents-url .mcp-copy-btn');
+    expect(copy?.dataset.copyValue).toBe('https://worldmonitor.app/mcp');
+    const claude = panel.querySelector<HTMLAnchorElement>('[data-agent-id="claude"] a');
+    expect(new URL(claude!.href).searchParams.get('connectorUrl')).toBe('https://worldmonitor.app/mcp');
+    expect(panel.querySelector('#usMcpClientsList')?.textContent).toContain('No connected agents yet');
+    expect(panel.textContent).not.toContain('api.worldmonitor.app/mcp');
+  });
+
+  it('keeps checking past 12 seconds while entitlement verification is still in flight', () => {
+    vi.useFakeTimers();
+    panelGatingMocks.hasPremiumAccess = false;
+    entitlementMocks.state = null;
+    entitlementMocks.verificationStatus = 'pending';
+
+    try {
+      settings.open('account');
+      expect(internal.overlay.textContent).toContain('Checking your plan');
+
+      vi.advanceTimersByTime(12_000);
+
+      expect(internal.overlay.textContent).toContain('Checking your plan');
+      expect(internal.overlay.textContent).not.toContain('Plan status unavailable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows retry only after entitlement verification becomes unavailable', () => {
+    panelGatingMocks.hasPremiumAccess = false;
+    entitlementMocks.state = null;
+    entitlementMocks.verificationStatus = 'pending';
+    settings.open('account');
+
+    expect(internal.overlay.textContent).toContain('Checking your plan');
+    expect(internal.overlay.querySelector('.retry-plan-status-btn')).toBeNull();
+
+    emitEntitlementVerification('unavailable');
+
+    expect(internal.overlay.textContent).toContain('Plan status unavailable');
+    expect(internal.overlay.querySelector('.retry-plan-status-btn')).not.toBeNull();
+  });
+
   it('synchronously purges A plaintext and rendered account lists when auth emits B', () => {
     internal.apiKeys = [apiKey()];
     internal.planLimitNotices = [notice()];
@@ -373,7 +474,8 @@ describe('UnifiedSettings real auth-subscription handoff', () => {
       limit: 50,
       resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
     };
-    internal.render(false);
+    internal.ensurePage('api-keys');
+    internal.ensurePage('mcp-clients');
     internal.showCreatedBanner('wm_A_PLAINTEXT_SECRET');
     internal.renderApiKeysList();
     internal.renderMcpClientsList();
@@ -423,7 +525,8 @@ describe('UnifiedSettings real auth-subscription handoff', () => {
     internal.apiKeys = [apiKey()];
     internal.planLimitNotices = [notice()];
     internal.mcpClients = [mcpClient()];
-    internal.render(false);
+    internal.ensurePage('api-keys');
+    internal.ensurePage('mcp-clients');
     internal.renderApiKeysList();
     const input = internal.overlay.querySelector<HTMLInputElement>('.api-keys-name-input');
     expect(input).not.toBeNull();
@@ -481,7 +584,7 @@ describe('UnifiedSettings real auth-subscription handoff', () => {
 
   it('preserves notices and renders a current-account authentication error', async () => {
     internal.planLimitNotices = [notice()];
-    internal.render(false);
+    internal.ensurePage('api-keys');
     noticeMocks.list.mockRejectedValue(
       new Error('Authentication unavailable while loading API plan-limit notices. Try again.'),
     );
@@ -500,15 +603,21 @@ describe('UnifiedSettings real auth-subscription handoff', () => {
 
   it('rebuilds MCP capability from B across reset, free, and Pro snapshots', async () => {
     mcpMocks.list.mockResolvedValue([mcpClient('client-b', 'B private MCP client')]);
-    settings.open('api-keys');
-    expect(internal.overlay.querySelector('[data-tab="mcp-clients"]')).not.toBeNull();
+    settings.open('mcp-clients');
+    // AI Agents is open to every account; the account-scoped part is the
+    // connected-clients section, which must follow B's snapshot.
+    const manage = () => internal.overlay.querySelector('[data-mcp-manage]');
+    expect(manage()).not.toBeNull();
+    await vi.waitFor(() => expect(mcpMocks.list).toHaveBeenCalledTimes(1));
+    mcpMocks.list.mockClear();
 
     emitAccount('B');
     expect(internal.accountEntitlementRefreshPending).toBe(true);
 
     emitEntitlement(null);
     expect(internal.accountEntitlementRefreshPending).toBe(true);
-    expect(internal.overlay.querySelector('[data-tab="mcp-clients"]')).toBeNull();
+    expect(internal.nav?.page).toBe('mcp-clients');
+    expect(manage()).toBeNull();
     expect(mcpMocks.list).not.toHaveBeenCalled();
 
     emitEntitlement(entitlement({
@@ -517,17 +626,16 @@ describe('UnifiedSettings real auth-subscription handoff', () => {
       mcpAccess: false,
     }));
     expect(internal.accountEntitlementRefreshPending).toBe(false);
-    expect(internal.overlay.querySelector('[data-tab="mcp-clients"]')).toBeNull();
+    expect(manage()).toBeNull();
     expect(mcpMocks.list).not.toHaveBeenCalled();
 
+    // Gaining mcpAccess on the open page rebuilds it and runs its entry load.
     emitEntitlement(entitlement({
       planKey: 'pro',
       apiAccess: false,
       mcpAccess: true,
     }));
-    const mcpTab = internal.overlay.querySelector<HTMLButtonElement>('[data-tab="mcp-clients"]');
-    expect(mcpTab).not.toBeNull();
-    mcpTab!.click();
+    expect(manage()).not.toBeNull();
 
     await vi.waitFor(() => {
       expect(mcpMocks.list).toHaveBeenCalledTimes(1);

@@ -1,4 +1,5 @@
 import { Panel } from './Panel';
+import { safeStorageSet } from '@/utils/safe-storage';
 import { t, getLocale } from '@/services/i18n';
 import { unsafeRawHtml } from '@/utils/sanitize';
 
@@ -116,7 +117,7 @@ function loadSelectedCities(): string[] {
 }
 
 function saveSelectedCities(ids: string[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+  safeStorageSet(STORAGE_KEY, JSON.stringify(ids));
 }
 
 /**
@@ -127,11 +128,13 @@ function saveSelectedCities(ids: string[]): void {
  * scheme that caches it against a time-derived key is a heuristic that breaks at
  * a DST fall-back, where the same weekday/hour/minute occurs twice under
  * different zones (America/New_York 2026-11-01 01:30 is both EDT and EST).
- * Reading it from the authoritative call is both cheaper — one formatter per
- * city per tick instead of two — and correct by construction.
  */
+function marketWeekday(tz: string, now: Date): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(now);
+}
+
 function getTimeInZone(tz: string): {
-  h: number; m: number; s: number; dayOfWeek: string; abbr: string;
+  h: number; m: number; s: number; dayOfWeek: string; marketDay: string; abbr: string;
 } {
   try {
     const now = new Date();
@@ -140,6 +143,8 @@ function getTimeInZone(tz: string): {
       hour12: false, weekday: 'short', timeZoneName: 'short',
       numberingSystem: 'latn',
     }).formatToParts(now);
+    // Weekend checks compare English tokens. The visible label stays on the locale weekday.
+    const marketDay = marketWeekday(tz, now);
     let h = 0, m = 0, s = 0, dayOfWeek = '', abbr = '';
     for (const p of parts) {
       if (p.type === 'hour') h = parseInt(p.value, 10);
@@ -149,9 +154,9 @@ function getTimeInZone(tz: string): {
       if (p.type === 'timeZoneName') abbr = p.value;
     }
     if (h === 24) h = 0;
-    return { h, m, s, dayOfWeek, abbr };
+    return { h, m, s, dayOfWeek, marketDay, abbr };
   } catch {
-    return { h: 0, m: 0, s: 0, dayOfWeek: '', abbr: '' };
+    return { h: 0, m: 0, s: 0, dayOfWeek: '', marketDay: '', abbr: '' };
   }
 }
 
@@ -252,6 +257,32 @@ export class WorldClockPanel extends Panel {
   private setupDragHandlers(): void {
     const content = this.content;
 
+    // Keyboard parity for the mouse drag below (same idiom as the panel
+    // reorder button from #6964): arrows on a focused handle move the row
+    // one slot and persist through the same saveSelectedCities path.
+    content.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      // A live pointer gesture owns selectedCities until mouseup.
+      if (this.dragCityId) return;
+      const handle = (e.target as HTMLElement).closest('.wc-drag-handle');
+      const row = handle?.closest('.wc-row') as HTMLElement | null;
+      const cityId = row?.dataset.cityId;
+      if (!cityId || !row) return;
+      const fromIdx = this.selectedCities.indexOf(cityId);
+      const toIdx = e.key === 'ArrowUp' ? fromIdx - 1 : fromIdx + 1;
+      if (fromIdx === -1 || toIdx < 0 || toIdx >= this.selectedCities.length) return;
+      const sibling = e.key === 'ArrowUp' ? row.previousElementSibling : row.nextElementSibling;
+      if (!(sibling instanceof HTMLElement) || !sibling.classList.contains('wc-row')) return;
+      e.preventDefault();
+      this.selectedCities.splice(fromIdx, 1);
+      this.selectedCities.splice(toIdx, 0, cityId);
+      saveSelectedCities(this.selectedCities);
+      // Move the live row. renderClocks() is a 150ms setSafeContent rebuild and
+      // would destroy the focused handle before afterUpdate runs.
+      row.parentElement?.insertBefore(row, e.key === 'ArrowUp' ? sibling : sibling.nextElementSibling);
+      if (handle instanceof HTMLElement) handle.focus();
+    });
+
     content.addEventListener('mousedown', (e: MouseEvent) => {
       const handle = (e.target as HTMLElement).closest('.wc-drag-handle') as HTMLElement | null;
       if (!handle) return;
@@ -334,11 +365,11 @@ export class WorldClockPanel extends Panel {
 
     let html = '<div class="wc-container" translate="no">';
     for (const city of sorted) {
-      const { h, m, s, dayOfWeek, abbr } = getTimeInZone(city.timezone);
+      const { h, m, s, dayOfWeek, marketDay, abbr } = getTimeInZone(city.timezone);
       const isDay = h >= 6 && h < 20;
       const pct = ((h * 3600 + m * 60 + s) / 86400) * 100;
       const isHome = city.id === this.homeCityId;
-      const isWeekday = dayOfWeek !== 'Sat' && dayOfWeek !== 'Sun';
+      const isWeekday = marketDay !== 'Sat' && marketDay !== 'Sun';
 
       let statusHtml = '';
       if (city.marketOpen !== undefined && city.marketClose !== undefined) {
@@ -352,7 +383,7 @@ export class WorldClockPanel extends Panel {
       if (isHome) rowCls.push('wc-home');
       if (!isDay) rowCls.push('wc-night');
 
-      html += `<div class="${rowCls.join(' ')}" data-city-id="${city.id}"><div class="wc-drag-handle" title="Drag to reorder">\u22EE</div><div class="wc-info"><div class="wc-name">${city.city}${isHome ? '<span class="wc-home-tag">\u2302</span>' : ''}</div><div class="wc-detail"><span class="wc-exchange">${city.label}</span>${statusHtml}</div></div><div class="wc-clock"><div class="wc-time">${pad2(h)}:${pad2(m)}:${pad2(s)}</div><div class="wc-tz"><div class="wc-bar-wrap"><div class="wc-bar ${isDay ? 'day' : 'night'}" style="width:${pct.toFixed(1)}%"></div></div><span>${dayOfWeek} ${abbr}</span></div></div></div>`;
+      html += `<div class="${rowCls.join(' ')}" data-city-id="${city.id}"><div class="wc-drag-handle" role="button" tabindex="0" title="Drag to reorder" aria-label="Move ${city.city} (arrow keys)">\u22EE</div><div class="wc-info"><div class="wc-name">${city.city}${isHome ? '<span class="wc-home-tag">\u2302</span>' : ''}</div><div class="wc-detail"><span class="wc-exchange">${city.label}</span>${statusHtml}</div></div><div class="wc-clock"><div class="wc-time">${pad2(h)}:${pad2(m)}:${pad2(s)}</div><div class="wc-tz"><div class="wc-bar-wrap"><div class="wc-bar ${isDay ? 'day' : 'night'}" style="width:${pct.toFixed(1)}%"></div></div><span>${dayOfWeek} ${abbr}</span></div></div></div>`;
     }
     html += '</div>';
     // Cache handles only once the debounced write has actually committed —
@@ -402,7 +433,7 @@ export class WorldClockPanel extends Panel {
   private tickClocks(): void {
     for (const refs of this.clockRefs.values()) {
       const { city, last } = refs;
-      const { h, m, s, dayOfWeek, abbr } = getTimeInZone(city.timezone);
+      const { h, m, s, dayOfWeek, marketDay, abbr } = getTimeInZone(city.timezone);
 
       const time = `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
       if (last.time !== time) {
@@ -431,7 +462,7 @@ export class WorldClockPanel extends Panel {
       }
 
       if (refs.status && city.marketOpen !== undefined && city.marketClose !== undefined) {
-        const isOpen = dayOfWeek !== 'Sat' && dayOfWeek !== 'Sun'
+        const isOpen = marketDay !== 'Sat' && marketDay !== 'Sun'
           && h >= city.marketOpen && h < city.marketClose;
         if (last.isOpen !== isOpen) {
           const state = isOpen ? 'open' : 'closed';

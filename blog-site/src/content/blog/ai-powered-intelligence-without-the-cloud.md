@@ -65,7 +65,7 @@ Extracts people, organizations, locations, and dates from news headlines. Runs i
 
 ### Sentiment Analysis
 
-Classifies headline sentiment to detect shifts in media tone about countries, leaders, or events. This feeds into the information velocity component of the CII (Country Instability Index).
+Classifies headline sentiment to detect shifts in media tone about countries, leaders, or events. This feeds into the information velocity component of the CII (Country [Instability Index](/blog/posts/country-instability-index-methodology-explained/)).
 
 ### Semantic Search (RAG)
 
@@ -92,7 +92,7 @@ World Monitor's Tauri desktop app (available for macOS, Windows, and Linux) take
 - **Offline Map Caching:** The Progressive Web App caches up to 500 map tiles for offline viewing
 - **No Telemetry:** The desktop app sends zero analytics or usage data
 
-With Ollama installed alongside the desktop app, you have a fully air-gapped intelligence dashboard. Connect to the internet when you want fresh data, disconnect when you want to analyze in private.
+With Ollama installed alongside the desktop app, you have a fully air-gapped [intelligence dashboard](/blog/posts/osint-for-everyone-open-source-intelligence-democratized/). Connect to the internet when you want fresh data, disconnect when you want to analyze in private.
 
 ## Practical Setup: From Zero to Private Intelligence
 
@@ -105,7 +105,7 @@ ollama pull llama3.1
 
 ### Step 2: Open World Monitor
 
-Navigate to worldmonitor.app or install the desktop app from GitHub releases.
+Navigate to worldmonitor.app or install the [desktop app](https://www.worldmonitor.app/docs/desktop-app) from GitHub releases.
 
 ### Step 3: Configure AI
 
@@ -138,7 +138,7 @@ Material non-public information (MNPI) requirements mean certain geopolitical an
 
 You don't have to take our word for the privacy claims. World Monitor is fully open source under AGPL-3.0. Every network call, every data flow, every AI prompt is in the codebase for you to audit. Developers can explore the full [typed API layer and proto-first architecture](/blog/posts/build-on-worldmonitor-developer-api-open-source/) to verify exactly how data flows through the system.
 
-The proto-first API architecture (298 proto files, 36 typed services) means even the API contracts are transparent. You can see exactly what data each endpoint expects and returns.
+The proto-first API architecture (Protocol Buffer definitions and typed services) means even the API contracts are transparent. You can see exactly what data each endpoint expects and returns.
 
 ## Frequently Asked Questions
 

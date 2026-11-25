@@ -1,5 +1,6 @@
 import { isDesktopRuntime, toApiUrl, toRuntimeUrl } from '../services/runtime';
 import { getPersistentCache, setPersistentCache } from '../services/persistent-cache';
+import { createRequestTimeoutSignal } from '../services/timeout-signal';
 
 const isDev = import.meta.env.DEV;
 const RESPONSE_CACHE_PREFIX = 'api-response:';
@@ -34,7 +35,9 @@ export function widgetAgentHealthUrl(): string {
 }
 
 export function rssProxyUrl(feedUrl: string): string {
-  if (isDesktopRuntime()) return proxyUrl(feedUrl);
+  // Desktop fetches through the sidecar's rss-proxy. The WebView cannot read
+  // publisher feeds directly (CORS), and the relay's CORS excludes tauri://.
+  if (isDesktopRuntime()) return `/api/rss-proxy?url=${encodeURIComponent(feedUrl)}`;
   if (RSS_PROXY_BASE) {
     return `${RSS_PROXY_BASE}/rss?url=${encodeURIComponent(feedUrl)}`;
   }
@@ -74,6 +77,23 @@ export function proxyUrl(localPath: string): string {
 
 function shouldPersistResponse(url: string): boolean {
   return url.startsWith('/api/');
+}
+
+function requestPathname(url: string): string {
+  if (url.startsWith('/')) return url.split('?')[0] ?? url;
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return '';
+  }
+}
+
+// This public feed uses wildcard CORS. The session interceptor
+// defaults credentials to 'include'; browsers then reject ACAO: *.
+function proxyFetchInit(url: string, init: RequestInit = {}): RequestInit {
+  return requestPathname(url) === '/api/miit-news'
+    ? { ...init, credentials: 'omit' }
+    : init;
 }
 
 function buildResponseCacheKey(url: string): string {
@@ -128,26 +148,58 @@ function isPersistedResponseFresh(
     && ageMs < persistedResponseMaxAgeMs(cached.data);
 }
 
-async function fetchAndPersist(url: string): Promise<Response> {
-  const response = await fetch(proxyUrl(url), { cache: 'no-store' });
+function throwIfAborted(signal?: AbortSignal | null): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException('The operation was aborted.', 'AbortError');
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('name' in error)) return false;
+  if (error.name === 'AbortError') return true;
+  // WebKit aborted body reads sometimes arrive as TypeError whose message
+  // still says `AbortError: Fetch is aborted` (WORLDMONITOR-132).
+  return error.name === 'TypeError'
+    && 'message' in error
+    && /Fetch is aborted/i.test(String(error.message));
+}
+
+async function fetchAndPersist(url: string, init: RequestInit = {}): Promise<Response> {
+  init = { ...init, signal: createRequestTimeoutSignal(url, init, 30_000) };
+  const response = await fetch(proxyUrl(url), proxyFetchInit(url, { ...init, cache: 'no-store' }));
+  throwIfAborted(init.signal);
   if (response.ok && shouldPersistResponse(url) && !hasNoStoreCacheDirective(response.headers)) {
     try {
       const body = await response.clone().text();
-      void setPersistentCache(buildResponseCacheKey(url), toCachedPayload(url, response, body));
+      throwIfAborted(init.signal);
+      await setPersistentCache(buildResponseCacheKey(url), toCachedPayload(url, response, body)).catch(() => {});
+      throwIfAborted(init.signal);
     } catch (error) {
+      // Panel-close / country-switch abort mid-body-read is expected. Do not
+      // console.warn it, and do not return a Response whose body is already
+      // cancelled — propagate so callers' AbortError catches run once.
+      if (isAbortError(error) || init.signal?.aborted) {
+        throwIfAborted(init.signal);
+        throw error instanceof Error
+          ? error
+          : new DOMException('The operation was aborted.', 'AbortError');
+      }
       console.warn('[proxy] Failed to persist API response cache', error);
     }
   }
   return response;
 }
 
-export async function fetchWithProxy(url: string): Promise<Response> {
+export async function fetchWithProxy(url: string, init: RequestInit = {}): Promise<Response> {
+  init = { ...init, signal: createRequestTimeoutSignal(url, init, 30_000) };
+  throwIfAborted(init.signal);
   if (!shouldPersistResponse(url)) {
-    return fetch(proxyUrl(url));
+    return fetch(proxyUrl(url), proxyFetchInit(url, init));
   }
 
   const cacheKey = buildResponseCacheKey(url);
   const cached = await getPersistentCache<CachedResponsePayload>(cacheKey);
+  throwIfAborted(init.signal);
 
   if (cached?.data && isPersistedResponseFresh(cached)) {
     void fetchAndPersist(url).catch((error) => {
@@ -156,5 +208,5 @@ export async function fetchWithProxy(url: string): Promise<Response> {
     return toResponse(cached.data);
   }
 
-  return fetchAndPersist(url);
+  return fetchAndPersist(url, init);
 }

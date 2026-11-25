@@ -2,8 +2,9 @@ import { Panel } from './Panel';
 import { t } from '@/services/i18n';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { postProcessAnalystHtml } from '@/utils/analyst-markdown';
+import { balanceStreamingMarkdown, postProcessAnalystHtml } from '@/utils/analyst-markdown';
 import { yieldToMain } from '@/utils/after-paint';
+import { LatestRequestGuard } from '@/utils/latest-request-guard';
 import { premiumFetch } from '@/services/premium-fetch';
 import { getAuthState } from '@/services/auth-state';
 import { hasPremiumAccess, readClientEntitlementBelief } from '@/services/panel-gating';
@@ -17,7 +18,7 @@ import {
 import { classifyDenialResponse, type ClientEntitlementBelief } from '@/services/premium-denial';
 import { reportEntitlementDesync } from '@/services/entitlement-desync-telemetry';
 import { trackAnalystControlAction } from '@/services/analytics';
-import { h, replaceChildren, setTrustedHtml, trustedHtml, type TrustedHtml } from '@/utils/dom-utils';
+import { h, isImeEnter, replaceChildren, setTrustedHtml, trustedHtml, type TrustedHtml } from '@/utils/dom-utils';
 import {
   isDashboardControlAction,
   parseAgentBusAction,
@@ -107,7 +108,9 @@ interface DashboardControlResult {
   targets: Array<{ target: string; status: DashboardControlStatus; reason?: string }>;
 }
 
-type DashboardActionHandler = (action: DashboardControlAction) => DashboardControlResult;
+type DashboardActionHandler = (
+  action: DashboardControlAction,
+) => DashboardControlResult | Promise<DashboardControlResult>;
 
 // Narrow allowlist: text formatting + tables only. No img/a/iframe so
 // prompt-injected or hallucinated URLs cannot trigger third-party requests.
@@ -146,6 +149,7 @@ export class ChatAnalystPanel extends Panel {
   private history: ChatMessage[] = [];
   private domainFocus = 'all';
   private streamAbort: AbortController | null = null;
+  private streamGuard = new LatestRequestGuard();
   private isStreaming = false;
   private dashboardActionHandler: DashboardActionHandler | null = null;
   private dashboardControlEnabled = loadDashboardControlEnabled();
@@ -224,7 +228,9 @@ export class ChatAnalystPanel extends Panel {
     wrapper.appendChild(quickBar);
     wrapper.appendChild(inputRow);
 
-    replaceChildren(this.content, wrapper);
+    // Route through the sanctioned helper (#6557): the chat UI IS the panel's
+    // authoritative content — atomic replace with error-state clear.
+    this.setContentNodes(wrapper);
 
     this.showWelcome();
     this.updateDashboardControlUi();
@@ -304,6 +310,7 @@ export class ChatAnalystPanel extends Panel {
       if (!target || target !== this.inputEl) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
+        if (isImeEnter(e)) return;
         this.sendFromInput();
       }
     });
@@ -432,7 +439,7 @@ export class ChatAnalystPanel extends Panel {
 
     const parsedAction = parsed.action;
     if (isDashboardControlAction(parsedAction)) {
-      this.renderDashboardControlAction(bubble, parsedAction);
+      void this.renderDashboardControlAction(bubble, parsedAction);
       return;
     }
     if (parsedAction.type !== 'suggest-widget') return;
@@ -451,7 +458,7 @@ export class ChatAnalystPanel extends Panel {
     else bubble.appendChild(chip);
   }
 
-  private renderDashboardControlAction(bubble: HTMLElement, action: DashboardControlAction): void {
+  private async renderDashboardControlAction(bubble: HTMLElement, action: DashboardControlAction): Promise<void> {
     let result: DashboardControlResult;
     if (!this.dashboardControlEnabled) {
       result = this.skippedDashboardAction(action, 'control_disabled', 'Dashboard control is off.');
@@ -460,7 +467,7 @@ export class ChatAnalystPanel extends Panel {
     } else if (!this.dashboardActionHandler) {
       result = this.skippedDashboardAction(action, 'context_unavailable', 'Dashboard context is unavailable.');
     } else {
-      result = this.dashboardActionHandler(action);
+      result = await this.dashboardActionHandler(action);
     }
 
     if (result.actionType) {
@@ -569,6 +576,7 @@ Respond ONLY with a JSON object: { "answer": string }.`;
     let accumulatedText = '';
 
     const controller = new AbortController();
+    const generation = this.streamGuard.begin();
     this.streamAbort = controller;
     const requestAuthState = getAuthState();
     const requestUserId = requestAuthState.user?.id ?? null;
@@ -612,10 +620,13 @@ Respond ONLY with a JSON object: { "answer": string }.`;
         signal: controller.signal,
       });
 
+      if (!this.streamGuard.isCurrent(generation)) return;
       if (!res.ok) {
+        const denial = await describeDenial(res, requestBelief, requestUserId);
+        if (!this.streamGuard.isCurrent(generation)) return;
         this.finalizeStreamingBubble(
           streamingBody,
-          `⚠ ${await describeDenial(res, requestBelief, requestUserId)}`,
+          `⚠ ${denial}`,
           false,
         );
         return;
@@ -627,7 +638,8 @@ Respond ONLY with a JSON object: { "answer": string }.`;
         return;
       }
 
-      const finished = await this.readStream(reader, bubble, streamingBody, (text) => { accumulatedText = text; });
+      const finished = await this.readStream(reader, bubble, streamingBody, (text) => { accumulatedText = text; }, generation);
+      if (!this.streamGuard.isCurrent(generation)) return;
       if (finished === 'error') return;
       if (finished === 'done') {
         this.finalizeStreamingBubble(streamingBody, accumulatedText, true);
@@ -643,6 +655,7 @@ Respond ONLY with a JSON object: { "answer": string }.`;
         this.finalizeStreamingBubble(streamingBody, '⚠ Response cut off. Try again.', false);
       }
     } catch (err) {
+      if (!this.streamGuard.isCurrent(generation)) return;
       if (err instanceof Error && err.name === 'AbortError') {
         if (accumulatedText) {
           this.finalizeStreamingBubble(streamingBody, `${accumulatedText}\n\n*Response cut off.*`, true);
@@ -679,48 +692,75 @@ Respond ONLY with a JSON object: { "answer": string }.`;
     bubble: HTMLElement,
     bodyEl: HTMLElement,
     onToken: (text: string) => void,
+    generation = this.streamGuard.begin(),
   ): Promise<'done' | 'error' | 'incomplete'> {
     const decoder = new TextDecoder();
     let buf = '';
     let accumulated = '';
+    // Partial answers go through the same marked + DOMPurify path as the
+    // finished one, at most once per frame. `streaming` is cleared on every exit
+    // so a frame still queued when the stream ends cannot overwrite the final
+    // render written by finalizeStreamingBubble.
+    let streaming = true;
+    let framePending = false;
+    const scheduleRender = (): void => {
+      if (framePending) return;
+      framePending = true;
+      requestAnimationFrame(() => {
+        framePending = false;
+        if (!streaming || !bodyEl.isConnected || !this.streamGuard.isCurrent(generation)) return;
+        this.renderStreamingMarkdown(bodyEl, accumulated);
+      });
+    };
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const payload = JSON.parse(line.slice(6)) as {
-            delta?: string;
-            done?: boolean;
-            error?: string;
-            meta?: MetaEvent;
-            action?: unknown;
-          };
-          if (payload.error) {
-            this.finalizeStreamingBubble(bodyEl, '⚠ Analyst unavailable. Try again shortly.', false);
-            return 'error';
-          }
-          if (payload.meta) {
-            this.renderSourceChips(bubble, payload.meta);
-          }
-          if (payload.action) {
-            this.renderActionChip(bubble, payload.action);
-          }
-          if (payload.delta) {
-            accumulated += payload.delta;
-            bodyEl.appendChild(document.createTextNode(payload.delta));
-            onToken(accumulated);
-            this.scrollToBottom();
-          }
-          if (payload.done) return 'done';
-        } catch { /* malformed SSE chunk */ }
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (!this.streamGuard.isCurrent(generation)) return 'incomplete';
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!this.streamGuard.isCurrent(generation)) return 'incomplete';
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const payload = JSON.parse(line.slice(6)) as {
+              delta?: string;
+              done?: boolean;
+              error?: string;
+              meta?: MetaEvent;
+              action?: unknown;
+            };
+            if (payload.error) {
+              this.finalizeStreamingBubble(bodyEl, '⚠ Analyst unavailable. Try again shortly.', false);
+              return 'error';
+            }
+            if (payload.meta) {
+              this.renderSourceChips(bubble, payload.meta);
+            }
+            if (payload.action) {
+              this.renderActionChip(bubble, payload.action);
+            }
+            if (payload.delta) {
+              accumulated += payload.delta;
+              onToken(accumulated);
+              scheduleRender();
+            }
+            if (payload.done) return 'done';
+          } catch { /* malformed SSE chunk */ }
+        }
       }
+      return 'incomplete';
+    } finally {
+      streaming = false;
     }
-    return 'incomplete';
+  }
+
+  private renderStreamingMarkdown(bodyEl: HTMLElement, text: string): void {
+    setTrustedHtml(bodyEl, renderMarkdown(balanceStreamingMarkdown(text)));
+    bodyEl.appendChild(h('span', { className: 'chat-streaming-dot' }));
+    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
   // Defer the synchronous DOMPurify+marked sanitize off the current task so the
@@ -745,6 +785,7 @@ Respond ONLY with a JSON object: { "answer": string }.`;
   }
 
   clear(): void {
+    this.streamGuard.begin();
     this.history = [];
     this.streamAbort?.abort();
     this.streamAbort = null;
@@ -783,7 +824,19 @@ Respond ONLY with a JSON object: { "answer": string }.`;
     }
   }
 
+  public override clearSensitiveContent(): void {
+    this.streamGuard.begin();
+    this.history = [];
+    this.streamAbort?.abort();
+    this.streamAbort = null;
+    this.isStreaming = false;
+    // An unsent draft belongs to the previous account too.
+    if (this.inputEl) this.inputEl.value = '';
+    super.clearSensitiveContent();
+  }
+
   override destroy(): void {
+    this.streamGuard.begin();
     this.streamAbort?.abort();
     this.streamAbort = null;
     super.destroy();

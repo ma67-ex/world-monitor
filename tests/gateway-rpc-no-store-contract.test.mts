@@ -69,6 +69,50 @@ function assertCacheable(res: Response): void {
 }
 
 describe('gateway RPC no-store contract', () => {
+  it('uses converted POST query fields for projection and cache debug headers', async () => {
+    const path = '/api/scenario/v1/get-scenario-status';
+    const handler = createDomainGateway([
+      jsonRoute(path, { status: 'pending', value: { ok: true } }),
+    ]);
+    const base = request(path);
+    const headers = new Headers(base.headers);
+    const body = JSON.stringify({ _debug: '1', jmespath: 'value' });
+    headers.set('Content-Type', 'application/json');
+    headers.set('Content-Length', String(new TextEncoder().encode(body).length));
+    const res = await handler(new Request('https://worldmonitor.app' + path, {
+      method: 'POST',
+      headers,
+      body,
+    }));
+
+    assert.equal(res.status, 200);
+    assertNoStore(res);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+
+  it('keeps paired physical-premium cohorts out of shared caches', async () => {
+    const premiumPath = '/api/market/v1/get-physical-premiums';
+    const divergencePath = '/api/market/v1/get-physical-divergence-index';
+    const handler = createDomainGateway([
+      jsonRoute(premiumPath, {
+        premiums: [],
+        asOf: '2026-08-30T00:00:00.000Z',
+      }),
+      jsonRoute(divergencePath, {
+        readings: [],
+        composite: { state: 'PHYSICAL_DIVERGENCE_STATE_STALE_INPUT' },
+        evaluatedAt: '2026-08-30T00:00:00.000Z',
+        methodologyVersion: 'physical-divergence-v2',
+      }),
+    ]);
+
+    for (const path of [premiumPath, divergencePath]) {
+      const res = await handler(request(path));
+      assert.equal(res.status, 200, path);
+      assertNoStore(res);
+    }
+  });
+
   it('forces no-store for degraded, unavailable, nonterminal, and error-shaped 200 payloads', async () => {
     const handler = createDomainGateway([
       jsonRoute('/api/scenario/v1/get-scenario-status', { status: 'pending', error: '' }),
@@ -110,6 +154,19 @@ describe('gateway RPC no-store contract', () => {
     assertCacheable(res);
   });
 
+  it('keeps degraded movement sources out of the daily CDN cache', async () => {
+    const path = '/api/displacement/v1/get-cross-border-movements';
+    for (const status of ['ok', 'partial', 'stale', 'unavailable']) {
+      const handler = createDomainGateway([jsonRoute(path, {
+        movements: [], dataAvailable: true, sources: [{ id: 'uk', status: 'ok' }, { id: 'odp', status }],
+      })]);
+      const res = await handler(request(path));
+      assert.equal(res.status, 200);
+      if (status === 'ok') assertCacheable(res);
+      else assertNoStore(res);
+    }
+  });
+
   it('lets a bare energy seed miss opt into no-store through the handler side channel', async () => {
     const handler = createDomainGateway([
       {
@@ -135,6 +192,26 @@ describe('gateway RPC no-store contract', () => {
     assert.equal(res.status, 200);
     assert.deepEqual(body, { prices: [] });
     assertNoStore(res);
+  });
+
+  it('keeps the latest cached EIA weekly spot average fresh before the next release', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://fake.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'fake_token';
+    const priceAt = Date.parse('2026-10-30');
+    const brent = { commodity: 'brent', name: 'Brent Crude Oil', price: 121.17, unit: '$/barrel', change: 0.12, priceAt };
+    const cached = { prices: [brent], legacyMetadata: 'preserved for unfiltered requests' };
+    globalThis.fetch = async () => Response.json({ result: JSON.stringify(cached) });
+    const originalNow = Date.now;
+    Date.now = () => Date.parse('2026-11-10T06:18:00Z');
+    try {
+      const req = new Request('https://worldmonitor.app/api/economic/v1/get-energy-prices');
+      const context = { request: req, pathParams: {}, headers: {} };
+      const prices = [{ ...brent, priceBasis: 'spot', priceSource: 'EIA', frequency: 'weekly', stale: false }];
+      assert.deepEqual(await getEnergyPrices(context, { commodities: ['brent'] }), { prices });
+      assert.deepEqual(await getEnergyPrices(context, { commodities: [] }), { ...cached, prices });
+    } finally {
+      Date.now = originalNow;
+    }
   });
 });
 
@@ -169,7 +246,7 @@ const PROTECTED_HIGH_TIER_EMPTY_HANDLERS = [
 
 const HEALTHY_EMPTY_ALLOWLIST = new Set([
   "server/worldmonitor/forecast/v1/get-forecasts.ts::{ forecasts: [], generatedAt: data.generatedAt || 0, degraded: false, stale: false, error: '' }",
-  "server/worldmonitor/forecast/v1/get-forecast-scorecard.ts::{ schemaVersion: 1, generatedAt: 0, rollingWindowDays: 180, methodology: '', totals: { entries: 0, resolved: 0, pending: 0, pendingJudge: 0, scored: 0, void: 0, voidRate: 0, publicationCoverage: 0, }, byDomain: [], byGenerationOrigin: [], calibration: [], degraded: false, stale: false, error: '', ...overrides, }",
+  "server/worldmonitor/forecast/v1/get-forecast-scorecard.ts::{ schemaVersion: 1, generatedAt: 0, rollingWindowDays: 180, methodology: '', totals: { entries: 0, resolved: 0, pending: 0, pendingJudge: 0, scored: 0, void: 0, voidRate: 0, publicationCoverage: 0, }, byDomain: [], byGenerationOrigin: [], calibration: [], publishedByDomain: [], receipts: [], familyOutcomes: [], degraded: false, stale: false, error: '', ...overrides, ...scorecardUnderAudit(forecastAccuracyAudit(seed, { stale: seedStale })), }",
   "server/worldmonitor/climate/v1/list-climate-disasters.ts::{ disasters: [], pagination: { nextCursor: '', totalCount: allDisasters.length }, }",
 ]);
 
@@ -238,4 +315,17 @@ describe('high-tier bare-empty source guard', () => {
 
     assert.deepEqual(failures, []);
   });
+});
+
+it('keeps generated RPC availability errors out of HTTP caches', async () => {
+  const { createSeismologyServiceRoutes, ApiError } = await import('../src/generated/server/worldmonitor/seismology/v1/service_server.ts');
+  const { serverOptions } = await import('../server/gateway.ts');
+  const gateway = createDomainGateway(createSeismologyServiceRoutes({
+    listEarthquakes: async () => { throw new ApiError(503, 'Seed unavailable', ''); },
+  }, serverOptions));
+  const response = await gateway(request('/api/seismology/v1/list-earthquakes'));
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.equal(response.headers.get('CDN-Cache-Control'), null);
+  assert.equal(response.headers.get('Vercel-CDN-Cache-Control'), null);
 });

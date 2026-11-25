@@ -6,13 +6,15 @@ import {
   BOOTSTRAP_CACHE_KEYS,
   bootstrapTierKeyNames,
 } from '../shared/bootstrap-tier-keys.js';
-import { unwrapEnvelope } from './_seed-envelope-source.mjs';
-import { compactWildfireDashboardPayload } from './_wildfire-dashboard.mjs';
-import { loadEnvFile } from './_seed-utils.mjs';
 import {
-  putR2JsonObject,
-  resolveR2StorageConfig,
-} from './_r2-storage.mjs';
+  canadaAlertsCutoverFallbackValue,
+  extraCanadaAlertsCutoverReadKeys,
+} from '../shared/canada-alerts-cutover.js';
+import { buildBootstrapTierEnvelope } from '../shared/bootstrap-tier-envelope.js';
+import { unwrapEnvelope } from './_seed-envelope-source.mjs';
+import { evaluatePublishedBootstrapVolume } from './_bootstrap-payload-budget.mjs';
+import { restoreWildfireBootstrapMetadata, sanitizeBootstrapValue } from './_bootstrap-public-payload.mjs';
+import { loadEnvFile } from './_seed-utils.mjs';
 import {
   putKvJsonValue,
   resolveKvStorageConfig,
@@ -25,6 +27,13 @@ const TIER_INTERVAL_MS = Object.freeze({
   slow: 10 * 60_000,
 });
 const TIER_ORDER = Object.freeze(['fast', 'slow']);
+const PUBLISHER_LARGEST_KEY_LIMIT = 5;
+
+// R4 (#6654) fields that must never appear in a bootstrap-tier payload.
+// `text` is the X post body (first-party only, via /api/x-feed); `pollState` is
+// seed-internal cursor state.
+// Kept in sync with stripXFeedRestrictedFields in api/bootstrap.js.
+export { stripXFeedRestrictedFields } from './_bootstrap-public-payload.mjs';
 
 function assertTier(tier) {
   if (!Object.hasOwn(TIER_INTERVAL_MS, tier)) {
@@ -54,10 +63,39 @@ function redisCredentials(env) {
   return { url, token };
 }
 
+function parseBootstrapPipelineEntry(entry, index, key) {
+  if (!entry || typeof entry !== 'object' || !Object.hasOwn(entry, 'result') || entry.error != null) {
+    throw new Error(`Bootstrap Redis pipeline command failed at index ${index}`);
+  }
+
+  if (!entry.result) return { present: false, value: undefined };
+  try {
+    const parsed = JSON.parse(entry.result);
+    if (parsed !== NEG_SENTINEL) {
+      // Presence is independent of the unwrapped value. A well-formed envelope
+      // can unwrap to `data === undefined`; origin still records Map.has(key)
+      // and reports that field missing instead of applying a sibling fallback.
+      const { data, _seed } = unwrapEnvelope(parsed);
+      return {
+        present: true,
+        value: key === BOOTSTRAP_CACHE_KEYS.wildfires ? restoreWildfireBootstrapMetadata(data, _seed) : data,
+      };
+    }
+  } catch {
+    // Malformed values match /api/bootstrap: omit from data and report missing.
+  }
+  return { present: false, value: undefined };
+}
+
 /**
  * Assemble the exact public `{ data, missing }` payload for an ordered registry.
  * Infrastructure or command-shape failures reject the whole operation; missing,
  * malformed, negative-sentinel values remain per-key misses.
+ *
+ * When `canadaAlerts` is in the registry, the #6659 cutover fallback keys are
+ * also read so a missing `alerts:canada:v1` still hydrates the field — the same
+ * contract `/api/bootstrap` applies on the origin path. KV serving must not
+ * bypass that fallback (#7291).
  */
 export async function assembleBootstrapTierPayload(registry, options = {}) {
   const env = options.env ?? process.env;
@@ -66,6 +104,8 @@ export async function assembleBootstrapTierPayload(registry, options = {}) {
   const { url, token } = redisCredentials(env);
   const names = Object.keys(registry);
   const keys = Object.values(registry);
+  const extraKeys = extraCanadaAlertsCutoverReadKeys(keys, BOOTSTRAP_CACHE_KEYS.canadaAlerts);
+  const readKeys = extraKeys.length > 0 ? [...keys, ...extraKeys] : keys;
   const response = await fetchFn(`${url}/pipeline`, {
     method: 'POST',
     headers: {
@@ -73,7 +113,7 @@ export async function assembleBootstrapTierPayload(registry, options = {}) {
       'Content-Type': 'application/json',
       'User-Agent': 'WorldMonitor Bootstrap Publisher/1.0',
     },
-    body: JSON.stringify(keys.map(key => ['GET', key])),
+    body: JSON.stringify(readKeys.map(key => ['GET', key])),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
@@ -81,48 +121,75 @@ export async function assembleBootstrapTierPayload(registry, options = {}) {
   }
 
   const results = await response.json();
-  if (!Array.isArray(results) || results.length !== keys.length) {
+  if (!Array.isArray(results) || results.length !== readKeys.length) {
     throw new Error('Bootstrap Redis pipeline returned the wrong result count');
+  }
+
+  const valuesByKey = new Map();
+  for (let index = 0; index < readKeys.length; index += 1) {
+    const parsed = parseBootstrapPipelineEntry(results[index], index, readKeys[index]);
+    if (parsed.present) valuesByKey.set(readKeys[index], parsed.value);
   }
 
   const data = {};
   const missing = [];
   for (let index = 0; index < names.length; index += 1) {
-    const entry = results[index];
-    if (!entry || typeof entry !== 'object' || !Object.hasOwn(entry, 'result') || entry.error != null) {
-      throw new Error(`Bootstrap Redis pipeline command failed at index ${index}`);
-    }
-
-    let value;
-    if (entry.result) {
-      try {
-        const parsed = JSON.parse(entry.result);
-        if (parsed !== NEG_SENTINEL) value = unwrapEnvelope(parsed).data;
-      } catch {
-        // Malformed values match /api/bootstrap: omit from data and report missing.
-      }
-    }
+    let value = keys[index] === BOOTSTRAP_CACHE_KEYS.canadaAlerts
+      && !valuesByKey.has(BOOTSTRAP_CACHE_KEYS.canadaAlerts)
+      ? canadaAlertsCutoverFallbackValue(valuesByKey)
+      : valuesByKey.get(keys[index]);
 
     if (value === undefined) {
       missing.push(names[index]);
       continue;
     }
 
-    if (
-      names[index] === 'forecasts'
-      && value !== null
-      && typeof value === 'object'
-      && !Array.isArray(value)
-      && Object.hasOwn(value, 'enrichmentMeta')
-    ) {
-      const { enrichmentMeta: _stripped, ...rest } = value;
-      value = rest;
-    }
-    if (names[index] === 'wildfires') value = compactWildfireDashboardPayload(value);
-    data[names[index]] = value;
+    data[names[index]] = sanitizeBootstrapValue(names[index], value);
   }
 
   return { data, missing };
+}
+
+/**
+ * Measure the exact public `{ data, missing }` JSON payload. Key entries retain
+ * payload insertion order; callers can sort a copy for bounded diagnostics.
+ */
+export function buildBootstrapPayloadByteLedger(payload) {
+  if (
+    !payload
+    || typeof payload !== 'object'
+    || Array.isArray(payload)
+    || !payload.data
+    || typeof payload.data !== 'object'
+    || Array.isArray(payload.data)
+    || !Array.isArray(payload.missing)
+  ) {
+    throw new TypeError('Bootstrap byte ledger requires a { data, missing } payload');
+  }
+
+  const keys = Object.entries(payload.data).map(([key, value]) => {
+    const serializedValue = JSON.stringify(value);
+    if (serializedValue === undefined) {
+      throw new TypeError(`Bootstrap byte ledger cannot serialize key: ${key}`);
+    }
+    const valueBytes = Buffer.byteLength(serializedValue, 'utf8');
+    return {
+      key,
+      bytes: Buffer.byteLength(JSON.stringify(key), 'utf8') + 1 + valueBytes,
+      valueBytes,
+    };
+  });
+  const dataEntryBytes = keys.reduce((total, entry) => total + entry.bytes, 0);
+  const dataSeparatorBytes = Math.max(0, keys.length - 1);
+  const missingJson = JSON.stringify(payload.missing);
+
+  return {
+    totalBytes: Buffer.byteLength('{"data":{', 'utf8')
+      + dataEntryBytes
+      + dataSeparatorBytes
+      + Buffer.byteLength(`},"missing":${missingJson}}`, 'utf8'),
+    keys,
+  };
 }
 
 export async function publishBootstrapTier(tier, options = {}) {
@@ -135,52 +202,43 @@ export async function publishBootstrapTier(tier, options = {}) {
     throw new Error(`Bootstrap registry is unavailable for tier ${tier}`);
   }
 
+  const resolveKvStorage = options.resolveKvStorage ?? resolveKvStorageConfig;
+  const kvConfig = resolveKvStorage(env);
+  if (!kvConfig) throw new Error('Bootstrap publisher KV credentials are missing');
+
   const payload = await assembleBootstrapTierPayload(registry, {
     env,
     fetchFn: options.fetchFn,
     timeoutMs: options.redisTimeoutMs,
   });
-  const resolveStorage = options.resolveStorage
-    ?? (storageEnv => resolveR2StorageConfig(storageEnv, { profile: 'bootstrap' }));
-  const storage = resolveStorage(env);
-  if (!storage) throw new Error('Bootstrap publisher R2 credentials are missing');
+  const payloadLedger = buildBootstrapPayloadByteLedger(payload);
+  const keyBytes = Object.fromEntries(
+    payloadLedger.keys.map(({ key, valueBytes }) => [key, valueBytes]),
+  );
+  const largestKeys = [...payloadLedger.keys]
+    .sort((left, right) => right.bytes - left.bytes || left.key.localeCompare(right.key))
+    .slice(0, PUBLISHER_LARGEST_KEY_LIMIT)
+    .map(({ key, bytes }) => ({ key, bytes }));
+  const volume = evaluatePublishedBootstrapVolume(tier, payloadLedger);
 
+  // Write the versioned envelope to Cloudflare Workers KV under the bare tier key
+  // (`fast`/`slow`) so the serving Worker reads `env.KV.get(tier)`. Errors propagate
+  // loudly so credential, network, or 25 MiB cap failures are never swallowed.
   const generatedAt = (options.now ?? Date.now)();
-  const envelope = { generatedAt, tier, payload };
-  const putObject = options.putObject ?? putR2JsonObject;
-  const write = await putObject(storage, `${tier}.json`, envelope, {
-    tier,
-    generatedAt: String(generatedAt),
-  });
-
-  // KV parity write (#5300 KV serving plan). The SAME envelope, keyed by bare tier name
-  // (`fast`/`slow`) so the serving Worker reads `env.KV.get(tier)`. Best-effort and gated by
-  // credential presence: a KV failure — including the 25 MiB guard tripping — must never abort
-  // the canonical R2 publish, but it is logged loudly so a chronic failure is visible.
-  const kv = await publishTierToKv(tier, envelope, { ...options, env, logger: options.logger });
-
-  return { tier, generatedAt, missing: payload.missing.length, bytes: write?.bytes ?? null, kv };
-}
-
-/**
- * Best-effort KV write of a tier envelope. Skips silently when KV is unconfigured (so R2-only
- * deploys are unaffected); on failure, logs and returns `{ ok: false }` without throwing.
- */
-export async function publishTierToKv(tier, envelope, options = {}) {
-  const env = options.env ?? process.env;
-  const resolveKv = options.resolveKvStorage ?? resolveKvStorageConfig;
-  const config = resolveKv(env);
-  if (!config) return { skipped: true };
-
+  const envelope = buildBootstrapTierEnvelope({ generatedAt, tier, payload });
   const putKv = options.putKv ?? putKvJsonValue;
-  const logger = options.logger ?? console;
-  try {
-    const result = await putKv(config, tier, envelope, { fetchFn: options.kvFetchFn });
-    return { ok: true, bytes: result?.bytes ?? null };
-  } catch (err) {
-    logger.error?.(`[bootstrap-kv] tier=${tier} KV write failed: ${err?.message ?? err}`);
-    return { ok: false, error: err?.message ?? String(err) };
-  }
+  const write = await putKv(kvConfig, tier, envelope, { fetchFn: options.kvFetchFn });
+
+  return {
+    tier,
+    generatedAt,
+    missing: payload.missing.length,
+    bytes: write?.bytes ?? null,
+    payloadBytes: payloadLedger.totalBytes,
+    keyBytes,
+    largestKeys,
+    volume,
+  };
 }
 
 function defaultSleep(ms, signal) {
@@ -224,12 +282,26 @@ export async function runPublisherLoop(options = {}) {
     const tier = due[0];
     try {
       const result = await publishTier(tier);
-      const kvStatus = result?.kv?.skipped ? 'skipped'
-        : result?.kv?.ok ? `${result.kv.bytes}b`
-        : `FAILED(${result?.kv?.error ?? 'unknown'})`;
-      logger.info?.(`[bootstrap-r2] published tier=${tier} generatedAt=${result?.generatedAt ?? 'unknown'} bytes=${result?.bytes ?? 'unknown'} missing=${result?.missing ?? 'unknown'} kv=${kvStatus}`);
+      logger.info?.('[bootstrap-kv] published', {
+        tier,
+        generatedAt: result?.generatedAt ?? null,
+        artifactBytes: result?.bytes ?? null,
+        payloadBytes: result?.payloadBytes ?? null,
+        missing: result?.missing ?? null,
+        keyBytes: result?.keyBytes ?? {},
+        largestKeys: result?.largestKeys ?? [],
+        volumeAlerts: result?.volume?.alerts ?? [],
+      });
+      if (result?.volume?.alerts?.length) {
+        logger.warn?.('[bootstrap-volume] published payload exceeded frozen budget', {
+          tier,
+          payloadBytes: result.payloadBytes ?? null,
+          ceilingBytes: result.volume.ceilingBytes ?? null,
+          alerts: result.volume.alerts,
+        });
+      }
     } catch (error) {
-      logger.warn?.(`[bootstrap-r2] publish failed tier=${tier}: ${error?.message ?? String(error)}`);
+      logger.warn?.(`[bootstrap-kv] publish failed tier=${tier}: ${error?.message ?? String(error)}`);
     } finally {
       publishCount += 1;
       do {
@@ -269,7 +341,7 @@ async function main() {
 
   const controller = new AbortController();
   const stop = signal => {
-    console.info(`[bootstrap-r2] received ${signal}; stopping after the active publish`);
+    console.info(`[bootstrap-kv] received ${signal}; stopping after the active publish`);
     controller.abort();
   };
   process.once('SIGTERM', () => stop('SIGTERM'));
@@ -287,7 +359,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   main()
     .then(() => console.log(`\n=== Done (${Date.now() - __runStartedAt}ms) ===`))
     .catch(error => {
-      console.error(`[bootstrap-r2] fatal: ${error?.message ?? String(error)}`);
+      console.error(`[bootstrap-kv] fatal: ${error?.message ?? String(error)}`);
       process.exitCode = 1;
     });
 }

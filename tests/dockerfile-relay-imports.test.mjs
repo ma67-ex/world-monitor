@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 // Shared scanner/resolver (comment-stripping tokenizer + edge extraction) —
 // one home for the machinery this guard previously hand-rolled; see
 // tests/_lib/import-graph-walk.mjs (#5231 review follow-up).
-import { collectRelativeImports, parseDockerfileCopy, resolveNodeRelative } from './_lib/import-graph-walk.mjs';
+import { collectRelativeImports, parseDockerfileCopy, relativeToRepoRoot, resolveNodeRelative } from './_lib/import-graph-walk.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -27,10 +27,12 @@ const root = resolve(__dirname, '..');
 // container guards read Dockerfiles identically. `.json` is included because
 // require()'d data files (e.g. country-names.json behind
 // country-name-to-iso2.cjs, #5359) crash the container at startup when
-// missing, exactly like a missing .cjs.
+// missing, exactly like a missing .cjs. `.js` is included for the ESM modules
+// under scripts/shared/ that a .cjs loads with require() (story-identity.js
+// behind lib/news-story-key.cjs).
 function readCopyList(dockerfilePath) {
   const { files } = parseDockerfileCopy(readFileSync(dockerfilePath, 'utf-8'));
-  return new Set([...files].filter((f) => /^scripts\/.+\.(mjs|cjs|json)$/.test(f)));
+  return new Set([...files].filter((f) => /^scripts\/.+\.(mjs|cjs|js|json)$/.test(f)));
 }
 
 describe('Dockerfile.relay — transitive-import closure', () => {
@@ -42,12 +44,70 @@ describe('Dockerfile.relay — transitive-import closure', () => {
     assert.ok(copied.size > 0, 'Dockerfile.relay has no COPY scripts/*.mjs|cjs lines');
   });
 
+  it('includes the AU yield fallback seeder launched as a child process', () => {
+    assert.ok(copied.has('scripts/seed-yield-curve-au.mjs'));
+  });
+
   it('copies the China country-index helper that ais-relay loads dynamically', () => {
     assert.ok(copied.has('scripts/_country-stock-index.mjs'));
   });
 
   it('copies the weather-alert helper that ais-relay loads dynamically', () => {
     assert.ok(copied.has('scripts/_weather-alert-select.mjs'));
+    assert.ok(
+      copied.has('scripts/shared/iso3-to-iso2.json'),
+      'iso3-to-iso2.json must be COPY\'d; _weather-alert-select.mjs reads it at import for SWIC member codes',
+    );
+  });
+
+  it('copies the UCDP projection helper that ais-relay loads dynamically', () => {
+    // seedUcdpEvents() imports it inside the function, which the BFS below does
+    // not follow. A missing file fails only the projection write, after deploy.
+    assert.ok(copied.has('scripts/_ucdp-dashboard.mjs'));
+  });
+
+  it('copies the PizzINT history helper required by the relay', () => {
+    assert.ok(copied.has('scripts/shared/pizzint-history.cjs'));
+  });
+
+  // The BFS below seeds only from COPY'd entrypoints. notification-relay.cjs
+  // is NOT COPY'd (this image's CMD is ais-relay.cjs), so nothing it requires
+  // is reachable by that BFS — a COPY line added solely for the relay could be
+  // deleted with this suite still green (#8414 review finding). These explicit
+  // assertions are what pin those lines.
+  it('pins the COPY lines added for notification-relay.cjs, which the BFS cannot reach', () => {
+    for (const required of [
+      'scripts/shared/notification-dedup.cjs',
+      'scripts/shared/notify-fields.cjs',
+      'scripts/shared/notification-link-suppression.cjs',
+    ]) {
+      assert.ok(
+        copied.has(required),
+        `${required} is required by scripts/notification-relay.cjs and must stay COPY'd; ` +
+        'the transitive BFS cannot see it because notification-relay.cjs is not an entrypoint of this image',
+      );
+    }
+  });
+
+  // Keeps the Dockerfile comment honest: notification-relay.cjs pulls in
+  // scripts/lib/* modules this image does not ship, so it demonstrably does
+  // not run from this image. If that ever changes, COPY the entrypoint (the
+  // BFS then covers its whole closure) and delete this test.
+  it('notification-relay.cjs is not runnable from this image, so it is not an entrypoint', () => {
+    const relay = resolve(root, 'scripts/notification-relay.cjs');
+    const unshipped = [];
+    for (const rel of collectRelativeImports(relay)) {
+      const resolved = resolveNodeRelative(relay, rel);
+      if (!resolved) continue;
+      const relToRoot = relativeToRepoRoot(root, resolved);
+      if (relToRoot && relToRoot.startsWith('scripts/') && !copied.has(relToRoot)) unshipped.push(relToRoot);
+    }
+    assert.ok(
+      unshipped.length > 0,
+      'Dockerfile.relay now ships every notification-relay.cjs dependency. If the notification-relay ' +
+      'service runs from this image, add `COPY scripts/notification-relay.cjs` so the BFS covers it ' +
+      'and delete this test.',
+    );
   });
 
   it('scanner catches both ESM imports and CJS require/createRequire', () => {
@@ -81,7 +141,7 @@ describe('Dockerfile.relay — transitive-import closure', () => {
       for (const rel of collectRelativeImports(file)) {
         const resolved = resolveNodeRelative(file, rel);
         if (!resolved) continue;
-        const relToRoot = resolved.startsWith(root + '/') ? resolved.slice(root.length + 1) : null;
+        const relToRoot = relativeToRepoRoot(root, resolved);
         if (!relToRoot || !relToRoot.startsWith('scripts/')) continue;
         if (!copied.has(relToRoot)) {
           missing.push(`${relToRoot} (imported by ${file.slice(root.length + 1)})`);

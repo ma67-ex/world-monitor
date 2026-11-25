@@ -1,9 +1,10 @@
 import { build } from 'esbuild';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createBrowserEnvironment } from './runtime-config-panel-harness.mjs';
+import { createTempDir, removeTempDir } from './temp-dir.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..', '..');
@@ -37,7 +38,7 @@ function defineGlobal(name, value) {
 }
 
 async function loadChatAnalystPanel() {
-  const tempDir = mkdtempSync(join(tmpdir(), 'wm-chat-analyst-panel-'));
+  const tempDir = createTempDir('wm-chat-analyst-panel-');
   const outfile = join(tempDir, 'ChatAnalystPanel.bundle.mjs');
 
   const stubModules = new Map([
@@ -52,9 +53,11 @@ async function loadChatAnalystPanel() {
     `],
     ['tauri-bridge-stub', `
       export function invokeTauri() { return Promise.reject(new Error('not wired in test')); }
+      export function hasTauriInvokeBridge() { return false; }
     `],
     ['analytics-stub', `
-      export function trackPanelResized() {}
+      export function trackGateHit() {} export function trackPanelGateClick() {}
+      export function trackLayoutCustomized() {}
       export function trackAnalystControlAction(actionType, status, reason) {
         globalThis.__wmAnalystControlTelemetry?.push({
           actionType,
@@ -97,6 +100,7 @@ async function loadChatAnalystPanel() {
     `],
     ['analyst-markdown-stub', `
       export function postProcessAnalystHtml(html) { return html; }
+      export function balanceStreamingMarkdown(text) { return text; }
     `],
     ['marked-stub', `
       export const marked = { parse: (s) => s };
@@ -163,7 +167,7 @@ async function loadChatAnalystPanel() {
   return {
     ChatAnalystPanel: mod.ChatAnalystPanel,
     cleanupBundle() {
-      rmSync(tempDir, { recursive: true, force: true });
+      removeTempDir(tempDir);
     },
   };
 }

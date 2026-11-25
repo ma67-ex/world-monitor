@@ -1,10 +1,13 @@
-import type { CountryBriefSignals } from '@/types';
+import type { EffectiveTariffRate } from '@/generated/client/worldmonitor/trade/v1/service_client';
+import type { CountrySignalCounts } from '@/types';
 import type { CountryScore } from '@/services/country-instability';
 import type { GetDefenseIndustrialBaseResponse } from '@/generated/client/worldmonitor/military/v1/service_client';
+import type { ImageryChangeContext, RegionalEnergyFeed } from '@/generated/client/worldmonitor/intelligence/v1/service_client';
 import type { PredictionMarket } from '@/services/prediction';
 import type { NewsItem } from '@/types';
-import type { GetCountryChokepointIndexResponse, SectorExposureSummary, CountryProductsResponse, MultiSectorShockResponse } from '@/services/supply-chain';
+import type { GetCountryChokepointIndexResponse, GetCountryVulnerabilitiesResponse, SectorExposureSummary, CountryProductsResponse, MultiSectorShockResponse } from '@/services/supply-chain';
 import type { BriefSource } from '@/utils/brief-sources';
+import type { IntelBriefEvidence } from '@/utils/format-intel-brief';
 import type { DecisionSignalProvenance } from '../../shared/decision-signal-provenance-contract';
 import type { ChinaDecisionSignalGroupId } from '../../shared/china-decision-signals';
 
@@ -18,7 +21,18 @@ export interface CountryIntelData {
   skipped?: boolean;
   reason?: string;
   fallback?: boolean;
+  accessNotice?: 'sign-in' | 'pro' | 'unavailable';
+  /** The brief is one signal per line (no sentences), not prose. */
+  signalRows?: boolean;
   sources?: BriefSource[];
+  evidence?: IntelBriefEvidence[];
+}
+
+export interface CountryTariffTrendsData {
+  currentRate: number;
+  trend: string;
+  datapoints: Array<{ year: number; tariffRate: number }>;
+  effectiveTariffRate?: EffectiveTariffRate;
 }
 
 export interface StockIndexData {
@@ -39,7 +53,8 @@ export interface CountryDeepDiveSignalItem {
   type: 'MILITARY' | 'PROTEST' | 'CYBER' | 'DISASTER' | 'OUTAGE' | 'OTHER';
   severity: ThreatLevel;
   description: string;
-  timestamp: Date;
+  timestamp: Date | null;
+  source?: string;
 }
 
 export interface CountryDeepDiveSignalDetails {
@@ -58,11 +73,13 @@ export interface CountryDeepDiveBaseSummary {
 }
 
 export interface CountryDeepDiveMilitarySummary {
-  ownFlights: number;
-  foreignFlights: number;
-  nearbyVessels: number;
+  ownFlights: number | null;
+  foreignFlights: number | null;
+  nearbyVessels: number | null;
   nearestBases: CountryDeepDiveBaseSummary[];
-  foreignPresence: boolean;
+  foreignPresence: boolean | null;
+  coverageNotes?: string[];
+  coverage?: 'complete' | 'partial';
 }
 
 export interface CountryDeepDiveEconomicIndicator {
@@ -130,6 +147,9 @@ export interface CountryEnergyProfileData {
   solarShare: number;
   hydroShare: number;
   importShare: number;
+  importShareAvailable: boolean;
+  importShareYear: number;
+  importShareSource: string;
   gasStorageAvailable: boolean;
   gasStorageFillPct: number;
   gasStorageChange1d: number;
@@ -141,6 +161,7 @@ export interface CountryEnergyProfileData {
   electricityDate: string;
   jodiOilAvailable: boolean;
   jodiOilDataMonth: string;
+  jodiOilObservedMeasurements?: string[];
   gasolineDemandKbd: number;
   gasolineImportsKbd: number;
   dieselDemandKbd: number;
@@ -178,6 +199,7 @@ export interface CountryEnergyProfileData {
   sprSource: string;
   sprAsOf: string;
   sprAvailable: boolean;
+  regionalEnergyFeeds?: RegionalEnergyFeed[];
 }
 
 export interface CountryPortActivityData {
@@ -194,34 +216,47 @@ export interface CountryPortActivityData {
     anomalySignal: boolean;
   }[];
   fetchedAt: string;
+  // The API's last data for a country PortWatch has not refreshed in 7+ days.
+  stale?: boolean;
 }
 
 export interface CountryBriefPanel {
-  show(country: string, code: string, score: CountryScore | null, signals: CountryBriefSignals): void;
+  setSectionFailure?(id: import('../../shared/country-brief-sections').BriefSectionId, state: 'locked' | 'unavailable', reason: string): void;
+  setSectionCoverage?(id: import('../../shared/country-brief-sections').BriefSectionId, missing: string[]): void;
+  show(country: string, code: string, score: CountryScore | null, signals: CountrySignalCounts): void;
   hide(): void;
   showLoading(): void;
   getCode(): string | null;
   getName(): string | null;
   isVisible(): boolean;
+  /** A map click or map menu is opening this brief: closing it returns focus to `target`. */
+  returnFocusTo?(target: HTMLElement): void;
   getTimelineMount(): HTMLElement | null;
   readonly signal: AbortSignal;
   onClose(cb: () => void): void;
-  setShareStoryHandler(handler: (code: string, name: string) => void): void;
-  setExportImageHandler(handler: (code: string, name: string) => void): void;
   updateBrief(data: CountryIntelData): void;
   updateNews(headlines: NewsItem[]): void;
-  updateMarkets(markets: PredictionMarket[]): void;
+  updateMarkets(markets: PredictionMarket[], metadata?: { fetchedAt?: number }): void;
   updateStock(data: StockIndexData): void;
   updateInfrastructure(code: string): void;
   showGeoError?(onRetry: () => void): void;
-  updateScore?(score: CountryScore | null, signals: CountryBriefSignals): void;
+  updateScore?(score: CountryScore | null, signals: CountrySignalCounts): void;
+  /** True when the shown brief is the one-signal-per-line fallback, not prose. */
+  isSignalRowsBrief?(): boolean;
+  updateSignals?(signals: CountrySignalCounts, notes?: readonly string[]): void;
+  getSignalCounts?(): CountrySignalCounts | null;
   updateSignalDetails?(details: CountryDeepDiveSignalDetails): void;
-  updateMilitaryActivity?(summary: CountryDeepDiveMilitarySummary): void;
+  updateQualifiedCountrySignals?(value: import('../../shared/country-signal-observations').QualifiedCountrySignals): void;
+  clearQualifiedCountrySignals?(): void;
+  updateMilitaryActivity?(summary: CountryDeepDiveMilitarySummary | null): void;
   updateDefenseIndustrialBase?(data: GetDefenseIndustrialBaseResponse | null): void;
+  syncCountryPremiumSectionsAccess?(hasAccess: boolean): void;
+  mountIntelMemory?(code: string, signal: AbortSignal): void;
   updateEconomicIndicators?(indicators: CountryDeepDiveEconomicIndicator[]): void;
   updateChinaCountrySummary?(data: ChinaCountrySummaryData): void;
   updateCountryFacts?(data: CountryFactsData): void;
   updateEnergyProfile?(data: CountryEnergyProfileData): void;
+  updateReservoirContext?(code: string, reservoirs: import('@/services/climate').ReservoirLevel[]): void;
   updateMaritimeActivity?(data: CountryPortActivityData): void;
   updateTradeExposure?(data: GetCountryChokepointIndexResponse | null, sectors?: SectorExposureSummary[]): void;
   maximize?(): void;
@@ -230,10 +265,13 @@ export interface CountryBriefPanel {
   onStateChange?(cb: (state: { visible: boolean; maximized: boolean }) => void): void;
   updateNationalDebt?(entry: { debtToGdp: number; debtUsd: number; annualGrowth: number; source: string } | null): void;
   updateSanctionsPressure?(data: { entryCount: number; sanctionsActive?: boolean } | null): void;
+  updateImageryChange?(context: ImageryChangeContext | null): void;
+  updateNo2Activity?(reading: import('@/services/economic/no2-activity').No2CountryReading): void;
   updateComtradeFlows?(flows: Array<{ partnerName: string; cmdDesc: string; tradeValueUsd: number; yoyChange: number }> | null): void;
-  updateTariffTrends?(data: { currentRate: number; trend: string; datapoints: Array<{ year: number; tariffRate: number }> } | null): void;
+  updateTariffTrends?(data: CountryTariffTrendsData | null): void;
   updateMultiSectorCostShock?(data: MultiSectorShockResponse | null): void;
   updateProductImports?(data: CountryProductsResponse | null): void;
+  updateCommodityVulnerabilities?(data: GetCountryVulnerabilitiesResponse | null): void;
   updateHousingCycle?(data: {
     residential?: { indexValue: number; qoqChange: number | null; yoyChange: number | null; period: string } | null;
     commercial?: { indexValue: number; qoqChange: number | null; yoyChange: number | null; period: string } | null;

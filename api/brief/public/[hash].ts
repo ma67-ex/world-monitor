@@ -24,8 +24,11 @@ export const config = { runtime: 'edge' };
 import { getCorsHeaders, isDisallowedOrigin } from '../../_cors.js';
 import { readRawJsonFromUpstash } from '../../_upstash-json.js';
 // @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from '../../_rate-limit.js';
+// @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../../_sentry-edge.js';
 import { renderBriefMagazine } from '../../../server/_shared/brief-render.js';
+import { briefFontPlatform } from '../../../server/_shared/brief-font-platform.js';
 import {
   BRIEF_PUBLIC_POINTER_PREFIX,
   decodePublicPointer,
@@ -34,10 +37,6 @@ import {
 
 const HTML_HEADERS = {
   'Content-Type': 'text/html; charset=utf-8',
-  // Short edge cache — a shared brief rarely changes within the same
-  // day and we want CDN absorption for viral traffic, but not so long
-  // that a composer re-write (unusual) gets stuck.
-  'Cache-Control': 'public, max-age=0, s-maxage=300, must-revalidate',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   // Critical: keep shared briefs out of public indexes. A per-user
@@ -45,6 +44,14 @@ const HTML_HEADERS = {
   // regression (shared ≠ public forever) and a UX embarrassment.
   'X-Robots-Tag': 'noindex, nofollow',
 };
+
+// CDN absorption is only safe for a rendered brief. A 503 (Upstash blip)
+// or 404 (missing/expired pointer) must not be stored: Vercel caches
+// public responses by URL, and s-maxage=300 would replay the outage page
+// after Redis recovers. Error pages use private, no-store so a transient
+// failure cannot pin an unavailable brief at the edge.
+const SUCCESS_CACHE_CONTROL = 'public, max-age=0, s-maxage=300, must-revalidate';
+const ERROR_CACHE_CONTROL = 'private, no-store';
 
 function htmlResponse(
   req: Request,
@@ -55,7 +62,11 @@ function htmlResponse(
   const isHead = req.method === 'HEAD';
   return new Response(isHead ? null : body, {
     status,
-    headers: { ...HTML_HEADERS, ...extraHeaders },
+    headers: {
+      ...HTML_HEADERS,
+      'Cache-Control': status === 200 ? SUCCESS_CACHE_CONTROL : ERROR_CACHE_CONTROL,
+      ...extraHeaders,
+    },
   });
 }
 
@@ -106,7 +117,7 @@ export default async function handler(
     return new Response(null, { status: 204, headers: cors });
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    return new Response('Method not allowed', { status: 405, headers: cors });
+    return new Response('Method not allowed', { status: 405, headers: { ...cors, Allow: 'GET, HEAD, OPTIONS' } });
   }
 
   // Extract the hash from the URL pathname. Expect:
@@ -121,7 +132,13 @@ export default async function handler(
   ) {
     return htmlResponse(req, 404, NOT_FOUND_PAGE);
   }
-  const rawHash = decodeURIComponent(parts[3] ?? '');
+  // A malformed percent-escape is a bad link, not a server fault.
+  let rawHash: string;
+  try {
+    rawHash = decodeURIComponent(parts[3] ?? '');
+  } catch {
+    return htmlResponse(req, 404, NOT_FOUND_PAGE);
+  }
   if (!isValidShareHashShape(rawHash)) {
     return htmlResponse(req, 404, NOT_FOUND_PAGE);
   }
@@ -134,6 +151,13 @@ export default async function handler(
     ? refCodeRaw
     : undefined;
 
+  // The hash is the only credential, so bound the pointer reads one IP can try.
+  const limited = await checkRateLimit(req, cors, { scope: 'brief-public', limit: 120, window: '60 s' });
+  if (limited) {
+    const retryAfter = limited.headers.get('Retry-After');
+    return htmlResponse(req, limited.status, UNAVAILABLE_PAGE, retryAfter ? { 'Retry-After': retryAfter } : {});
+  }
+
   // Step 1: resolve pointer → {userId, issueSlot}.
   const pointerKey = `${BRIEF_PUBLIC_POINTER_PREFIX}${rawHash}`;
   let pointerRaw: unknown;
@@ -141,7 +165,7 @@ export default async function handler(
     pointerRaw = await readRawJsonFromUpstash(pointerKey);
   } catch (err) {
     console.error('[api/brief/public] pointer read failed:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/brief/public', step: 'pointer-read' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/brief/public', step: 'pointer-read' }, fingerprint: ['api/brief/public', 'pointer-read', err instanceof Error ? err.name : 'Error'], ctx });
     return htmlResponse(req, 503, UNAVAILABLE_PAGE);
   }
   // The pointer is JSON-encoded at write time (both
@@ -170,10 +194,15 @@ export default async function handler(
   // Step 2: resolve the actual brief envelope.
   let envelope: unknown;
   try {
-    envelope = await readRawJsonFromUpstash(`brief:${pointer.userId}:${pointer.issueDate}`);
+    // Seeder-owned envelope (#7674): the Railway digest composer writes the
+    // per-user brief envelope key bare — read it raw in every environment.
+    // (The pointer above IS app-owned and correctly rides the deployment
+    // prefix: this same route family writes it.)
+    // The localized sibling (brief:l10n:*) is deliberately not read: the public page serves English.
+    envelope = await readRawJsonFromUpstash(`brief:${pointer.userId}:${pointer.issueDate}`, 3_000, true);
   } catch (err) {
     console.error('[api/brief/public] envelope read failed:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/brief/public', step: 'envelope-read' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/brief/public', step: 'envelope-read' }, fingerprint: ['api/brief/public', 'envelope-read', err instanceof Error ? err.name : 'Error'], ctx });
     return htmlResponse(req, 503, UNAVAILABLE_PAGE);
   }
   if (!envelope) {
@@ -187,13 +216,14 @@ export default async function handler(
   try {
     html = renderBriefMagazine(
       envelope as Parameters<typeof renderBriefMagazine>[0],
-      { publicMode: true, refCode },
+      { publicMode: true, refCode, fontPlatform: briefFontPlatform(req.headers.get('user-agent') ?? '') },
     );
   } catch (err) {
     console.error('[api/brief/public] malformed envelope:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/brief/public', step: 'render' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/brief/public', step: 'render' }, fingerprint: ['api/brief/public', 'render', err instanceof Error ? err.name : 'Error'], ctx });
     return htmlResponse(req, 404, NOT_FOUND_PAGE);
   }
 
-  return htmlResponse(req, 200, html);
+  // The page links a different font file set per platform (brief-font-platform.js).
+  return htmlResponse(req, 200, html, { Vary: 'User-Agent' });
 }

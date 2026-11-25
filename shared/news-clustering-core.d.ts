@@ -26,6 +26,11 @@ export interface NewsItemCore {
   locationName?: string;
   lang?: string;
   pubDateMissing?: boolean;
+  credibilityScore?: number;
+  /** Server digest's origin-aware publisher-family count for the item's story. */
+  corroborationCount?: number;
+  /** Lead text; with the title, it is what same-copy detection compares (#9095). */
+  snippet?: string;
 }
 
 export type NewsItemWithTier = NewsItemCore & { tier: number };
@@ -35,6 +40,7 @@ export interface ClusteredEventCore {
   primaryTitle: string;
   primarySource: string;
   primaryLink: string;
+  credibilityScore?: number;
   /** Articles in the cluster — a volume signal, not a corroboration signal. */
   sourceCount: number;
   /** Distinct publishers behind those articles (#6428). */
@@ -54,6 +60,10 @@ export interface ClusteredEventCore {
 
 export declare const MAX_CLUSTER_NEWS_ITEMS: number;
 
+export declare function clusterPublisherCount(
+  items: readonly { source: string; title?: string; snippet?: string }[],
+): number;
+
 export declare const PROTO_TO_THREAT_LEVEL: Record<string, ThreatLevel>;
 
 export declare function protoThreatLevelToLabel(value: string | undefined): ThreatLevel;
@@ -69,10 +79,12 @@ export declare function aggregateThreats(
 
 export declare function clusterNewsCore(
   items: NewsItemCore[],
-  getSourceTier: (source: string) => number
+  getSourceTier: (source: string) => number,
+  tokenizeTitle?: (title: string) => Set<string>
 ): ClusteredEventCore[];
 
 export declare function topClusterKeywords(
   cluster: Pick<ClusteredEventCore, 'allItems'>,
-  limit?: number
+  limit?: number,
+  tokenizeTitle?: (title: string) => Set<string>
 ): string[];

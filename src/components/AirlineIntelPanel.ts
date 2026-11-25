@@ -17,10 +17,14 @@ import {
     type DatePrice,
 } from '@/services/aviation';
 import { aviationWatchlist } from '@/services/aviation/watchlist';
+import { flightBoardTime } from '@/services/aviation/board-time';
 import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
 import { t } from '@/services/i18n';
 import { Panel } from './Panel';
-import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { isImeEnter, setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import type { ResolvedScope } from '@/services/tab-focus';
+import { airportCountry, headlineCountries, withoutOwnSourceSuffix } from '@/services/scope-attribution';
+import { PanelScopeFilter, focusedEmptyHtml, scopeTagHtml, type ScopeCountries } from './panel-scope-filter';
 
 
 // ---- Helpers ----
@@ -71,6 +75,9 @@ export class AirlineIntelPanel extends Panel {
     private airports: string[];
     private opsData: AirportOpsSummary[] = [];
     private flightsData: FlightInstance[] = [];
+    // The airport the flights board was loaded for. The board mixes departures
+    // and arrivals, and a row's direction is only readable relative to this.
+    private flightsAirport = '';
     private carriersData: CarrierOps[] = [];
     private trackingData: PositionSample[] = [];
     private trackingFlightData: FlightInstance[] = [];
@@ -93,6 +100,11 @@ export class AirlineIntelPanel extends Panel {
     private refreshTimer: ReturnType<typeof setInterval> | null = null;
     private liveIndicator!: HTMLElement;
     private tabBar!: HTMLElement;
+    // Dashboard focus (#10453). Airports resolve to a country through the
+    // monitored-airport table, a flight through either end, a news item
+    // through its headline. Airlines, tracking and prices do not filter, and
+    // the strip says so on those tabs.
+    private scopeFilter!: PanelScopeFilter;
 
     constructor() {
         super({ id: 'airline-intel', title: t('panels.airlineIntel'), trackActivity: true, infoTooltip: t('components.airlineIntel.infoTooltip') });
@@ -118,12 +130,13 @@ export class AirlineIntelPanel extends Panel {
         refreshBtn.addEventListener('click', () => this.refresh());
         this.header.appendChild(refreshBtn);
 
-        // Add LIVE indicator badge to the title
+        // Add LIVE indicator badge beside the title. Inside the title it would
+        // break onto the title's second line or be cut off with it.
         this.liveIndicator = document.createElement('span');
         this.liveIndicator.className = 'live-badge';
         this.liveIndicator.textContent = '\u25CF LIVE';
-        this.liveIndicator.style.cssText = 'display:none;color:#22c55e;font-size:calc(10px * var(--wm-panel-effective-scale, 1));font-weight:700;margin-left:8px;letter-spacing:0.5px;';
-        this.header.querySelector('.panel-title')?.appendChild(this.liveIndicator);
+        this.liveIndicator.style.cssText = 'display:none;color:#22c55e;font-size:calc(10px * var(--wm-panel-effective-scale, 1));font-weight:700;letter-spacing:0.5px;white-space:nowrap;';
+        this.header.querySelector('.panel-title')?.after(this.liveIndicator);
 
         // Insert tab bar between header and content
         this.tabBar = document.createElement('div');
@@ -137,6 +150,8 @@ export class AirlineIntelPanel extends Panel {
             this.tabBar.appendChild(btn);
         });
         this.element.insertBefore(this.tabBar, this.content);
+        // Below the tabs, above the list it describes.
+        this.scopeFilter = new PanelScopeFilter({ content: this.content, onChange: () => this.renderTab() });
 
         // Add styling class to inherited content div
         this.content.classList.add('airline-intel-content');
@@ -170,7 +185,7 @@ export class AirlineIntelPanel extends Panel {
         });
 
         this.content.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && (e.target as HTMLElement).id === 'trackQueryInput') {
+            if (e.key === 'Enter' && !isImeEnter(e) && (e.target as HTMLElement).id === 'trackQueryInput') {
                 this.handleTrackSearch();
             }
         });
@@ -189,6 +204,32 @@ export class AirlineIntelPanel extends Panel {
     destroy(): void {
         if (this.refreshTimer) clearInterval(this.refreshTimer);
         super.destroy();
+    }
+
+    public override applyScope(scope: ResolvedScope | null): void {
+        if (!this.scopeFilter.setScope(scope)) return;
+        this.renderTab();
+    }
+
+    /** The focused countries, chosen first, for headline matching. */
+    private scopeCandidates(): string[] {
+        const resolved = this.scopeFilter.scope;
+        return resolved ? [...resolved.chosen, ...resolved.neighbours] : [];
+    }
+
+    /**
+     * Countries of a flight's endpoints. The airport list is a hub list, not a
+     * directory, so an unknown endpoint must never push a flight out of the
+     * focus: with an unknown end the flight counts as in focus only when a
+     * known end is, and otherwise has no country (counted, one click away).
+     */
+    private flightCountries(f: FlightInstance): ScopeCountries {
+        const ends = [f.origin?.iata, f.destination?.iata].map((iata) => (iata ? airportCountry(iata) : null));
+        const known = ends.filter((c): c is string => !!c);
+        if (known.length === ends.length) return known;
+        const inFocus = new Set(this.scopeCandidates());
+        const hit = known.filter((c) => inFocus.has(c));
+        return hit;
     }
 
     /** Called by the map when new aircraft positions arrive. */
@@ -211,7 +252,7 @@ export class AirlineIntelPanel extends Panel {
         const errEl = this.content.querySelector('#priceInlineErr') as HTMLElement | null;
         const iataRe = /^[A-Z]{3}$/;
         if (!iataRe.test(origin) || !iataRe.test(dest)) {
-            if (errEl) errEl.textContent = 'Enter valid 3-letter IATA codes';
+            if (errEl) errEl.textContent = 'Enter valid 3-letter airport codes (for example, DXB)';
             return;
         }
         const today = localDateStr();
@@ -238,7 +279,7 @@ export class AirlineIntelPanel extends Panel {
         const errEl = this.content.querySelector('#datesInlineErr') as HTMLElement | null;
         const iataRe = /^[A-Z]{3}$/;
         if (!iataRe.test(origin) || !iataRe.test(dest)) {
-            if (errEl) errEl.textContent = 'Enter valid 3-letter IATA codes';
+            if (errEl) errEl.textContent = 'Enter valid 3-letter airport codes (for example, DXB)';
             return;
         }
         if (!start || !end) {
@@ -258,7 +299,11 @@ export class AirlineIntelPanel extends Panel {
             return;
         }
         const daysDiff = (new Date(end).getTime() - new Date(start).getTime()) / 86400000;
-        if (errEl) errEl.textContent = daysDiff > 90 ? 'Range exceeds 90 days — results may be incomplete' : '';
+        if (daysDiff > 30) {
+            if (errEl) errEl.textContent = 'Choose a range of at most 31 days';
+            return;
+        }
+        if (errEl) errEl.textContent = '';
         this.pricesOrigin = origin;
         this.pricesDest = dest;
         this.datesStart = start;
@@ -316,9 +361,12 @@ export class AirlineIntelPanel extends Panel {
                 case 'ops':
                     this.opsData = await fetchAirportOpsSummary(this.airports);
                     break;
-                case 'flights':
-                    this.flightsData = await fetchAirportFlights(this.airports[0] ?? 'IST', 'both', 30);
+                case 'flights': {
+                    const boardAirport = this.airports[0] ?? 'IST';
+                    this.flightsData = await fetchAirportFlights(boardAirport, 'both', 30);
+                    this.flightsAirport = boardAirport;
                     break;
+                }
                 case 'airlines':
                     this.carriersData = await fetchCarrierOps(this.airports);
                     break;
@@ -374,7 +422,10 @@ export class AirlineIntelPanel extends Panel {
     }
 
     private renderTab(): void {
-        if (this.loading) { this.renderLoading(); return; }
+        if (this.loading) { this.scopeFilter.hideStrip(); this.renderLoading(); return; }
+        if (this.activeTab === 'airlines' || this.activeTab === 'tracking' || this.activeTab === 'prices') {
+            this.scopeFilter.renderStrip(null, t('focus.filter.tabNotFiltered'));
+        }
         switch (this.activeTab) {
             case 'ops': this.renderOps(); break;
             case 'flights': this.renderFlights(); break;
@@ -388,46 +439,61 @@ export class AirlineIntelPanel extends Panel {
     // ---- Ops tab ----
     private renderOps(): void {
         if (!this.opsData.length) {
-            setTrustedHtml(this.content, trustedHtml(`<div class="no-data">${t('components.airlineIntel.noOpsData')}</div>`, "legacy direct innerHTML migration"));
+            this.scopeFilter.hideStrip();
+            this.setTrustedContent(trustedHtml(`<div class="no-data">${t('components.airlineIntel.noOpsData')}</div>`, "legacy direct innerHTML migration"));
             return;
         }
-        const rows = this.opsData.map(s => `
+        const view = this.scopeFilter.view(this.opsData, s => airportCountry(s.iata));
+        this.scopeFilter.renderStrip(view);
+        if (view.emptyByFocus) {
+            this.setTrustedContent(trustedHtml(focusedEmptyHtml(t('focus.filter.emptyAirports')), 'focus empty state: escaped by focusedEmptyHtml'));
+            return;
+        }
+        const rows = view.rows.map(({ item: s, ...row }) => `
       <div class="ops-row">
         <div class="ops-iata">${escapeHtml(s.iata)}</div>
-        <div class="ops-name">${escapeHtml(s.name || s.iata)}</div>
+        <div class="ops-name">${escapeHtml(s.name || s.iata)}${scopeTagHtml(row)}</div>
         <div class="ops-severity" style="color:${SEVERITY_COLOR[s.severity] ?? '#aaa'}">${s.severity.toUpperCase()}</div>
         <div class="ops-delay">${s.avgDelayMinutes > 0 ? `+${s.avgDelayMinutes}m` : '—'}</div>
         <div class="ops-cancel">${s.cancellationRate > 0 ? `${s.cancellationRate.toFixed(1)}% cxl` : ''}</div>
         ${s.closureStatus ? '<div class="ops-closed">CLOSED</div>' : ''}
         ${s.notamFlags.length ? `<div class="ops-notam">⚠️ NOTAM</div>` : ''}
       </div>`).join('');
-        setTrustedHtml(this.content, trustedHtml(`<div class="ops-grid">${rows}</div>`, "legacy direct innerHTML migration"));
+        this.setTrustedContent(trustedHtml(`<div class="ops-grid">${rows}</div>`, "legacy direct innerHTML migration"));
     }
 
     // ---- Flights tab ----
     private renderFlights(): void {
         if (!this.flightsData.length) {
-            setTrustedHtml(this.content, trustedHtml(`<div class="no-data">${t('components.airlineIntel.noFlights')}</div>`, "legacy direct innerHTML migration"));
+            this.scopeFilter.hideStrip();
+            this.setTrustedContent(trustedHtml(`<div class="no-data">${t('components.airlineIntel.noFlights')}</div>`, "legacy direct innerHTML migration"));
             return;
         }
-        const rows = this.flightsData.map(f => {
+        const view = this.scopeFilter.view(this.flightsData, f => this.flightCountries(f));
+        this.scopeFilter.renderStrip(view);
+        if (view.emptyByFocus) {
+            this.setTrustedContent(trustedHtml(focusedEmptyHtml(t('focus.filter.emptyFlights')), 'focus empty state: escaped by focusedEmptyHtml'));
+            return;
+        }
+        const rows = view.rows.map(({ item: f, ...row }) => {
             const color = STATUS_BADGE[f.status] ?? '#6b7280';
+            const when = flightBoardTime(f, this.flightsAirport);
             return `
         <div class="flight-row">
           <div class="flight-num">${escapeHtml(f.flightNumber)}</div>
-          <div class="flight-route">${escapeHtml(f.origin.iata)} → ${escapeHtml(f.destination.iata)}</div>
-          <div class="flight-time">${fmtTime(f.scheduledDeparture)}</div>
+          <div class="flight-route">${escapeHtml(f.origin.iata)} → ${escapeHtml(f.destination.iata)}${scopeTagHtml(row)}</div>
+          <div class="flight-time">${fmtTime(when)}</div>
           <div class="flight-delay" style="color:${f.delayMinutes > 0 ? '#f97316' : '#aaa'}">${f.delayMinutes > 0 ? `+${f.delayMinutes}m` : ''}</div>
-          <div class="flight-status" style="color:${color}">${f.status}</div>
+          <div class="flight-status" style="color:${color}">${escapeHtml(f.status)}</div>
         </div>`;
         }).join('');
-        setTrustedHtml(this.content, trustedHtml(`<div class="flights-list">${rows}</div>`, "legacy direct innerHTML migration"));
+        this.setTrustedContent(trustedHtml(`<div class="flights-list">${rows}</div>`, "legacy direct innerHTML migration"));
     }
 
     // ---- Airlines tab ----
     private renderAirlines(): void {
         if (!this.carriersData.length) {
-            setTrustedHtml(this.content, trustedHtml(`<div class="no-data">${t('components.airlineIntel.noCarrierData')}</div>`, "legacy direct innerHTML migration"));
+            this.setTrustedContent(trustedHtml(`<div class="no-data">${t('components.airlineIntel.noCarrierData')}</div>`, "legacy direct innerHTML migration"));
             return;
         }
         const rows = this.carriersData.slice(0, 15).map(c => `
@@ -437,13 +503,13 @@ export class AirlineIntelPanel extends Panel {
         <div class="carrier-delay" style="color:${c.delayPct > 30 ? '#ef4444' : '#aaa'}">${c.delayPct.toFixed(1)}% delayed</div>
         <div class="carrier-cancel">${c.cancellationRate.toFixed(1)}% cxl</div>
       </div>`).join('');
-        setTrustedHtml(this.content, trustedHtml(`<div class="carriers-list">${rows}</div>`, "legacy direct innerHTML migration"));
+        this.setTrustedContent(trustedHtml(`<div class="carriers-list">${rows}</div>`, "legacy direct innerHTML migration"));
     }
 
     // ---- Tracking tab ----
     private renderTracking(): void {
         const clearBtn = this.trackingQuery
-            ? `<button id="trackClearBtn" class="icon-btn" style="padding:4px 8px;color:#9ca3af" title="Back to live feed">×</button>`
+            ? `<button id="trackClearBtn" class="icon-btn" style="padding:4px 8px;color:#9ca3af" title="Back to live feed" aria-label="Back to live feed">×</button>`
             : '';
         const searchBar = `
       <div class="track-search" style="display:flex;gap:6px;padding:8px 0 6px">
@@ -471,7 +537,7 @@ export class AirlineIntelPanel extends Panel {
             <div style="display:flex;gap:8px;align-items:baseline">
               <strong>${escapeHtml(f.flightNumber)}</strong>
               <span style="color:#9ca3af;font-size:calc(11px * var(--wm-panel-effective-scale, 1))">${escapeHtml(f.carrier.name || f.carrier.iata)}</span>
-              <span style="color:${color};font-size:calc(11px * var(--wm-panel-effective-scale, 1));margin-left:auto">${f.status}</span>
+              <span style="color:${color};font-size:calc(11px * var(--wm-panel-effective-scale, 1));margin-left:auto">${escapeHtml(f.status)}</span>
             </div>
             <div style="font-size:calc(12px * var(--wm-panel-effective-scale, 1));color:var(--text-dim)">${escapeHtml(f.origin.iata)} → ${escapeHtml(f.destination.iata)}${depStr ? ` · ${depStr}` : ''}${arrStr}</div>
             ${f.aircraftType ? `<div style="font-size:calc(11px * var(--wm-panel-effective-scale, 1));color:#6b7280">${escapeHtml(f.aircraftType)}</div>` : ''}
@@ -505,13 +571,21 @@ export class AirlineIntelPanel extends Panel {
     // ---- News tab ----
     private renderNews(): void {
         if (!this.newsData.length) {
-            setTrustedHtml(this.content, trustedHtml(`<div class="no-data">${t('components.airlineIntel.noNews')}</div>`, "legacy direct innerHTML migration"));
+            this.scopeFilter.hideStrip();
+            this.setTrustedContent(trustedHtml(`<div class="no-data">${t('components.airlineIntel.noNews')}</div>`, "legacy direct innerHTML migration"));
             return;
         }
-        const items = this.newsData.map(n => `
+        const candidates = this.scopeCandidates();
+        const view = this.scopeFilter.view(this.newsData, n => headlineCountries(withoutOwnSourceSuffix(n.title, n.sourceName), candidates));
+        this.scopeFilter.renderStrip(view);
+        if (view.emptyByFocus) {
+            this.setTrustedContent(trustedHtml(focusedEmptyHtml(t('focus.filter.emptyAviationNews')), 'focus empty state: escaped by focusedEmptyHtml'));
+            return;
+        }
+        const items = view.rows.map(({ item: n, ...row }) => `
       <div class="news-item" style="padding:8px 0;border-bottom:1px solid var(--border,#2a2a2a)">
         <a href="${sanitizeUrl(n.url)}" target="_blank" rel="noopener" class="news-link">${escapeHtml(n.title)}</a>
-        <div class="news-meta" style="font-size:calc(11px * var(--wm-panel-effective-scale, 1));color:var(--text-dim,#888);margin-top:2px">${escapeHtml(n.sourceName)} · ${n.publishedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+        <div class="news-meta" style="font-size:calc(11px * var(--wm-panel-effective-scale, 1));color:var(--text-dim,#888);margin-top:2px">${escapeHtml(n.sourceName)} · ${n.publishedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${scopeTagHtml(row)}</div>
       </div>`).join('');
         setTrustedHtml(this.content, trustedHtml(`<div class="news-list" style="padding:0 4px">${items}</div>`, "legacy direct innerHTML migration"));
     }
@@ -533,11 +607,11 @@ export class AirlineIntelPanel extends Panel {
             const dep = this.pricesDep || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
             const form = `
         <div class="price-controls">
-          <input id="priceFromInput" class="price-input" placeholder="From" maxlength="3" value="${escapeHtml(this.pricesOrigin)}" style="width:54px">
-          <span style="color:#6b7280">\u2192</span>
-          <input id="priceToInput" class="price-input" placeholder="To" maxlength="3" value="${escapeHtml(this.pricesDest)}" style="width:54px">
-          <input id="priceDepInput" class="price-input" type="date" value="${escapeHtml(dep)}" style="width:128px">
-          <select id="priceCabinSelect" class="price-input" style="width:110px">
+          <input id="priceFromInput" class="price-input" placeholder="From" aria-label="Origin airport code" maxlength="3" value="${escapeHtml(this.pricesOrigin)}" style="width:54px">
+          <span style="color:#6b7280" aria-hidden="true">\u2192</span>
+          <input id="priceToInput" class="price-input" placeholder="To" aria-label="Destination airport code" maxlength="3" value="${escapeHtml(this.pricesDest)}" style="width:54px">
+          <input id="priceDepInput" class="price-input" type="date" aria-label="Departure date" value="${escapeHtml(dep)}" style="width:128px">
+          <select id="priceCabinSelect" class="price-input" aria-label="Cabin class" style="width:110px">
             <option value="ECONOMY"${this.pricesCabin === 'ECONOMY' ? ' selected' : ''}>Economy</option>
             <option value="PREMIUM_ECONOMY"${this.pricesCabin === 'PREMIUM_ECONOMY' ? ' selected' : ''}>Premium Economy</option>
             <option value="BUSINESS"${this.pricesCabin === 'BUSINESS' ? ' selected' : ''}>Business</option>
@@ -593,7 +667,7 @@ export class AirlineIntelPanel extends Panel {
             ${escapeHtml(t('components.airlineIntel.tripDays'))}:
             <input id="datesTripDurInput" class="price-input" type="number" min="1" value="${this.datesTripDuration}" style="width:44px">
           </label>
-          <select id="datesCabinSelect" class="price-input" style="width:110px">
+          <select id="datesCabinSelect" class="price-input" aria-label="Cabin class" style="width:110px">
             <option value="ECONOMY"${this.pricesCabin === 'ECONOMY' ? ' selected' : ''}>Economy</option>
             <option value="PREMIUM_ECONOMY"${this.pricesCabin === 'PREMIUM_ECONOMY' ? ' selected' : ''}>Premium Economy</option>
             <option value="BUSINESS"${this.pricesCabin === 'BUSINESS' ? ' selected' : ''}>Business</option>

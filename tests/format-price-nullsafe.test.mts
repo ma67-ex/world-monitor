@@ -7,26 +7,21 @@ import { transformSync } from 'esbuild';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// `src/utils/index.ts` is a barrel that re-exports from `./proxy`, which reads
-// `import.meta.env.DEV` at module load — a documented gotcha that breaks plain
-// tsx/node imports (see comments in src/utils/cloud-prefs-migrations.ts and
-// src/components/resilience-widget-utils.ts). The pure formatters in the barrel
-// (formatPrice/formatChange/...) have no env or DOM dependency, so we strip the
-// side-effecting re-export/import lines and evaluate just the standalone code.
+// `src/utils/market-format.ts` holds the pure formatters (formatPrice /
+// formatChange / getChangeClass / getHeatmapClass). The `@/utils` barrel
+// re-exports them and also loads `./proxy`, which reads `import.meta.env.DEV`
+// at module load — a documented gotcha that breaks plain tsx/node imports.
 interface LoadedUtils {
   formatPrice: (p: number | null | undefined) => string;
   formatChange: (p: number | null | undefined) => string;
   getChangeClass: (p: number | null | undefined) => string;
   getHeatmapClass: (p: number | null | undefined) => string;
+  formatQuotePrice: (symbol: string, p: number | null | undefined) => string;
 }
 
 async function loadUtils(): Promise<LoadedUtils> {
-  const src = readFileSync(resolve(__dirname, '../src/utils/index.ts'), 'utf-8');
-  const stripped = src
-    .split('\n')
-    .filter((line) => !/^\s*(export\s+(type\s+)?\{[^}]*\}\s+from|export\s+\*\s+from|import\s+(type\s+)?\{[^}]*\}\s+from)\s+['"]/.test(line))
-    .join('\n');
-  const { code } = transformSync(stripped, { loader: 'ts', format: 'esm' });
+  const src = readFileSync(resolve(__dirname, '../src/utils/market-format.ts'), 'utf-8');
+  const { code } = transformSync(src, { loader: 'ts', format: 'esm' });
   const dataUrl = `data:text/javascript;base64,${Buffer.from(code).toString('base64')}#${Date.now()}-${Math.random()}`;
   return import(dataUrl);
 }
@@ -65,6 +60,53 @@ describe('formatPrice null-safety (WORLDMONITOR-SH)', () => {
   });
 });
 
+// #9705: two fraction digits (and CryptoPanel's default locale string) round a
+// positive sub-cent price to a literal zero. A shared magnitude formatter must
+// keep that price distinguishable from an actual zero without a long digit run.
+describe('formatPrice sub-cent magnitude (#9705)', () => {
+  it('shows a sub-cent price instead of $0.00', async () => {
+    const { formatPrice } = await loadUtils();
+    assert.equal(formatPrice(0.00024), '$0.00024');
+    assert.equal(formatPrice(-0.00024), '$-0.00024');
+    assert.equal(formatPrice(0.009), '$0.009');
+  });
+
+  it('shows one hundred-millionth and an honest floor beneath it', async () => {
+    const { formatPrice } = await loadUtils();
+    assert.equal(formatPrice(1e-8), '$0.00000001');
+    assert.equal(formatPrice(-1e-8), '$-0.00000001');
+    assert.equal(formatPrice(1e-12), '<$0.00000001');
+    assert.equal(formatPrice(-1e-12), '>-$0.00000001');
+  });
+
+  it('keeps ordinary, zero, negative, and non-finite prices on their existing paths', async () => {
+    const { formatPrice } = await loadUtils();
+    assert.equal(formatPrice(0), '$0.00');
+    assert.equal(formatPrice(0.01), '$0.01');
+    assert.equal(formatPrice(0.123456), '$0.123456');
+    assert.equal(formatPrice(0.5), '$0.50');
+    assert.equal(formatPrice(-0.5), '$-0.50');
+    assert.equal(formatPrice(12.5), '$12.50');
+    assert.equal(formatPrice(1500), '$1,500');
+    assert.equal(formatPrice(-1500), '$-1,500.00');
+    assert.equal(formatPrice(NaN), '--');
+    assert.equal(formatPrice(Infinity), '--');
+    assert.equal(formatPrice(-Infinity), '--');
+  });
+
+  it('caps tiny prices at a short string', async () => {
+    const { formatPrice } = await loadUtils();
+    for (const value of [0.00024, 1e-8, 1e-12, 1e-20, -1e-20]) {
+      const text = formatPrice(value);
+      assert.ok(text.length <= 16, `${value} rendered ${JSON.stringify(text)}`);
+      assert.notEqual(text, '$0');
+      assert.notEqual(text, '$0.00');
+      assert.notEqual(text, '$-0');
+      assert.notEqual(text, '$-0.00');
+    }
+  });
+});
+
 describe('change formatting unavailable-state consistency', () => {
   it('formats non-finite changes as unavailable without directional styling', async () => {
     const { formatChange, getChangeClass, getHeatmapClass } = await loadUtils();
@@ -94,5 +136,27 @@ describe('change formatting unavailable-state consistency', () => {
     assert.equal(getHeatmapClass(-1), 'down-2');
     assert.equal(getHeatmapClass(1.99), 'up-2');
     assert.equal(getHeatmapClass(-2), 'down-3');
+  });
+});
+
+// Dogfood: the Markets panel showed index levels and local-currency listings
+// with a dollar sign ("$6,712" for the S&P 500, "$3,350" for Shanghai, "$3.75"
+// for the riyal rate). Only US tickers, US ETFs and dollar futures are dollars.
+describe('formatQuotePrice', () => {
+  // Expected text comes from formatPrice, so separators follow the host locale.
+  it('drops the dollar sign for indices, exchange-suffixed listings and FX pairs', async () => {
+    const { formatQuotePrice, formatPrice } = await loadUtils();
+    for (const [symbol, price] of [['^GSPC', 6712.4], ['000001.SS', 3350.2], ['^TASI.SR', 11250], ['7203.T', 2875.5], ['AAL.L', 2410], ['SARUSD=X', 0.2666]] as const) {
+      assert.equal(formatQuotePrice(symbol, price), formatPrice(price).replace('$', ''), symbol);
+    }
+  });
+
+  it('keeps the dollar sign for US tickers, share classes, ETFs and futures', async () => {
+    const { formatQuotePrice, formatPrice } = await loadUtils();
+    for (const [symbol, price] of [['AAPL', 212.5], ['BRK-B', 1500], ['BRK.B', 1500], ['BF.A', 41.2], ['QAT', 18.2], ['BZ=F', 82.1]] as const) {
+      assert.equal(formatQuotePrice(symbol, price), formatPrice(price), symbol);
+      assert.match(formatQuotePrice(symbol, price), /\$/, symbol);
+    }
+    assert.equal(formatQuotePrice('^GSPC', null), '--');
   });
 });

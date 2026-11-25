@@ -7,6 +7,11 @@ import {
   normalizeSearchExport,
   runCli,
 } from '../scripts/seo-ai-visibility-collector.mjs';
+import {
+  buildScorecard,
+  formatScorecardMarkdown,
+  runCli as runScorecardCli,
+} from '../scripts/seo-ai-visibility-scorecard.mjs';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,7 +21,8 @@ const readJson = (relativePath) => JSON.parse(
   readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8'),
 );
 
-const querySet = readJson('docs/research/seo-ai-visibility/query-set.json');
+// The fixtures and the 2026-07-27 baseline were measured with seo-ai-visibility-v1.
+const querySet = readJson('docs/research/seo-ai-visibility/query-sets/seo-ai-visibility-v1.json');
 const template = readJson(
   'docs/research/seo-ai-visibility/baselines/2026-07-27.json',
 );
@@ -153,6 +159,52 @@ describe('SEO/AI visibility collector', () => {
     assert.equal('token' in normalized, false);
   });
 
+  it('keeps an unmeasured query row null with the provider reason, never zero', () => {
+    const metrics = {
+      indexedPages: 0, impressions: 20, clicks: 4, ctr: 0.2, averagePosition: 8,
+    };
+    const reason = 'Not reported by Search Console: below its privacy threshold or no impressions in this window.';
+    const source = searchRows(metrics);
+    source.windows[0].queryRows[0] = {
+      queryId: 'q01',
+      query: querySet.queries[0].query,
+      clicks: null,
+      impressions: null,
+      ctr: null,
+      position: null,
+      reason,
+    };
+    const normalized = normalizeSearchExport(source, {
+      querySet, observedAt, provider: 'googleSearchConsole',
+    });
+    assert.deepEqual(normalized.queryRows, [{
+      windowLabel: '28d',
+      queryId: 'q01',
+      metrics: {
+        impressions: null, clicks: null, ctr: null, averagePosition: null,
+      },
+      reason,
+    }]);
+    assert.equal(normalized.status, 'partial');
+    assert.equal(normalized.windows[0].metrics.impressions, 20, 'a null query row never replaces the stated total');
+
+    const unexplained = searchRows(metrics);
+    unexplained.windows[0].queryRows[0] = {
+      query: querySet.queries[0].query, clicks: null, impressions: null, ctr: null, position: null,
+    };
+    assert.throws(
+      () => normalizeSearchExport(unexplained, { querySet, observedAt, provider: 'googleSearchConsole' }),
+      /query row with no metrics must carry a reason/,
+    );
+
+    const contradictory = searchRows(metrics);
+    contradictory.windows[0].queryRows[0].reason = reason;
+    assert.throws(
+      () => normalizeSearchExport(contradictory, { querySet, observedAt, provider: 'googleSearchConsole' }),
+      /query row with metrics must not carry a reason/,
+    );
+  });
+
   it('fails closed when an imported query is not an exact reviewed query', () => {
     const source = searchRows({
       indexedPages: 1,
@@ -200,6 +252,42 @@ describe('SEO/AI visibility collector', () => {
       provider: 'googleSearchConsole',
     });
     assert.equal(normalized.pageFamilyRows[0].pageFamily, 'homepage');
+  });
+
+  it('keeps an explicitly null window metric null instead of summing reviewed query rows into it', () => {
+    // Reviewed query rows cover a handful of queries, so their sum is not a
+    // site total. A provider that reports no site position (Bing traffic) or
+    // no site total must stay null, not inherit the query-row aggregate.
+    const source = searchRows({
+      indexedPages: null,
+      impressions: null,
+      clicks: null,
+      ctr: null,
+      averagePosition: null,
+    });
+    const normalized = normalizeSearchExport(source, {
+      querySet,
+      observedAt,
+      provider: 'googleSearchConsole',
+    });
+    assert.deepEqual(normalized.windows[0].metrics, {
+      indexedPages: null,
+      impressions: null,
+      clicks: null,
+      ctr: null,
+      averagePosition: null,
+    });
+    assert.equal(normalized.queryRows[0].metrics.impressions, 20, 'the query row itself is kept');
+
+    // An omitted metric still falls back to the row aggregate, as before.
+    const omitted = searchRows({ indexedPages: 3 });
+    const aggregated = normalizeSearchExport(omitted, {
+      querySet,
+      observedAt,
+      provider: 'googleSearchConsole',
+    });
+    assert.equal(aggregated.windows[0].metrics.impressions, 20);
+    assert.equal(aggregated.windows[0].metrics.indexedPages, 3);
   });
 
   it('marks a search export partial when reviewed query or page-family breakdowns are empty', () => {
@@ -565,6 +653,111 @@ describe('SEO/AI visibility collector', () => {
     );
   });
 
+  it('imports independent Google Overview and Mode observations under contract v2', async () => {
+    const googleObservation = template.aiObservations.find(
+      ({ platform }) => platform === 'google_ai',
+    );
+    const sources = {
+      schemaVersion: 2,
+      googleSearchConsole: { status: 'unavailable', reason: 'No export.' },
+      bingWebmaster: { status: 'unavailable', reason: 'No export.' },
+      referrals: { status: 'unavailable', reason: 'No export.' },
+      aiSurfaces: [
+        { platform: 'chatgpt_search', status: 'unavailable', reason: 'Not collected.' },
+        { platform: 'perplexity', status: 'unavailable', reason: 'Not collected.' },
+        { platform: 'google_ai_overview', status: 'available' },
+        { platform: 'google_ai_mode', status: 'available' },
+        { platform: 'copilot_search', status: 'unavailable', reason: 'Not collected.' },
+      ],
+      aiObservations: [
+        {
+          ...structuredClone(googleObservation),
+          platform: 'google_ai_overview',
+          prompt: 'must never be copied',
+        },
+        {
+          ...structuredClone(googleObservation),
+          platform: 'google_ai_mode',
+          directCitation: false,
+          citedUrls: [],
+          summary: 'Google AI Mode mentioned World Monitor without a direct citation.',
+          accountId: 'must never be copied',
+        },
+      ],
+    };
+
+    const current = collectBaseline({
+      template,
+      querySet,
+      sources,
+      observedAt,
+      repositoryRevision: 'test-revision',
+    });
+
+    assert.equal(current.schemaVersion, 2);
+    assert.deepEqual(
+      current.aiObservations.map(({ queryId, platform }) => ({ queryId, platform })),
+      [
+        { queryId: 'q01', platform: 'google_ai_overview' },
+        { queryId: 'q01', platform: 'google_ai_mode' },
+      ],
+    );
+    assert.equal(JSON.stringify(current).includes('must never be copied'), false);
+
+    const markdown = formatScorecardMarkdown(buildScorecard(querySet, current));
+    assert.match(markdown, /\| q01 \| Google AI Overview \|/);
+    assert.match(markdown, /\| q01 \| Google AI Mode \|/);
+
+    const directory = mkdtempSync(join(tmpdir(), 'seo-visibility-five-surface-'));
+    const sourcesPath = join(directory, 'sources.json');
+    const baselinePath = join(directory, 'baseline.json');
+    const scorecardPath = join(directory, 'scorecard.md');
+    writeFileSync(sourcesPath, JSON.stringify(sources));
+    try {
+      await runCli([
+        '--queries', 'docs/research/seo-ai-visibility/query-sets/seo-ai-visibility-v1.json',
+        '--template', 'docs/research/seo-ai-visibility/baselines/2026-07-27.json',
+        '--sources', sourcesPath,
+        '--observed-at', observedAt,
+        '--repository-revision', 'test-revision',
+        '--output', baselinePath,
+      ]);
+      await runScorecardCli([
+        '--queries', 'docs/research/seo-ai-visibility/query-sets/seo-ai-visibility-v1.json',
+        '--baseline', baselinePath,
+        '--output', scorecardPath,
+      ]);
+      await runScorecardCli([
+        '--queries', 'docs/research/seo-ai-visibility/query-sets/seo-ai-visibility-v1.json',
+        '--baseline', baselinePath,
+        '--output', scorecardPath,
+        '--check',
+      ]);
+      assert.equal(JSON.parse(readFileSync(baselinePath, 'utf8')).schemaVersion, 2);
+      assert.match(readFileSync(scorecardPath, 'utf8'), /Full target matrix: 125/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('requires an explicit five-surface availability manifest for contract v2', () => {
+    assert.throws(
+      () => collectBaseline({
+        template,
+        querySet,
+        sources: {
+          schemaVersion: 2,
+          googleSearchConsole: { status: 'unavailable', reason: 'No export.' },
+          bingWebmaster: { status: 'unavailable', reason: 'No export.' },
+          referrals: { status: 'unavailable', reason: 'No export.' },
+        },
+        observedAt,
+        repositoryRevision: 'test-revision',
+      }),
+      /aiSurfaces is required for baseline schemaVersion 2/,
+    );
+  });
+
   it('bounds imported windows, rows, and UTF-8 strings before normalization', () => {
     const oversizedWindows = Array.from({ length: 17 }, (_, index) => ({
       label: `${index + 1}d`,
@@ -653,7 +846,7 @@ describe('SEO/AI visibility collector', () => {
       aiSurfaces: template.aiSurfaces,
     }));
     const args = [
-      '--queries', 'docs/research/seo-ai-visibility/query-set.json',
+      '--queries', 'docs/research/seo-ai-visibility/query-sets/seo-ai-visibility-v1.json',
       '--template', 'docs/research/seo-ai-visibility/baselines/2026-07-27.json',
       '--sources', sourcesPath,
       '--observed-at', observedAt,
@@ -681,7 +874,7 @@ describe('SEO/AI visibility collector', () => {
     try {
       await assert.rejects(
         runCli([
-          '--queries', 'docs/research/seo-ai-visibility/query-set.json',
+          '--queries', 'docs/research/seo-ai-visibility/query-sets/seo-ai-visibility-v1.json',
           '--template', 'docs/research/seo-ai-visibility/baselines/2026-07-27.json',
           '--sources', sourcesPath,
           '--observed-at', observedAt,

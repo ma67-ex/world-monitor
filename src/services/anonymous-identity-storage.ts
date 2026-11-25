@@ -11,10 +11,6 @@ export function getStoredAnonId(): string | null {
   }
 }
 
-export function saveAnonId(anonId: string): void {
-  localStorage.setItem(ANON_KEY, anonId);
-}
-
 export function getStoredAnonClaimToken(): string | null {
   try {
     return localStorage.getItem(ANON_CLAIM_TOKEN_KEY);

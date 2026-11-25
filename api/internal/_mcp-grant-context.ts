@@ -36,16 +36,25 @@
 
 export const config = { runtime: 'edge' };
 
-import { resolveClerkSession } from '../../server/_shared/auth-session';
+import { resolveVerifiedSessionUserId } from '../../server/_shared/auth-session';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from '../_rate-limit.js';
 import {
   getEntitlements,
   isEntitlementBackendConfigured,
 } from '../../server/_shared/entitlement-check';
 import {
   checkProMcpAccess,
+  grantSessionVerificationUnavailableResponse,
   proMcpGateDenialResponse,
   type ProMcpEntitlement,
 } from '../../server/_shared/pro-mcp-gate';
+// @ts-expect-error — JS module, no declaration file
+import { redirectDisplayHost } from '../oauth/_redirect-uri.js';
+// @ts-expect-error — JS module, no declaration file
+import { requestMatchesOAuthBinding } from '../oauth/_browser-binding.js';
+// @ts-expect-error — JS module, no declaration file
+import { clientDisplayInfo, resolveOAuthClient } from '../oauth/_client-metadata.js';
 
 const NO_STORE_JSON: Record<string, string> = {
   'Content-Type': 'application/json',
@@ -59,10 +68,13 @@ function jsonError(error: string, error_description: string, status: number): Re
 interface NonceData {
   client_id: string;
   redirect_uri: string;
+  bind_hash?: string;
 }
 
 interface ClientData {
   client_name?: string;
+  redirect_uris?: unknown;
+  cimd?: boolean;
 }
 
 async function rawRedisGet(key: string): Promise<unknown | null> {
@@ -80,10 +92,14 @@ async function rawRedisGet(key: string): Promise<unknown | null> {
 }
 
 export interface ContextDeps {
-  resolveUserId: (req: Request) => Promise<string | null>;
+  resolveUserId: (req: Request) => Promise<string | Response | null>;
+  /** Charges the caller's per-user budget; a Response means refused. Runs before any Redis read. */
+  rateLimit: (req: Request, userId: string) => Promise<Response | null>;
   redisGet: (key: string) => Promise<unknown | null>;
   getEntitlements: (userId: string) => Promise<ProMcpEntitlement | null>;
   now: () => number;
+  /** Fetch for CIMD client metadata documents; defaults to the global fetch. */
+  fetchClientMetadata?: typeof fetch;
 }
 
 export async function grantContextHandler(req: Request, deps: ContextDeps): Promise<Response> {
@@ -94,9 +110,12 @@ export async function grantContextHandler(req: Request, deps: ContextDeps): Prom
   }
 
   const userId = await deps.resolveUserId(req);
+  if (userId instanceof Response) return grantSessionVerificationUnavailableResponse();
   if (!userId) {
     return jsonError('UNAUTHENTICATED', 'A valid Clerk session is required.', 401);
   }
+  const limited = await deps.rateLimit(req, userId);
+  if (limited) return limited;
 
   const url = new URL(req.url);
   const nonce = url.searchParams.get('nonce') ?? '';
@@ -119,7 +138,20 @@ export async function grantContextHandler(req: Request, deps: ContextDeps): Prom
   const gate = checkProMcpAccess(ent, deps.now(), {
     backendConfigured: isEntitlementBackendConfigured(),
   });
-  if (gate) return proMcpGateDenialResponse(gate);
+  // #6716: a CONFIRMED free account gets the consent card, mirroring
+  // mcp-grant-mint — the mint immediately after now accepts it, and refusing
+  // here would strand a free account mid-flow on an error page.
+  //
+  // The client-metadata disclosure this gate was written to prevent is still
+  // bounded: `resolveUserId` above rejects anonymous callers, so registered
+  // client names remain visible only to a Clerk-authenticated session. What
+  // changed is that the session no longer has to be a paying one — which the
+  // consent card itself requires, since a user cannot meaningfully approve a
+  // connection without seeing what they are approving.
+  //
+  // Every other denial kind still refuses, so an expired paid row, a malformed
+  // entitlement, or an unverifiable read discloses nothing.
+  if (gate && gate.kind !== 'free_account') return proMcpGateDenialResponse(gate);
 
   // F2 (U7+U8 review pass): if `mcp-grant:<n>` exists with a userId that
   // doesn't match the Clerk session's userId, the nonce has been claimed
@@ -154,20 +186,28 @@ export async function grantContextHandler(req: Request, deps: ContextDeps): Prom
   if (!nonceData || typeof nonceData.client_id !== 'string' || typeof nonceData.redirect_uri !== 'string') {
     return jsonError('INVALID_NONCE', 'The authorization nonce is missing or expired.', 400);
   }
-
-  let clientData: ClientData | null;
-  try {
-    clientData = (await deps.redisGet(`oauth:client:${nonceData.client_id}`)) as ClientData | null;
-  } catch {
-    return jsonError('SERVICE_UNAVAILABLE', 'Authorization storage is temporarily unavailable.', 503);
+  // Refuse before rendering consent UI for a link forwarded from another
+  // browser; the mint enforces the same binding.
+  if (!(await requestMatchesOAuthBinding(req, nonceData))) {
+    return jsonError('BROWSER_MISMATCH', 'This authorization was started in a different browser. Start over from your MCP client in this browser.', 403);
   }
-  if (!clientData) {
+
+  // Read-only here: no cache write, so this endpoint never stores anything.
+  const resolved = await resolveOAuthClient(nonceData.client_id, {
+    redisGet: deps.redisGet,
+    fetch: deps.fetchClientMetadata,
+  });
+  if (!resolved.ok) {
+    if (resolved.transient) {
+      return jsonError('SERVICE_UNAVAILABLE', 'Authorization storage is temporarily unavailable.', 503);
+    }
     return jsonError('UNKNOWN_CLIENT', 'The OAuth client is not registered.', 400);
   }
+  const clientData = resolved.client as ClientData;
 
   let redirectHost = '';
   try {
-    redirectHost = new URL(nonceData.redirect_uri).hostname;
+    redirectHost = redirectDisplayHost(nonceData.redirect_uri);
   } catch {
     // Already validated at registration time; defense-in-depth catch.
     return jsonError('INVALID_REDIRECT_URI', 'The registered redirect URI is malformed.', 400);
@@ -177,14 +217,24 @@ export async function grantContextHandler(req: Request, deps: ContextDeps): Prom
     ? clientData.client_name
     : 'Unknown Client';
 
-  return new Response(JSON.stringify({ client_name, redirect_host: redirectHost }), {
+  // CIMD clients add the host that published their document, and whether
+  // this authorization goes to localhost (the consent page warns on that).
+  const display = clientDisplayInfo(clientData, nonceData.redirect_uri);
+  const body = clientData.cimd
+    ? { client_name, redirect_host: redirectHost, client_host: display.client_host, localhost_redirect: display.localhost_redirect }
+    : { client_name, redirect_host: redirectHost };
+  return new Response(JSON.stringify(body), {
     status: 200, headers: NO_STORE_JSON,
   });
 }
 
 export default async function handler(req: Request): Promise<Response> {
   return grantContextHandler(req, {
-    resolveUserId: async (r) => (await resolveClerkSession(r))?.userId ?? null,
+    resolveUserId: resolveVerifiedSessionUserId,
+    // Fail closed like api/internal/mcp-grant-mint.ts, the next step of the same consent page.
+    rateLimit: (request, userId) => checkRateLimit(request, NO_STORE_JSON, {
+      scope: 'mcp-grant-context', identifier: `user:${userId}`, limit: 60, window: '10 m', failClosed: true,
+    }),
     redisGet: rawRedisGet,
     getEntitlements: (userId) => getEntitlements(userId),
     now: () => Date.now(),

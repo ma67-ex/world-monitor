@@ -1,6 +1,7 @@
 // boundary-ignore: AppContext is an aggregate type that lives in app/ by design
 import type { AppContext } from '@/app/app-context';
 import type { DomainAdapter, SignalEvidence } from '../types';
+import { vesselTypeLabel } from '@/utils/vessel-type-label';
 
 // v1 weights: only military_flight, ais_gap, military_vessel collected.
 // gps_jamming and base_activity deferred — renormalized to sum to 1.0.
@@ -9,6 +10,10 @@ const WEIGHTS: Record<string, number> = {
   ais_gap: 0.30,
   military_vessel: 0.30,
 };
+
+function formatLatLon({ lat, lon }: { lat: number; lon: number }): string {
+  return `${Math.abs(lat).toFixed(1)}\u00b0${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(1)}\u00b0${lon >= 0 ? 'E' : 'W'}`;
+}
 
 const STRIKE_TYPES = new Set(['fighter', 'bomber', 'attack']);
 const SUPPORT_TYPES = new Set(['tanker', 'awacs', 'surveillance', 'electronic_warfare']);
@@ -88,7 +93,7 @@ export const militaryAdapter: DomainAdapter = {
         lon: v.lon,
         country: v.operatorCountry,
         timestamp: v.lastAisUpdate?.getTime?.() ?? now,
-        label: `${v.operator} ${v.vesselType} ${v.name}`,
+        label: `${v.operator} ${vesselTypeLabel(v)} ${v.name}`,
         rawData: v,
       });
     }
@@ -96,10 +101,11 @@ export const militaryAdapter: DomainAdapter = {
     return signals;
   },
 
-  generateTitle(cluster: SignalEvidence[]): string {
+  generateTitle(cluster: SignalEvidence[], context): string {
     const types = new Set(cluster.map(s => s.type));
     const countries = [...new Set(cluster.map(s => s.country).filter(Boolean))];
-    const countryLabel = countries.slice(0, 2).join('/') || 'Unknown region';
+    const operators = countries.slice(0, 2).join('/') || 'Unknown region';
+    const countryLabel = context?.location ? `${operators} near ${formatLatLon(context.location)}` : operators;
 
     const hasFlights = types.has('military_flight');
     const hasVessels = types.has('military_vessel');

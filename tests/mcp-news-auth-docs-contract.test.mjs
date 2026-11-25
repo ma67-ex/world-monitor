@@ -152,9 +152,9 @@ describe('MCP news/auth public contract', () => {
     assert.deepEqual(requestShape(withContext), requestShape(withoutContext));
   });
 
-  it('RPC brief tools return sources from producer records, not generated text', async () => {
+  it('world and personalized country briefs return sources from producer records, not generated text', async () => {
     const { result: worldResult } = await captureRpcFetches('get_world_brief', { geo_context: 'Middle East tensions' });
-    const { result: countryResult, calls: countryCalls } = await captureRpcFetches('get_country_brief', { country_code: 'US' });
+    const { result: countryResult, calls: countryCalls } = await captureRpcFetches('get_country_brief', { country_code: 'US', framework: 'Focus on energy.' });
 
     assert.deepEqual(worldResult.sources, [{
       title: 'United States headline used for MCP grounding',
@@ -165,7 +165,11 @@ describe('MCP news/auth public contract', () => {
     assert.equal(worldResult.summary, 'Seeded grounded world brief.');
     assert.equal(worldResult.sources.some((source) => source.url.startsWith('javascript:')), false);
 
-    assert.deepEqual(countryResult.sources, worldResult.sources);
+    assert.deepEqual(countryResult.sources.map(({ sourceProvenance, ...source }) => {
+      assert.deepEqual(sourceProvenance.knownBiases, []);
+      assert.equal(sourceProvenance.risk, 'unknown');
+      return source;
+    }), worldResult.sources);
     const countryBriefCall = countryCalls.find((call) => new URL(call.url).pathname === '/api/intelligence/v1/get-country-intel-brief');
     assert.ok(countryBriefCall, 'get_country_brief should call country brief endpoint');
     const context = JSON.parse(String(countryBriefCall.init.body)).context || '';
@@ -179,7 +183,10 @@ describe('MCP news/auth public contract', () => {
       { worldBrief: 'Degraded but non-empty', status: 'degraded' },
       { status: 'unknown' },
       { status: undefined },
-      { generatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() },
+      // A merely-OLD snapshot is deliberately absent from this list: it is now
+      // served as last-known-good with stale:true rather than failing
+      // (WORLDMONITOR-YJ), asserted in the sibling case below. An UNPARSEABLE
+      // timestamp stays — that is corruption, not age.
       { generatedAt: 'not-a-timestamp' },
       { topStories: [], generatedAt: new Date().toISOString() },
       { worldBriefSources: [], generatedAt: new Date().toISOString() },
@@ -199,6 +206,21 @@ describe('MCP news/auth public contract', () => {
           && /world brief unavailable/i.test(error.message),
       );
     }
+  });
+
+  it('serves an old-but-intact snapshot as flagged last-known-good (WORLDMONITOR-YJ)', () => {
+    // The counterpart to the entry removed from rejectedPayloads above. Keeps
+    // this contract suite covering staleness rather than losing the case: the
+    // producer preserves LKG when synthesis fails, so refusing it 60 minutes
+    // later handed Pro callers an error while a complete brief sat in Redis
+    // for another two hours.
+    return captureRpcFetches('get_world_brief', {}, {
+      insights: { generatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() },
+    }).then(({ result }) => {
+      assert.ok(result?.brief, `expected a served brief, got ${JSON.stringify(result).slice(0, 200)}`);
+      assert.equal(result.stale, true, 'must be flagged stale');
+      assert.ok(result.ageMinutes >= 118, `ageMinutes should be ~120, got ${result.ageMinutes}`);
+    });
   });
 
   it('preserves producer citation indexes when one source has no usable URL', async () => {
@@ -221,8 +243,8 @@ describe('MCP news/auth public contract', () => {
     ]);
   });
 
-  it('get_country_brief keeps large grounding context out of the signed URL', async () => {
-    const { calls } = await captureRpcFetches('get_country_brief', { country_code: 'US' }, { longCountryHeadline: true });
+  it('personalized get_country_brief keeps large grounding context out of the signed URL', async () => {
+    const { calls } = await captureRpcFetches('get_country_brief', { country_code: 'US', framework: 'Focus on energy.' }, { longCountryHeadline: true });
     const countryBriefCall = calls.find((call) => new URL(call.url).pathname === '/api/intelligence/v1/get-country-intel-brief');
     assert.ok(countryBriefCall, 'get_country_brief should call country brief endpoint');
 

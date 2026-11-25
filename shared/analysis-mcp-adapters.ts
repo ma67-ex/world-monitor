@@ -44,6 +44,9 @@ import {
   nonEmptyString,
   usableCoord,
 } from './analysis-adapter-guards';
+import {
+  hasRedistributableProviderAttribution,
+} from './provider-redistribution';
 
 // ---------------------------------------------------------------------------
 // Shared primitives
@@ -72,6 +75,11 @@ export interface GeoAdapterOptions {
   now?: number;
   /** Events older than this drop out; defaults to the core's 24h window. */
   windowMs?: number;
+}
+
+function flightProviderAttribution(record: Record<string, unknown>): unknown {
+  const sourceMeta = asRecord(record.sourceMeta);
+  return nonEmptyString(sourceMeta?.source) || nonEmptyString(record.source);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +138,10 @@ export function unrestEventsToGeoEvents(payload: unknown, options: GeoAdapterOpt
 /** `military:flights:v1` -> military-flight events. */
 export function militaryFlightsToGeoEvents(payload: unknown, options: GeoAdapterOptions = {}): GeoEventInput[] {
   return toGeoEvents(
-    arrayField(payload, 'flights'),
+    arrayField(payload, 'flights').filter((flight) => {
+      const record = asRecord(flight);
+      return record !== null && hasRedistributableProviderAttribution(flightProviderAttribution(record));
+    }),
     (record) => ({ lat: finiteNumber(record.lat), lon: finiteNumber(record.lon) }),
     (record) => finiteNumber(record.lastSeenMs),
     finiteNumber(asRecord(payload)?.fetchedAt),
@@ -336,7 +347,7 @@ export function crossSourceSignalsToSignalSummary(
 }
 
 /**
- * `risk:scores:sebuf:v8` -> the `MilitarySurgeCiiLookup` contract, also used as
+ * `risk:scores:sebuf:v14` -> a country-code to CII score lookup, used as
  * per-focal-point CII context. `region` on a CII row is the ISO-2 country code.
  */
 export function riskScoresToCiiLookup(payload: unknown): (countryCode: string) => number | null {
@@ -430,7 +441,19 @@ export function submarineCablesToCableInputs(payload: unknown): CableInput[] {
       });
     }
 
+    // Route geometry ([lon, lat] pairs) is what chokepoint crossing detection
+    // reads; without it a cable that passes a strait without landing nearby
+    // (Bab el-Mandeb, Suez) is never counted as crossing it.
+    const points: [number, number][] = [];
+    for (const entry of asArray(record.points)) {
+      if (!Array.isArray(entry)) continue;
+      const lon = finiteNumber(entry[0]);
+      const lat = finiteNumber(entry[1]);
+      if (lon !== null && lat !== null) points.push([lon, lat]);
+    }
+
     const cable: CableInput = { id, name, countriesServed, landingPoints };
+    if (points.length > 0) cable.points = points;
     const rfsYear = finiteNumber(record.rfsYear);
     if (rfsYear !== null) cable.rfsYear = rfsYear;
     const owners = asArray(record.owners).map((owner) => nonEmptyString(owner)).filter(Boolean);
@@ -462,6 +485,7 @@ export function militaryFlightsToSurgeInputs(payload: unknown): MilitaryFlightIn
   for (const raw of arrayField(payload, 'flights')) {
     const record = asRecord(raw);
     if (!record) continue;
+    if (!hasRedistributableProviderAttribution(flightProviderAttribution(record))) continue;
     const lat = finiteNumber(record.lat);
     const lon = finiteNumber(record.lon);
     if (!usableCoord(lat, lon) || lon === null) continue;
@@ -486,41 +510,67 @@ export function militaryFlightsToSurgeInputs(payload: unknown): MilitaryFlightIn
   return flights;
 }
 
+/** A theater's level and vessel count as the AIS relay published them. */
+export interface PublishedTheaterPosture {
+  postureLevel: 'normal' | 'elevated' | 'critical';
+  trackedVessels: number;
+}
+
 /**
- * `theater-posture:sebuf:v1` -> per-theater tracked-vessel counts.
+ * `theater-posture:sebuf:v1` -> per-theater published level and vessel count.
  *
- * Two producers write this key: the flights seeder (which always publishes
- * `trackedVessels: 0`, it has no AIS) and the AIS relay (which publishes real
- * counts). Whichever wrote last wins, so a 0 here means "no vessels seen by
- * the last writer", not "no vessels".
+ * The AIS relay is the only writer (scripts/shared/theater-posture.js holds its rule),
+ * so the level here is the one the dashboard shows. A theater with a missing
+ * or unknown level is left out rather than guessed.
  */
-export function theaterPostureVesselCounts(payload: unknown): Map<string, number> {
-  const counts = new Map<string, number>();
+export function publishedTheaterPostures(payload: unknown): Map<string, PublishedTheaterPosture> {
+  const published = new Map<string, PublishedTheaterPosture>();
+  if (!hasRedistributableProviderAttribution(asRecord(payload)?.provider)) return published;
 
   for (const raw of arrayField(payload, 'theaters')) {
     const record = asRecord(raw);
     if (!record) continue;
     const theaterId = nonEmptyString(record.theater) || nonEmptyString(record.theaterId);
-    const vessels = finiteNumber(record.trackedVessels);
-    if (!theaterId || vessels === null) continue;
-    counts.set(theaterId, vessels);
+    const level = record.postureLevel;
+    if (!theaterId || (level !== 'normal' && level !== 'elevated' && level !== 'critical')) continue;
+    published.set(theaterId, { postureLevel: level, trackedVessels: Math.max(0, finiteNumber(record.trackedVessels) ?? 0) });
   }
 
-  return counts;
+  return published;
 }
 
-/** Write tracked-vessel counts onto posture summaries in place. */
-export function applyVesselCountsToPostures(
+/**
+ * Replace the flight-derived level and vessel total with the published ones, in
+ * place. The aircraft breakdown, trend and strike flag stay as computed from
+ * the flight snapshot; only the relay knows the vessels, so only it rates the
+ * theater. When anything was published, a theater without a published entry is
+ * dropped rather than reported with an aircraft-only level as if published.
+ * With nothing published, every theater keeps its aircraft-only rating.
+ */
+export function applyPublishedPostures(
   postures: TheaterPostureSummary[],
-  counts: ReadonlyMap<string, number>,
-): void {
+  published: ReadonlyMap<string, PublishedTheaterPosture>,
+): TheaterPostureSummary[] {
+  if (published.size === 0) return postures;
+  const kept: TheaterPostureSummary[] = [];
   for (const posture of postures) {
-    const vessels = counts.get(posture.theaterId);
-    if (vessels === undefined) continue;
-    // Only the total is recoverable: the posture cache carries no per-class
-    // breakdown, and `recalcPostureWithVessels` scores on the total anyway.
-    posture.totalVessels = vessels;
+    const entry = published.get(posture.theaterId);
+    if (!entry) continue;
+    kept.push(posture);
+    // Only the total is recoverable: the posture cache carries no per-class breakdown.
+    posture.totalVessels = entry.trackedVessels;
+    posture.postureLevel = entry.postureLevel;
+    const assets = [
+      posture.totalAircraft > 0 ? `${posture.totalAircraft} aircraft` : '',
+      posture.totalVessels > 0 ? `${posture.totalVessels} vessels` : '',
+    ].filter(Boolean).join(' + ');
+    posture.headline = entry.postureLevel === 'critical'
+      ? `Critical military buildup - ${posture.theaterName} (${assets || 'No assets'})`
+      : entry.postureLevel === 'elevated'
+        ? `Elevated military activity - ${posture.theaterName} (${assets || 'No assets'})`
+        : `Normal activity - ${posture.theaterName}`;
   }
+  return kept;
 }
 
 /**
@@ -535,6 +585,7 @@ export function surgeHistoryToActivityHistory(payload: unknown): Map<string, The
   const runs = arrayField(payload, 'history')
     .map((raw) => asRecord(raw))
     .filter((run): run is Record<string, unknown> => run !== null)
+    .filter((run) => hasRedistributableProviderAttribution(run.sourceVersion))
     .map((run) => ({ run, timestamp: finiteNumber(run.assessedAt) }))
     .filter((entry): entry is { run: Record<string, unknown>; timestamp: number } => entry.timestamp !== null)
     // The core slices the tail (`-6`, `-12..-6`) to compare recent vs older,

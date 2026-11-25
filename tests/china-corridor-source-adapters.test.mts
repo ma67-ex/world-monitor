@@ -1,12 +1,34 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { PORTWATCH_CONTENT_FRESHNESS_BUDGET_MINUTES } from '../scripts/_portwatch-content-freshness.mjs';
+import { CHINA_COVERAGE_ENTRIES } from '../scripts/china-coverage-manifest.mjs';
 import { buildChinaCorridorSourceBundle } from '../server/worldmonitor/supply-chain/v1/china-corridor-source-adapters.ts';
 
 const ASSESSED_AT = '2026-07-25T12:00:00.000Z';
 const FRESH_META = { fetchedAt: Date.parse('2026-07-25T11:30:00.000Z') };
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const BUDGET_MS = PORTWATCH_CONTENT_FRESHNESS_BUDGET_MINUTES * MINUTE_MS;
+const assessedAtMs = Date.parse(ASSESSED_AT);
+const justInsideBudgetIso = new Date(assessedAtMs - BUDGET_MS + 1).toISOString();
+const justPastBudgetIso = new Date(assessedAtMs - BUDGET_MS - 1).toISOString();
+const frozenPastBudgetIso = new Date(assessedAtMs - BUDGET_MS - 36 * HOUR_MS).toISOString();
 
 describe('China corridor source adapters (#5578)', () => {
+  it('keeps CCFI transport fresh through three missed shipping ticks and warns before expiry', () => {
+    const entry = CHINA_COVERAGE_ENTRIES.find((row) => row.id === 'supply-chain.ccfi');
+    assert.equal(entry?.transport.maxAgeMin, 1140);
+    for (const [ageMin, expected] of [[720, 'fresh'], [1080, 'fresh'], [1140, 'fresh'], [1141, 'stale']] as const) {
+      const bundle = buildChinaCorridorSourceBundle({
+        shipping: { indices: [{ indexId: 'CCFI', currentValue: 900, unit: 'index' }] },
+        shippingMeta: { fetchedAt: assessedAtMs - ageMin * MINUTE_MS },
+      }, ASSESSED_AT);
+      const signal = bundle.families.trade.signals.find((row) => row.selectorId === 'supply_chain:shipping:v2:CCFI');
+      assert.equal(signal?.transportFreshness, expected, `CCFI at ${ageMin} minutes`);
+    }
+  });
+
   it('preserves missing PortWatch metrics instead of manufacturing zero values', () => {
     const bundle = buildChinaCorridorSourceBundle({
       portwatchChina: {
@@ -22,20 +44,39 @@ describe('China corridor source adapters (#5578)', () => {
     assert.equal(JSON.stringify(signal).includes('"tankerCalls30d":0'), false);
   });
 
+  it('drops the port trend when the prior 30-day window had no calls', () => {
+    const bundle = buildChinaCorridorSourceBundle({
+      portwatchChina: {
+        fetchedAt: '2026-07-25T11:00:00.000Z',
+        ports: [
+          { portId: 'port1188', portName: 'Shanghai', tankerCalls30d: 423, prevTankerCalls30d: 486, trendDelta: -13 },
+          { portId: 'port1225', portName: 'Ningbo', tankerCalls30d: 5, prevTankerCalls30d: 0, trendDelta: 0 },
+        ],
+      },
+      portwatchMeta: FRESH_META,
+    }, ASSESSED_AT);
+
+    const byPort = new Map(bundle.families.port.signals.map((signal) => [signal.selectorId, signal]));
+    assert.equal(byPort.get('port1188')?.metrics.trendDelta, -13);
+    assert.equal(byPort.get('port1225')?.metrics.tankerCalls30d, 5);
+    assert.equal('trendDelta' in (byPort.get('port1225')?.metrics ?? {}), false);
+  });
+
   // #6060: the gate must age CONTENT, not retrieval. The seeder force-refetches
   // each country once its cache passes MAX_CACHE_AGE_MS (168h); that refetch
   // resets `fetchedAt` while returning an unchanged upstream `asof`. Ageing
   // `fetchedAt` admits a frozen observation for one budget window out of every
   // cache lifetime — the same conflation this issue exists to end, one layer
-  // below the health alarm.
+  // below the health alarm. Offsets are budget-relative so a later budget move
+  // cannot turn this frozen clock into a fresh observation.
   it('reads the content clock, so a refetch of frozen upstream data stays stale', () => {
     const bundle = buildChinaCorridorSourceBundle({
       portwatchChina: {
         // Retrieved seconds ago ...
         fetchedAt: '2026-07-25T11:59:00.000Z',
-        // ... but upstream has not advanced in 168h, past the 144h budget.
+        // ... but upstream has not advanced past the content budget.
         asof: '2026-07-17',
-        contentAsOfChangedAt: Date.parse('2026-07-18T12:00:00.000Z'),
+        contentAsOfChangedAt: Date.parse(frozenPastBudgetIso),
         ports: [{ portId: 'port1188', portName: 'Shanghai', trendDelta: 2 }],
       },
       portwatchMeta: FRESH_META,
@@ -47,10 +88,10 @@ describe('China corridor source adapters (#5578)', () => {
       'stale',
       'a fresh retrieval of frozen upstream content is not current',
     );
-    assert.equal(signal?.observationTime, '2026-07-18T12:00:00.000Z');
+    assert.equal(signal?.observationTime, frozenPastBudgetIso);
   });
 
-  it('keeps the 144-hour boundary consistent for corridor consumers', () => {
+  it('keeps the content-budget boundary consistent for corridor consumers', () => {
     const buildPortSignal = (contentAsOfChangedAt: string) => buildChinaCorridorSourceBundle({
       portwatchChina: {
         fetchedAt: '2026-07-25T11:59:00.000Z',
@@ -60,12 +101,21 @@ describe('China corridor source adapters (#5578)', () => {
       portwatchMeta: FRESH_META,
     }, ASSESSED_AT).families.port.signals[0];
 
+    // The previous 144h pair is now well inside the 10-day operator budget.
     assert.equal(
       buildPortSignal('2026-07-19T12:00:00.001Z')?.contentFreshness,
       'current',
     );
     assert.equal(
       buildPortSignal('2026-07-19T11:59:59.999Z')?.contentFreshness,
+      'current',
+    );
+    assert.equal(
+      buildPortSignal(justInsideBudgetIso)?.contentFreshness,
+      'current',
+    );
+    assert.equal(
+      buildPortSignal(justPastBudgetIso)?.contentFreshness,
       'stale',
     );
   });

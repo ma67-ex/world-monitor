@@ -196,7 +196,7 @@ This gives you readable alerts without surrendering the trigger logic to a model
 
 ## Freshness is an alert too
 
-Data freshness is operational. If a route-risk workflow depends on market, energy, and chokepoint data, stale or missing seed data should show up in the channel before people act on old context.
+Data freshness is operational. If a route-risk workflow depends on market, energy, and [chokepoint](/blog/posts/what-is-a-maritime-chokepoint/) data, stale or missing seed data should show up in the channel before people act on old context.
 
 WorldMonitor exposes freshness through cache fields and health endpoints. Use them to gate alerts:
 
@@ -207,7 +207,7 @@ WorldMonitor exposes freshness through cache fields and health endpoints. Use th
 ## Rollout plan
 
 1. Start with one Slack or Teams channel.
-2. Pick five countries and three chokepoints.
+2. Pick a focused set of countries and chokepoints.
 3. Run the worker silently for one week.
 4. Review would-have-fired alerts with analysts.
 5. Add cooldowns and suppress noisy rules.

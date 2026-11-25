@@ -774,8 +774,7 @@ async function _runHandoff(
   // Step 2: call mergeAnonymousLocal.
   let result: ServerMergeAnonymousLocalResult;
   try {
-    const client = await _convexClientGetter();
-    const api = await _convexApiGetter();
+    const [client, api] = await Promise.all([_convexClientGetter(), _convexApiGetter()]);
     if (!client || !api) {
       // Convex unavailable — treat as transient failure. Keep localStorage,
       // schedule retry on visibilitychange.
@@ -923,38 +922,6 @@ function _clearVisibilityRetryListener(): void {
   _visibilityRetryListener = null;
 }
 
-/**
- * Test-only: trigger the pending visibilitychange retry without going
- * through the real DOM event. Returns a promise that resolves when the
- * retry's handoff finishes.
- */
-export function _triggerVisibilityRetryForTests(): Promise<void> {
-  if (!_visibilityRetryListener) return Promise.resolve();
-  // The handler is sync but kicks off `_runHandoff` (async). To make
-  // tests deterministic, replicate the handler's logic with awaitable
-  // semantics here.
-  return new Promise<void>((resolve) => {
-    const handler = _visibilityRetryListener;
-    if (!handler) {
-      resolve();
-      return;
-    }
-    // We don't actually call the DOM-bound handler (which doesn't return
-    // a promise) — instead, we simulate the visibilitychange retry by
-    // capturing state and running `_runHandoff` directly. Tests rely on
-    // this awaiting completion.
-    _clearVisibilityRetryListener();
-    // We can't recover userIdAtStart/gen from the closure, so call the
-    // handler synchronously and chain on the next microtask. The handler
-    // schedules an async `_runHandoff`; we await it via a microtask flush.
-    handler();
-    // Allow the spawned _runHandoff microtask chain to settle. We use a
-    // small loop of microtask flushes; tests only need this to resolve
-    // after the mutation promise has resolved.
-    queueMicrotask(() => queueMicrotask(() => resolve()));
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Reactive subscription to listFollowed (U3)
 // ---------------------------------------------------------------------------
@@ -966,8 +933,7 @@ async function _startReactiveSubscription(
   // Idempotent — if a prior subscription is still active, replace it.
   _stopReactiveSubscription();
 
-  const client = await _convexClientGetter();
-  const api = await _convexApiGetter();
+  const [client, api] = await Promise.all([_convexClientGetter(), _convexApiGetter()]);
   if (!client || !api) {
     // No transport available (Convex disabled in this env). Subscription
     // stays empty; getFollowed() falls through to localStorage union or
@@ -1146,8 +1112,7 @@ export async function addCountry(input: string): Promise<FollowMutationResult> {
     const userIdAtStart = user.id;
     const genAtStart = _handoffGeneration;
     try {
-      const client = await _convexClientGetter();
-      const api = await _convexApiGetter();
+      const [client, api] = await Promise.all([_convexClientGetter(), _convexApiGetter()]);
       // P1 #11 — re-verify after the await. If a sign-out / user swap
       // happened, fall through to HANDOFF_PENDING (do NOT touch
       // localStorage; the new auth state's listener will handle merge).
@@ -1281,8 +1246,7 @@ export async function removeCountry(
     const userIdAtStart = user.id;
     const genAtStart = _handoffGeneration;
     try {
-      const client = await _convexClientGetter();
-      const api = await _convexApiGetter();
+      const [client, api] = await Promise.all([_convexClientGetter(), _convexApiGetter()]);
       if (!_authStillMatches(userIdAtStart, genAtStart)) {
         return { ok: false, reason: 'HANDOFF_PENDING' };
       }

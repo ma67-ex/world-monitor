@@ -17,6 +17,11 @@ export interface ListSanctionsPressureResponse {
   newEntryCount: number;
   vesselCount: number;
   aircraftCount: number;
+  semaCount: number;
+  semaError?: string;
+  unattributed?: UnattributedSanctionsPressure;
+  flagRegistries: FlagRegistrySanctionsPressure[];
+  regulationTargets: CountrySanctionsPressure[];
 }
 
 export interface SanctionsEntry {
@@ -30,6 +35,8 @@ export interface SanctionsEntry {
   effectiveAt: string;
   isNew: boolean;
   note: string;
+  parentCountryCodes: string[];
+  parentCountryNames: string[];
 }
 
 export interface CountrySanctionsPressure {
@@ -45,6 +52,21 @@ export interface ProgramSanctionsPressure {
   program: string;
   entryCount: number;
   newEntryCount: number;
+}
+
+export interface UnattributedSanctionsPressure {
+  entryCount: number;
+  vesselCount: number;
+  aircraftCount: number;
+}
+
+export interface FlagRegistrySanctionsPressure {
+  countryCode: string;
+  countryName: string;
+  vesselCount: number;
+  newVesselCount: number;
+  aircraftCount: number;
+  newAircraftCount: number;
 }
 
 export interface LookupSanctionEntityRequest {
@@ -161,7 +183,7 @@ export function createSanctionsServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -209,7 +231,7 @@ export function createSanctionsServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },

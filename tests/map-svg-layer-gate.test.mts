@@ -3,7 +3,7 @@ import { describe, it, before, after } from 'node:test';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-import { LAYER_REGISTRY, isLayerToggleAllowed } from '../src/config/map-layer-definitions';
+import { isLayerExecutable, isLayerToggleAllowed } from '../src/config/map-layer-definitions';
 import type { MapLayers } from '../src/types';
 
 // resilienceScore has carried no 'locked' marker since task 03 (2026-08-22,
@@ -133,5 +133,22 @@ describe('SVG map premium layer toggle gate (#6045)', () => {
     const premium = makeMap();
     premium.map.enableLayer(LOCKED_KEY);
     assert.equal(premium.map.state.layers[LOCKED_KEY], true);
+  });
+});
+
+describe('SVG map layer picker capability gate', () => {
+  it('filters picker candidates through the canonical SVG renderer capability', () => {
+    assert.equal(isLayerExecutable('ciiChoropleth', 'svg'), false);
+
+    const methodStart = mapSrc.indexOf('private createLayerToggles(): HTMLElement {');
+    const methodEnd = mapSrc.indexOf('private clearLayerExplanationOutsideClickHandler', methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, 'Map must contain createLayerToggles');
+    const pickerSrc = mapSrc.slice(methodStart, methodEnd);
+
+    assert.match(
+      pickerSrc,
+      /\.filter\(\(key\) => !isSunsetLayer\(key\) && isLayerExecutable\(key, 'svg'\)\);[\s\S]*?layers\.forEach/,
+      'SVG picker candidates must pass the registry capability gate before buttons are rendered',
+    );
   });
 });

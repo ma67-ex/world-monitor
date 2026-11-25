@@ -9,8 +9,8 @@
 
 import { getRpcBaseUrl, getRpcErrorStatusCode } from '@/services/rpc-client';
 import { premiumFetch } from '@/services/premium-fetch';
-import type { GetFredSeriesResponse, GetFredSeriesBatchResponse, ListWorldBankIndicatorsResponse, WorldBankCountryData as ProtoWorldBankCountryData, GetEnergyPricesResponse, EnergyPrice as ProtoEnergyPrice, GetEnergyCapacityResponse, GetBisPolicyRatesResponse, GetBisExchangeRatesResponse, GetBisCreditResponse, GetChinaMacroSnapshotResponse, BisPolicyRate, BisExchangeRate, BisCreditToGdp, GetNationalDebtResponse, NationalDebtEntry, GetBlsSeriesResponse, GetCrudeInventoriesResponse, CrudeInventoryWeek, GetNatGasStorageResponse, NatGasStorageWeek, GetEcbFxRatesResponse, EcbFxRate, GetEuGasStorageResponse, EuGasStorageHistoryEntry, GetEurostatCountryDataResponse, EurostatCountryEntry, GetOilStocksAnalysisResponse, OilStocksAnalysisMember, OilStocksRegionalSummary, OilStocksRegionalSummaryEurope, OilStocksRegionalSummaryAsiaPacific, OilStocksRegionalSummaryNorthAmerica } from '@/generated/client/worldmonitor/economic/v1/service_client';
-import { createCircuitBreaker } from '@/utils';
+import type { GetFredSeriesResponse, GetFredSeriesBatchResponse, ListWorldBankIndicatorsResponse, WorldBankCountryData as ProtoWorldBankCountryData, GetEnergyPricesResponse, EnergyPrice as ProtoEnergyPrice, GetEnergyCapacityResponse, GetBisPolicyRatesResponse, GetBisExchangeRatesResponse, GetBisCreditResponse, BisPolicyRate, BisExchangeRate, BisCreditToGdp, GetNationalDebtResponse, NationalDebtEntry, GetBlsSeriesResponse, GetCrudeInventoriesResponse, CrudeInventoryWeek, GetNatGasStorageResponse, NatGasStorageWeek, GetEcbFxRatesResponse, EcbFxRate, GetEuGasStorageResponse, EuGasStorageHistoryEntry, GetEurostatCountryDataResponse, EurostatCountryEntry, GetOilStocksAnalysisResponse, OilStocksAnalysisMember, OilStocksRegionalSummary, OilStocksRegionalSummaryEurope, OilStocksRegionalSummaryAsiaPacific, OilStocksRegionalSummaryNorthAmerica } from '@/generated/client/worldmonitor/economic/v1/service_client';
+import { createCircuitBreaker } from '@/utils/circuit-breaker';
 import { getCSSColor } from '@/utils';
 import { isFeatureAvailable } from '../runtime-config';
 import { dataFreshness } from '../data-freshness';
@@ -24,10 +24,10 @@ import { TIER1_COUNTRIES } from '@/config/countries';
 
 // ---- Client + Circuit Breakers ----
 
-// premiumFetch for the whole client: 1 of ~16 methods (getNationalDebt) targets a
-// PREMIUM_RPC_PATHS path. globalThis.fetch here would 401 signed-in browser pros
-// on getNationalDebt with no WORLDMONITOR_API_KEY (gateway runs validateApiKey
-// with forceKey=true on premium paths). premiumFetch no-ops safely when no
+// premiumFetch for the whole client so any method that becomes a
+// PREMIUM_RPC_PATHS path keeps working for signed-in browser pros with no
+// WORLDMONITOR_API_KEY (gateway runs validateApiKey with forceKey=true on
+// premium paths). premiumFetch no-ops safely when no
 // credentials are available, so the public methods (FRED, BLS, energy, BIS,
 // EU, oil) keep working unchanged. See src/services/supply-chain/index.ts for
 // the same pattern + #3242 review HIGH(new) #1 for the bug class this prevents.
@@ -54,7 +54,6 @@ const capacityBreaker = createCircuitBreaker<GetEnergyCapacityResponse>({ name: 
 const bisPolicyBreaker = createCircuitBreaker<GetBisPolicyRatesResponse>({ name: 'BIS Policy', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 const bisEerBreaker = createCircuitBreaker<GetBisExchangeRatesResponse>({ name: 'BIS EER', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 const bisCreditBreaker = createCircuitBreaker<GetBisCreditResponse>({ name: 'BIS Credit', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
-const chinaMacroBreaker = createCircuitBreaker<GetChinaMacroSnapshotResponse>({ name: 'China Macro Snapshot', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 
 const emptyBlsFallback: GetBlsSeriesResponse = { series: undefined };
 const blsBreaker = createCircuitBreaker<FredSeries[]>({ name: 'BLS Batch', cacheTtlMs: 15 * 60 * 1000, persistCache: true });
@@ -197,10 +196,6 @@ export async function fetchFredData(): Promise<FredSeries[]> {
   return out;
 }
 
-export function getFredStatus(): string {
-  return fredBatchBreaker.getStatus();
-}
-
 // ========================================================================
 // BLS -- direct series not available on FRED (metro unemployment, ECI)
 // ========================================================================
@@ -291,25 +286,10 @@ function formatValueWithUnit(value: number, unit: string): string {
   return `${formatted}${unit}`;
 }
 
-export function formatFredValue(value: number | null, unit: string): string {
-  if (value === null) return 'N/A';
-  return formatValueWithUnit(value, unit);
-}
-
 export function formatChange(change: number | null, unit: string): string {
   if (change === null) return 'N/A';
   const sign = change > 0 ? '+' : change < 0 ? '-' : '';
   return `${sign}${formatValueWithUnit(Math.abs(change), unit)}`;
-}
-
-// ========================================================================
-// Oil/Energy -- replaces src/services/oil-analytics.ts
-// ========================================================================
-
-export interface OilDataPoint {
-  date: string;
-  value: number;
-  unit: string;
 }
 
 export interface OilMetric {
@@ -334,6 +314,7 @@ export interface OilAnalytics {
 
 function protoEnergyToOilMetric(proto: ProtoEnergyPrice): OilMetric {
   const change = proto.change;
+  const priceDate = new Date(proto.priceAt);
   return {
     id: proto.commodity,
     name: proto.name,
@@ -343,7 +324,7 @@ function protoEnergyToOilMetric(proto: ProtoEnergyPrice): OilMetric {
     changePct: Math.round(change * 10) / 10,
     unit: proto.unit,
     trend: change > 0.5 ? 'up' : change < -0.5 ? 'down' : 'stable',
-    lastUpdated: proto.priceAt ? new Date(proto.priceAt).toISOString() : new Date().toISOString(),
+    lastUpdated: proto.priceAt > 0 && Number.isFinite(priceDate.getTime()) ? priceDate.toISOString() : '',
   };
 }
 
@@ -418,7 +399,11 @@ export type { CrudeInventoryWeek };
 export async function fetchCrudeInventoriesRpc(): Promise<GetCrudeInventoriesResponse> {
   if (!isFeatureAvailable('energyEia')) return emptyCrudeFallback;
   const hydrated = getHydratedData('crudeInventories') as GetCrudeInventoriesResponse | undefined;
-  if (hydrated?.weeks?.length) return hydrated;
+  if (hydrated?.weeks?.length) {
+    crudeBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
+
   try {
     return await crudeBreaker.execute(async () => {
       return client.getCrudeInventories({}, { signal: AbortSignal.timeout(20_000) });
@@ -437,7 +422,11 @@ export type { NatGasStorageWeek };
 export async function fetchNatGasStorageRpc(): Promise<GetNatGasStorageResponse> {
   if (!isFeatureAvailable('energyEia')) return emptyNatGasFallback;
   const hydrated = getHydratedData('natGasStorage') as GetNatGasStorageResponse | undefined;
-  if (hydrated?.weeks?.length) return hydrated;
+  if (hydrated?.weeks?.length) {
+    natGasBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
+
   try {
     return await natGasBreaker.execute(async () => {
       return client.getNatGasStorage({}, { signal: AbortSignal.timeout(20_000) });
@@ -512,7 +501,8 @@ const TECH_INDICATORS: Record<string, string> = {
   'GB.XPD.RSDV.GD.ZS': 'R&D Expenditure (% of GDP)',
   'IP.PAT.RESD': 'Patent Applications (residents)',
   'IP.PAT.NRES': 'Patent Applications (non-residents)',
-  'IP.TMK.TOTL': 'Trademark Applications',
+  'IP.TMK.RSCT': 'Trademark Applications (resident, by count)',
+  'IP.TMK.NRCT': 'Trademark Applications (nonresident, by count)',
   'TX.VAL.TECH.MF.ZS': 'High-Tech Exports (% of manufactured exports)',
   'BX.GSR.CCIS.ZS': 'ICT Service Exports (% of service exports)',
   'TM.VAL.ICTG.ZS.UN': 'ICT Goods Imports (% of total goods imports)',
@@ -522,20 +512,6 @@ const TECH_INDICATORS: Record<string, string> = {
   'NY.GDP.PCAP.CD': 'GDP per Capita (current US$)',
   'NE.EXP.GNFS.ZS': 'Exports of Goods & Services (% of GDP)',
 };
-
-const TECH_COUNTRIES = [
-  'USA', 'CHN', 'JPN', 'DEU', 'KOR', 'GBR', 'IND', 'ISR', 'SGP', 'TWN',
-  'FRA', 'CAN', 'SWE', 'NLD', 'CHE', 'FIN', 'IRL', 'AUS', 'BRA', 'IDN',
-  'ARE', 'SAU', 'QAT', 'BHR', 'EGY', 'TUR',
-  'MYS', 'THA', 'VNM', 'PHL',
-  'ESP', 'ITA', 'POL', 'CZE', 'DNK', 'NOR', 'AUT', 'BEL', 'PRT', 'EST',
-  'MEX', 'ARG', 'CHL', 'COL',
-  'ZAF', 'NGA', 'KEN',
-];
-
-export async function getAvailableIndicators(): Promise<{ indicators: Record<string, string>; defaultCountries: string[] }> {
-  return { indicators: TECH_INDICATORS, defaultCountries: TECH_COUNTRIES };
-}
 
 function buildWorldBankResponse(
   indicator: string,
@@ -606,33 +582,12 @@ export async function getIndicatorData(
   return buildWorldBankResponse(indicator, resp.data);
 }
 
-export const INDICATOR_PRESETS = {
-  digitalInfrastructure: [
-    'IT.NET.USER.ZS',
-    'IT.CEL.SETS.P2',
-    'IT.NET.BBND.P2',
-    'IT.NET.SECR.P6',
-  ],
-  innovation: [
-    'GB.XPD.RSDV.GD.ZS',
-    'IP.PAT.RESD',
-    'IP.PAT.NRES',
-  ],
-  techTrade: [
-    'TX.VAL.TECH.MF.ZS',
-    'BX.GSR.CCIS.ZS',
-  ],
-  education: [
-    'SE.TER.ENRR',
-    'SE.XPD.TOTL.GD.ZS',
-  ],
-} as const;
-
 export interface TechReadinessScore {
   country: string;
   countryName: string;
-  score: number;
-  rank: number;
+  score: number | null;
+  rank: number | null;
+  componentCount: number;
   components: {
     internet: number | null;
     mobile: number | null;
@@ -641,13 +596,36 @@ export interface TechReadinessScore {
   };
 }
 
+// Keep the dashboard safe while cached rows predate the World Bank seed rule.
+export const TECH_READINESS_MIN_COMPONENTS = 3;
+type CachedTechReadinessScore = Omit<TechReadinessScore, 'componentCount'>;
+
+function applyTechReadinessCoverage(
+  entries: CachedTechReadinessScore[],
+  countries?: string[],
+): TechReadinessScore[] {
+  const ranked: TechReadinessScore[] = [];
+  const unranked: TechReadinessScore[] = [];
+  for (const entry of entries) {
+    const componentCount = Object.values(entry.components)
+      .filter(value => value !== null && Number.isFinite(value) && value >= 0).length;
+    if (componentCount >= TECH_READINESS_MIN_COMPONENTS && entry.score !== null) {
+      ranked.push({ ...entry, componentCount, rank: ranked.length + 1 });
+    } else {
+      unranked.push({ ...entry, componentCount, score: null, rank: null });
+    }
+  }
+  const list = [...ranked, ...unranked];
+  return countries ? list.filter(entry => countries.includes(entry.country)) : list;
+}
+
 export async function getTechReadinessRankings(
   countries?: string[],
 ): Promise<TechReadinessScore[]> {
   // Fast path: bootstrap-hydrated data available on first page load
-  const hydrated = getHydratedData('techReadiness') as TechReadinessScore[] | undefined;
+  const hydrated = getHydratedData('techReadiness') as CachedTechReadinessScore[] | undefined;
   if (hydrated?.length) {
-    return countries ? hydrated.filter(s => countries.includes(s.country)) : hydrated;
+    return applyTechReadinessCoverage(hydrated, countries);
   }
 
   // Fallback: fetch the pre-computed seed key directly from the bootstrap
@@ -667,25 +645,8 @@ export async function getTechReadinessRankings(
   if (!resp.ok) {
     throw new Error(`tech-readiness bootstrap HTTP ${resp.status}`);
   }
-  const { data } = (await resp.json()) as { data: { techReadiness?: TechReadinessScore[] } };
-  const list = data.techReadiness ?? [];
-  return countries ? list.filter(s => countries.includes(s.country)) : list;
-}
-
-export async function getCountryComparison(
-  indicator: string,
-  _countryCodes: string[],
-): Promise<WorldBankResponse> {
-  // All WB data is now pre-seeded by seed-wb-indicators.mjs.
-  // This function is unused but kept for API compat.
-  return {
-    indicator,
-    indicatorName: TECH_INDICATORS[indicator] || indicator,
-    metadata: { page: 0, pages: 0, total: 0 },
-    byCountry: {},
-    latestByCountry: {},
-    timeSeries: [],
-  };
+  const { data } = (await resp.json()) as { data: { techReadiness?: CachedTechReadinessScore[] } };
+  return applyTechReadinessCoverage(data.techReadiness ?? [], countries);
 }
 
 // ========================================================================
@@ -836,11 +797,9 @@ async function _fetchNationalDebt(): Promise<GetNationalDebtResponse> {
     }
   } catch { /* fall through to RPC */ }
 
-  // Anonymous (non-premium) users: do NOT call the Pro-gated RPC.
-  // /api/economic/v1/get-national-debt is in PREMIUM_RPC_PATHS, so the
-  // call deterministically 401s for an anonymous client and the breaker
-  // returns emptyNationalDebtFallback anyway — same outcome as us, minus
-  // the Sentry/console noise on every page load.
+  // Anonymous (non-premium) users stay on the shared bootstrap copy above.
+  // The RPC is free, but it serves the same seed, so a bootstrap miss would
+  // only repeat as an uncached per-visitor origin read on every page load.
   if (!hasPremiumAccess()) {
     return emptyNationalDebtFallback;
   }
@@ -861,36 +820,13 @@ export interface BisData {
   fetchedAt: Date;
 }
 
-const emptyChinaMacroFallback: GetChinaMacroSnapshotResponse = {
-  countryCode: 'CN',
-  generatedAt: '',
-  status: 'unavailable',
-  launchReady: false,
-  contentObservationDate: '',
-  latestObservationDate: '',
-  indicators: [],
-  sourceDecisions: [],
-  releaseEvents: [],
-  unavailable: true,
-  schemaVersion: 2,
-  pillars: [],
-};
-
-export async function getChinaMacroSnapshotData(): Promise<GetChinaMacroSnapshotResponse> {
-  try {
-    return await chinaMacroBreaker.execute(
-      () => client.getChinaMacroSnapshot({}, { signal: AbortSignal.timeout(20_000) }),
-      emptyChinaMacroFallback,
-      { shouldCache: (r) => !r.unavailable && (r.indicators?.length ?? 0) > 0 },
-    );
-  } catch {
-    return emptyChinaMacroFallback;
-  }
-}
-
 export async function getBisCreditData(): Promise<GetBisCreditResponse> {
   const hydrated = getHydratedData('bisCredit') as GetBisCreditResponse | undefined;
-  if (hydrated?.entries?.length) return hydrated;
+  if (hydrated?.entries?.length) {
+    bisCreditBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
+
   try {
     return await bisCreditBreaker.execute(
       () => client.getBisCredit({}, { signal: AbortSignal.timeout(20_000) }),
@@ -908,6 +844,14 @@ export async function fetchBisData(): Promise<BisData> {
   const hPolicy = getHydratedData('bisPolicy') as GetBisPolicyRatesResponse | undefined;
   const hEer = getHydratedData('bisExchange') as GetBisExchangeRatesResponse | undefined;
   const hCredit = getHydratedData('bisCredit') as GetBisCreditResponse | undefined;
+
+  // Warm the three breakers with the accepted hydration so a later recurring
+  // fetchBisData/getBisCreditData reads them from cache instead of refetching
+  // (#7048). The same acceptance guards as the Promise.resolve fast paths
+  // below mirror each breaker's shouldCache.
+  if (hPolicy?.rates?.length) bisPolicyBreaker.recordSuccess(hPolicy);
+  if (hEer?.rates?.length) bisEerBreaker.recordSuccess(hEer);
+  if (hCredit?.entries?.length) bisCreditBreaker.recordSuccess(hCredit);
 
   // BIS WS_CBPOL has no Russia (scripts/seed-bis-data.mjs covers 12 banks and the
   // CBR is not one), so the key rate comes from its own seeder and is appended to
@@ -944,7 +888,10 @@ const emptyEcbFxRatesFallback: GetEcbFxRatesResponse = { rates: [], updatedAt: '
 
 export async function getEcbFxRatesData(): Promise<GetEcbFxRatesResponse> {
   const hydrated = getHydratedData('ecbFxRates') as GetEcbFxRatesResponse | undefined;
-  if (hydrated?.rates?.length) return hydrated;
+  if (hydrated?.rates?.length) {
+    ecbFxRatesBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
 
   try {
     return await ecbFxRatesBreaker.execute(
@@ -1023,7 +970,10 @@ export type { GetEuGasStorageResponse, EuGasStorageHistoryEntry };
 
 export async function getEuGasStorageData(): Promise<GetEuGasStorageResponse> {
   const hydrated = getHydratedData('euGasStorage') as GetEuGasStorageResponse | undefined;
-  if (hydrated && !hydrated.unavailable && hydrated.fillPct > 0) return hydrated;
+  if (hydrated && !hydrated.unavailable && hydrated.fillPct > 0) {
+    euGasBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
 
   try {
     return await euGasBreaker.execute(
@@ -1044,7 +994,10 @@ export type { GetEurostatCountryDataResponse, EurostatCountryEntry };
 
 export async function getEurostatCountryData(): Promise<GetEurostatCountryDataResponse> {
   const hydrated = getHydratedData('eurostatCountryData') as GetEurostatCountryDataResponse | undefined;
-  if (hydrated && !hydrated.unavailable && Object.keys(hydrated.countries).length > 0) return hydrated;
+  if (hydrated && !hydrated.unavailable && Object.keys(hydrated.countries).length > 0) {
+    eurostatBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
 
   try {
     return await eurostatBreaker.execute(
@@ -1065,7 +1018,10 @@ export type { GetOilStocksAnalysisResponse, OilStocksAnalysisMember, OilStocksRe
 
 export async function getOilStocksAnalysisData(): Promise<GetOilStocksAnalysisResponse> {
   const hydrated = getHydratedData('oilStocksAnalysis') as GetOilStocksAnalysisResponse | undefined;
-  if (hydrated && !hydrated.unavailable && hydrated.ieaMembers.length > 0) return hydrated;
+  if (hydrated && !hydrated.unavailable && hydrated.ieaMembers.length > 0) {
+    oilStocksAnalysisBreaker.recordSuccess(hydrated);
+    return hydrated;
+  }
 
   try {
     return await oilStocksAnalysisBreaker.execute(
@@ -1102,3 +1058,8 @@ export async function fetchLngVulnerability(): Promise<LngVulnerabilityData | nu
 
   return null;
 }
+
+export const __testing__ = {
+  getWbBreaker,
+  wbBreakerPoolSize: () => wbBreakers.size,
+};

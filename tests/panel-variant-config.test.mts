@@ -88,17 +88,104 @@ describe('variant panel config resolution', () => {
     assert.equal(countFreePanelCapUsage(result), countFreePanelCapUsage(fullDefaults));
   });
 
-  it('restoreFreeMapPanelAccess restores a hidden map when over FREE_MAX_PANELS', () => {
-    // restoreFreeMapPanelAccess is a separate, still-live safety net
-    // (unrelated to this fork's removal of the count-cap) — built the
-    // over-cap fixture directly instead of deriving it from
-    // enforceFreePanelLimit, which no longer produces one.
-    const stale: Record<string, { name: string; enabled: boolean; priority: number }> = {};
-    for (let i = 0; i < FREE_MAX_PANELS + 1; i += 1) {
-      const key = `p${String(i).padStart(2, '0')}`;
-      stale[key] = { name: key, enabled: true, priority: 1 };
+  it('excludes locked Pro teaser panels from the free-tier 40-panel cap while still counting enhanced panels', () => {
+    const lockedCatalogKeys = [
+      'stock-analysis',
+      'stock-backtest',
+      'daily-market-brief',
+      'chat-analyst',
+      'global-procurement',
+      'trade-policy',
+      'latest-brief',
+      'market-implications',
+      'wsb-ticker-scanner',
+      'regional-intelligence',
+      'deduction',
+    ];
+    for (const key of lockedCatalogKeys) {
+      assert.equal(isFreePanelCapCounted(key), false, `${key} should be excluded from free panel cap`);
+      assert.equal(
+        isFreePanelCapCounted(key, { premium: undefined }),
+        false,
+        `${key} should stay excluded even when stored config lacks premium metadata`,
+      );
     }
-    stale.map = { name: 'Map', enabled: false, priority: 0 };
+
+    // Synthetic locked vs enhanced vs plain configs (for tests / non-catalog keys)
+    assert.equal(isFreePanelCapCounted('synthetic-locked', { premium: 'locked' }), false);
+    assert.equal(isFreePanelCapCounted('synthetic-enhanced', { premium: 'enhanced' }), true);
+    assert.equal(isFreePanelCapCounted('synthetic-free', {}), true);
+
+    // Enhanced and free catalog panels MUST still count against the 40-panel cap
+    for (const key of ['cii', 'strategic-risk', 'gdelt-intel', 'supply-chain', 'forecast', 'markets']) {
+      assert.equal(isFreePanelCapCounted(key), true, `${key} is usable on Free and must count toward the cap`);
+    }
+
+    // countFreePanelCapUsage excludes locked teasers but counts enhanced + free panels
+    const mixed: Record<string, { name: string; enabled: boolean; priority: number; premium?: 'locked' | 'enhanced' }> = {
+      map: { name: 'Global Map', enabled: true, priority: 1 },
+      'cw-custom': { name: 'Custom', enabled: true, priority: 1 },
+      'stock-analysis': { name: 'Stock Analysis', enabled: true, priority: 1, premium: 'locked' },
+      'trade-policy': { name: 'Trade Policy', enabled: true, priority: 1 }, // stripped stored premium
+      'synthetic-locked': { name: 'Synthetic Locked', enabled: true, priority: 1, premium: 'locked' },
+      'synthetic-enhanced': { name: 'Synthetic Enhanced', enabled: true, priority: 1, premium: 'enhanced' },
+      cii: { name: 'Country Instability', enabled: true, priority: 1, premium: 'enhanced' },
+      markets: { name: 'Markets', enabled: true, priority: 1 },
+    };
+    assert.equal(countFreePanelCapUsage(mixed), 3);
+
+    // enforceFreePanelLimit(FULL_PANELS, false) keeps 40 genuinely free panels enabled
+    // (not 32 free + 8 locked) and leaves locked teaser panels untouched without proGated.
+    const fullDefaults = Object.fromEntries(
+      VARIANT_DEFAULTS.full.map((key) => [key, { ...getEffectivePanelConfig(key, 'full') }]),
+    );
+    const clamped = enforceFreePanelLimit(fullDefaults, false, 'full');
+    const enabledFreePanels = Object.entries(clamped).filter(([key, cfg]) =>
+      cfg.enabled && key !== 'map' && !key.startsWith('cw-') && getEffectivePanelConfig(key, 'full').premium !== 'locked'
+    );
+    assert.equal(enabledFreePanels.length, FREE_MAX_PANELS);
+    assert.equal(countFreePanelCapUsage(clamped, 'full'), FREE_MAX_PANELS);
+
+    for (const key of lockedCatalogKeys) {
+      const defaultCfg = fullDefaults[key];
+      if (!defaultCfg) continue;
+      assert.equal(
+        clamped[key]?.enabled,
+        defaultCfg.enabled,
+        `locked teaser ${key} must keep its default enabled state under free cap`,
+      );
+      assert.equal(
+        clamped[key]?.proGated,
+        undefined,
+        `locked teaser ${key} must not be stamped proGated by the free count cap`,
+      );
+    }
+
+    // Finance variant also keeps 40 genuinely free panels + locked teasers untouched
+    const financeDefaults = Object.fromEntries(
+      VARIANT_DEFAULTS.finance.map((key) => [key, { ...getEffectivePanelConfig(key, 'finance') }]),
+    );
+    const clampedFinance = enforceFreePanelLimit(financeDefaults, false, 'finance');
+    const enabledFinanceFree = Object.entries(clampedFinance).filter(([key, cfg]) =>
+      cfg.enabled && key !== 'map' && !key.startsWith('cw-') && getEffectivePanelConfig(key, 'finance').premium !== 'locked'
+    );
+    assert.equal(enabledFinanceFree.length, FREE_MAX_PANELS);
+    assert.equal(countFreePanelCapUsage(clampedFinance, 'finance'), FREE_MAX_PANELS);
+    assert.equal(clampedFinance['stock-analysis']?.enabled, true);
+    assert.equal(clampedFinance['stock-analysis']?.proGated, undefined);
+  });
+
+  it('restores stale over-cap free layouts where the cap disabled the map', () => {
+    const fullDefaults = Object.fromEntries(
+      VARIANT_DEFAULTS.full.map((key) => [key, { ...getEffectivePanelConfig(key, 'full') }]),
+    );
+    const stale = enforceFreePanelLimit(fullDefaults, false);
+    stale.map = { ...stale.map!, enabled: false };
+    const disabledCapPanel = Object.entries(fullDefaults).find(([key, panel]) =>
+      isFreePanelCapCounted(key) && panel.enabled && !stale[key]?.enabled
+    );
+    assert.ok(disabledCapPanel, 'fixture should include a disabled over-cap panel');
+    stale[disabledCapPanel[0]] = { ...disabledCapPanel[1], enabled: true };
 
     const restored = restoreFreeMapPanelAccess(stale);
 
@@ -239,7 +326,7 @@ describe('variant panel config resolution', () => {
     );
     assert.match(
       text,
-      /getLocalizedPanelName\(key, resolvedPanel\.name \?\? panel\.name\)/,
+      /getPanelDisplayName\(key, resolvedPanel\.name \?\? panel\.name\)/,
       'settings-window render must prefer the resolved variant name before saved panel.name',
     );
   });

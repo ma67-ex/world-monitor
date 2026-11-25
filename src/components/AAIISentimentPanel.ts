@@ -109,7 +109,7 @@ function renderSparkChart(weeks: WeekData[]): string {
 
   return `<div style="margin:8px 0">
     <div style="font-size:calc(10px * var(--wm-panel-effective-scale, 1));color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">52-Week Spread History</div>
-    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block">
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="AAII 52-week bull-bear spread history" style="display:block">
       ${bars}
       ${zeroLine}
       ${contrarianLine}
@@ -210,7 +210,7 @@ export class AAIISentimentPanel extends Panel {
     const dateStr = latest.date ? `<div style="font-size:calc(9px * var(--wm-panel-effective-scale, 1));color:var(--text-dim);text-align:right;margin-top:4px">Survey: ${escapeHtml(latest.date)}${d.source !== 'xls' ? ` (${escapeHtml(d.source)})` : ''}${fallbackBadge}</div>` : '';
 
     const html = `
-      <div style="padding:12px 14px">
+      <div style="padding:12px 0">
         <div style="text-align:center;margin-bottom:8px">
           <div style="font-size:calc(11px * var(--wm-panel-effective-scale, 1));font-weight:600;color:${color};letter-spacing:0.06em;text-transform:uppercase">${escapeHtml(label)}</div>
           ${deltaStr ? `<div style="margin-top:2px">${deltaStr}</div>` : ''}

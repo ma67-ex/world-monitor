@@ -20,17 +20,42 @@ const repoRoot = resolve(__dirname, '..');
 const MIRRORED_FILES = [
   'china-corporate-disclosure-policy.js',
   'correlation-runtime-mode.js',
+  'gdelt-tension-pairs.json',
   'geography.js',
   'hapi-app-identifier.json',
   'iso2-to-region.json',
   'iso3-to-iso2.json',
   'publisher-families.js',
+  'physical-divergence-contract.js',
+  'physical-divergence-contract.d.ts',
+  'physical-divergence-staleness.js',
+  'physical-divergence-staleness.d.ts',
+  'compare-and-delete-script.cjs',
   'stablecoin-classifier.cjs',
   // The classifier's default thresholds come from its SIBLING stablecoins.json
   // (both homes), so a drift in the JSON mirror silently changes classification.
   'stablecoins.json',
   'story-identity.js',
   'un-to-iso2.json',
+  'world-bank-rpc-cache.js',
+  // #8867: the market-alert detector graph that seed-market-alert-ledger.mjs
+  // runs from scripts/shared/ on Railway.
+  'market-alert-core.js',
+  'text-analysis-core.js',
+  'entity-registry.js',
+  'entity-extraction-core.js',
+  'news-clustering-core.js',
+  // #9095: news-clustering-core.js imports it for same-copy detection.
+  'syndication.js',
+  // Push event registry read by scripts/shipping-webhook-worker.mjs on Railway.
+  'event-triggers.json',
+  // Read by scripts/seed-country-history.mjs on Railway (feed list, country
+  // matching and stored-link checks for the daily headline archive).
+  'news-catalog.json',
+  'country-mention.js',
+  'country-mention.d.ts',
+  'article-url.js',
+  'article-url.d.ts',
 ];
 
 describe('scripts/shared/ mirrors shared/', () => {
@@ -62,8 +87,10 @@ describe('regional snapshot seed scripts use scripts/shared/ (not repo-root shar
   // shared/) will ERR_MODULE_NOT_FOUND at runtime on Railway because the
   // shared/ dir is not copied into the deploy root.
   const FILES_THAT_MUST_USE_MIRROR = [
+    'scripts/_seed-utils.mjs',
     'scripts/_clustering.mjs',
     'scripts/seed-regional-snapshots.mjs',
+    'scripts/seed-wb-indicators.mjs',
     'scripts/regional-snapshot/actor-scoring.mjs',
     'scripts/regional-snapshot/balance-vector.mjs',
     'scripts/regional-snapshot/evidence-collector.mjs',

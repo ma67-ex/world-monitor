@@ -9,7 +9,7 @@ its complete inventory so a second hand-maintained list cannot drift from it.
 | `/blog/sitemap-index.xml` | Astro blog build | Blog index, posts, glossary, and author/editorial pages |
 | `/docs/sitemap.xml` | Mintlify | Documentation and localized documentation |
 
-`public/robots.txt` advertises each endpoint exactly once. Root generation never
+`public/robots.www.txt` (served at `/robots.txt` on www/apex) advertises each endpoint exactly once. Root generation never
 copies `/blog` or `/docs` URLs.
 
 ## Material modification sources
@@ -18,13 +18,29 @@ The root inventory lives in `STATIC_ROUTE_MANIFEST` in
 `scripts/build-sitemap.mjs`. Every static route declares the repository paths
 that materially determine its content:
 
-- The welcome and Pro pages use their `pro-test` page/component, generated
-  product-fact, style, and product-catalog sources.
+- The welcome landing cluster (`/` plus `/es/`, `/pt/`, `/ru/`, `/fr/`, `/de/`,
+  `/ar/`, `/id/`, `/ja/`) and the Pro page use their `pro-test` page/component, generated
+  product-fact, style, locale, and product-catalog sources. Landing URLs carry
+  `xhtml:link` hreflang alternates; other root sitemap URLs do not.
 - Dashboard entries use the app shell, orchestration, components, configuration,
   locales, styles, and the corresponding variant configuration.
 - Markdown and text references use the file served at the canonical URL.
-- Generated country, chokepoint, crisis, tool, and changelog entries use the
+- Generated country, chokepoint, crisis, tool, research, use-case, and changelog entries use the
   `lastmod` metadata emitted by `scripts/build-crawlable-corpus.mjs`.
+
+The `/use-cases/` family is a root crawlable corpus sibling of `/blog/`. The root
+sitemap owns the hub and child pages exactly once. Blog and docs sitemaps must
+not claim those URLs. Canonical treatment for the pilot pages:
+
+- `/use-cases/monitor-country-risk/` owns the evergreen country-risk task framing;
+  `/countries/` remains the live evidence surface; the blog workflow article
+  remains distinct supporting editorial (#6849).
+- `/use-cases/verify-breaking-news/` owns the evergreen verification procedure;
+  the OSINT blog article remains dated supporting editorial with no redirect
+  (#6850).
+- `/use-cases/monitor-supply-chain-disruptions/` owns the evergreen supply-chain
+  monitoring workflow; `/chokepoints/` and commodity surfaces remain evidence;
+  the supply-chain blog article remains distinct supporting editorial (#6851).
 
 Static-page dates are the latest Git commit date among the declared material
 sources. They are not file mtimes and never use build or deploy time. When a
@@ -40,6 +56,18 @@ present and otherwise `pubDate`; `tests/blog-seo-contract.test.mjs` rejects a
 modified date earlier than publication.
 
 ## Build and verification
+
+`npm run lint:public-docs` checks every Markdown source under `docs/`.
+Each document must appear in indexable navigation, declare `noindex: true` or
+`hidden: true` in frontmatter, or match a literal file or directory in
+`docs/.mintignore`. The check rejects ignored navigation targets and missing
+source files. `.mintlifyignore` is not a publication control.
+
+Run `node scripts/check-public-doc-plan-references.mjs --inventory` to print
+each document's classification. Engineering records stay in Git and are excluded
+from Mintlify. The three English-only methodology appendices remain public.
+Global `seo.indexing: all` would also index unlisted engineering records, so the
+check rejects it.
 
 The normal full build runs these steps in order:
 

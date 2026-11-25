@@ -14,7 +14,7 @@
 
 ---
 
-## Target State: 6 Data Layers
+## Target State: Complete Data-Layer Set
 
 ### Layer 1: Climate Anomalies (EXISTING — fix + expand)
 
@@ -211,7 +211,6 @@ message IceTrendPoint {
 - NOAA Climate News: `https://www.noaa.gov/taxonomy/term/28/rss`
 - Phys.org Earth Science: `https://phys.org/rss-feed/earth-news/earth-sciences/`
 - Copernicus/ECMWF: `https://atmosphere.copernicus.eu/rss`
-- Inside Climate News: `https://insideclimatenews.org/feed/`
 - Climate Central: `https://www.climatecentral.org/rss`
 
 **Redis key:** `climate:news-intelligence:v1`
@@ -231,6 +230,7 @@ message IceTrendPoint {
 | `seed-health-air-quality.mjs` | Every 1h (shared) | `climate:air-quality:v1` | 1h |
 | `seed-climate-ocean-ice.mjs` | Daily 08:00 UTC | `climate:ocean-ice:v1` | 24h |
 | `seed-climate-news.mjs` | Every 30min (or relay loop) | `climate:news-intelligence:v1` | 1h |
+| `seed-reservoir-levels.mjs` | Daily (climate bundle) | `climate:reservoir-levels:v1` | 7d |
 
 ---
 

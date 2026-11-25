@@ -11,6 +11,9 @@
  *      piece failed (avoids enumeration).
  *   2. Asserts the grant payload's `nonce` matches the URL `?nonce=` query
  *      parameter (defense vs grant-payload-swap forgery class).
+ *      Then reads `oauth:nonce:<n>` without consuming it: a CIMD client is
+ *      resolved here, so a vendor blip answers 503 before step 3 or 4 spends
+ *      the link. Step 4's GETDEL stays the authoritative, one-shot read.
  *   3. Atomically `GETDEL mcp-grant:<n>` → recovers `{userId, exp}` written
  *      by U3. Strict equality check against grant payload's `userId` AND
  *      `exp` (defense vs grant-without-redis-record forgery + token cloning
@@ -18,16 +21,17 @@
  *   4. Atomically `GETDEL oauth:nonce:<n>` → recovers
  *      `{client_id, redirect_uri, code_challenge, state}` written by
  *      `api/oauth/authorize.js`. One-shot — replay fails on the second hit.
- *   5. Reads (does NOT consume) `oauth:client:<client_id>` for client_name
- *      + redirect_uri allowlist re-check (defense-in-depth; DCR validated
- *      this at register time but allowlist could be tightened since).
+ *   5. Resolves the client (non-consuming read of `oauth:client:<client_id>`,
+ *      or the CIMD document for a URL client_id, #9244) for client_name +
+ *      redirect_uri re-check (defense-in-depth; DCR validated this at
+ *      register time but allowlist could be tightened since).
  *   6. Re-fetches `getEntitlements(userId)` from Convex — the grant could
  *      be up to 5 minutes old; tier may have lapsed since mint. A denial here
  *      is split three ways (#5622): an unverifiable entitlement or in-flight
  *      renewal check renders a retryable 503 page (`Retry-After` +
- *      `X-Billing-Verification`), a provider-confirmed lapse renders a distinct
- *      403, and only a confirmed non-Pro row gets the "Pro Subscription
- *      Required" upsell.
+ *      `X-Billing-Verification`), provider-confirmed ended coverage continues
+ *      as a restricted free account, and only a genuinely insufficient non-free
+ *      row gets the "Pro Subscription Required" upsell.
  *   7. Calls `issueProMcpTokenForUser` to insert a Convex `mcpProTokens`
  *      row. NO `wm_` key, NO `WORLDMONITOR_VALID_KEYS` write — Pro identity
  *      lives only in Convex, the OAuth code carries the row id.
@@ -83,6 +87,13 @@ import {
 } from '../../server/_shared/pro-mcp-token';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../_sentry-edge.js';
+import { mcpGrantName } from '../../shared/agent-client-source';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from '../_rate-limit.js';
+// @ts-expect-error — JS module, no declaration file
+import { clientAllowsRedirectUri, describeClientFailure, isClientMetadataDocumentId, resolveOAuthClient } from './_client-metadata.js';
+// @ts-expect-error — JS module, no declaration file
+import { isAllowedRedirectUri } from './_redirect-uri.js';
 
 /** OAuth authorization-code TTL — matches `api/oauth/authorize.js:10`. */
 const CODE_TTL_SECONDS = 600;
@@ -123,10 +134,19 @@ function htmlError(
     `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Error &#x2014; WorldMonitor MCP</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:ui-monospace,'SF Mono','Cascadia Code',monospace;background:#0a0a0a;color:#e8e8e8;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem}.wm-logo{display:flex;align-items:center;gap:.5rem;margin-bottom:2rem;text-decoration:none}.wm-logo svg{color:#2d8a6e}.wm-logo-text{font-size:.75rem;color:#555;letter-spacing:.1em;text-transform:uppercase}.card{width:100%;max-width:420px;background:#111;border:1px solid #1e1e1e;padding:2rem}h1{font-size:.95rem;font-weight:600;color:#ef4444;margin-bottom:.75rem;letter-spacing:.02em}p{font-size:.85rem;color:#666;line-height:1.6}.back{display:inline-block;margin-top:1.5rem;font-size:.75rem;color:#444;text-decoration:none;letter-spacing:.03em}.back:hover{color:#888}.footer{margin-top:1.5rem;font-size:.7rem;color:#2a2a2a;text-align:center}.footer a{color:#333;text-decoration:none}.footer a:hover{color:#555}</style></head>
 <body><a href="https://www.worldmonitor.app" class="wm-logo" target="_blank" rel="noopener">${GLOBE_SVG}<span class="wm-logo-text">WorldMonitor MCP</span></a>
-<div class="card"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p><a href="javascript:history.back()" class="back">&#8592; go back</a></div>
+<div class="card"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p><a href="#" id="back" class="back">&#8592; go back</a></div>
+<script>document.getElementById('back').addEventListener('click',function(e){e.preventDefault();history.back();});</script>
 <p class="footer"><a href="https://www.worldmonitor.app" target="_blank" rel="noopener">worldmonitor.app</a></p>
 </body></html>`,
     { status, headers: { ...PAGE_HEADERS, ...extraHeaders } },
+  );
+}
+
+function proRequiredPage(): Response {
+  return htmlError(
+    'Pro Subscription Required',
+    'A WorldMonitor Pro subscription is required for this connection. Please subscribe and try again.',
+    403,
   );
 }
 
@@ -246,12 +266,16 @@ export interface NonceData {
   redirect_uri: string;
   code_challenge: string;
   state?: string;
+  /** RFC 9207 issuer captured by GET /oauth/authorize; absent on older nonces. */
+  iss?: string;
   created_at?: number;
 }
 
 export interface ClientData {
   client_name?: string;
   redirect_uris?: unknown;
+  /** True for a client resolved from a CIMD document. */
+  cimd?: boolean;
 }
 
 export interface GrantRedisData {
@@ -262,12 +286,14 @@ export interface GrantRedisData {
 export interface AuthorizeProDeps {
   /** Atomic GETDEL on a raw `mcp-grant:*` or `oauth:nonce:*` key. */
   redisGetDel: (key: string) => Promise<unknown | null>;
-  /** Non-consuming read of the `oauth:client:<id>` row. */
+  /** Non-consuming read of `oauth:nonce:<n>`, the `oauth:client:<id>` row, and the CIMD cache. */
   redisGet: (key: string) => Promise<unknown | null>;
   /** SETEX of `oauth:code:<code>`. Returns false on failure (caller rolls back). */
   redisSetEx: (key: string, value: unknown, ttlSeconds: number) => Promise<boolean>;
   /** Verifies the wire-format HMAC grant. */
   verifyGrant: typeof verifyGrant;
+  /** Charges the grant owner's budget; a Response means refused. Runs before any Redis read. */
+  rateLimit: (req: Request, userId: string) => Promise<Response | null>;
   /**
    * Returns Pro entitlement info or null.
    *
@@ -285,6 +311,8 @@ export interface AuthorizeProDeps {
   randomCode: () => string;
   /** Wall clock — injectable for deterministic tests. */
   now: () => number;
+  /** Fetch for CIMD client metadata documents; defaults to the global fetch. */
+  fetchClientMetadata?: typeof fetch;
 }
 
 export async function authorizeProHandler(req: Request, deps: AuthorizeProDeps): Promise<Response> {
@@ -341,6 +369,48 @@ export async function authorizeProHandler(req: Request, deps: AuthorizeProDeps):
     );
   }
 
+  // ----- 2b. Resolve a CIMD client before consuming anything -----
+  // Resolving fetches the vendor's document, which can fail for a moment.
+  // Doing it after the GETDELs below would burn this one-shot link on a
+  // retryable error. A DCR lookup has no such dependency and stays in step 5.
+  const limited = await deps.rateLimit(req, grantPayload.userId);
+  if (limited) {
+    const forwarded: Record<string, string> = {};
+    for (const name of ['Retry-After', 'X-RateLimit-Mode']) {
+      const value = limited.headers.get(name);
+      if (value) forwarded[name] = value;
+    }
+    return limited.status === 429
+      ? htmlError('Too Many Requests', 'Too many authorization attempts. Please wait a few minutes and start over from your dashboard.', 429, forwarded)
+      : htmlError('Service Unavailable', 'Authorization service is temporarily unavailable. Please try again shortly.', limited.status, forwarded);
+  }
+
+  let preResolved: { clientId: string; result: Awaited<ReturnType<typeof resolveOAuthClient>> } | null = null;
+  let peeked: NonceData | null = null;
+  try {
+    peeked = (await deps.redisGet(`oauth:nonce:${nonce}`)) as NonceData | null;
+  } catch {
+    // Without the client_id there is no telling whether step 5 would fetch,
+    // so stop before anything is consumed.
+    return htmlError(
+      'Service Unavailable',
+      'Authorization service is temporarily unavailable. Please try again shortly.',
+      503,
+    );
+  }
+  if (peeked && typeof peeked.client_id === 'string' && isClientMetadataDocumentId(peeked.client_id)) {
+    const early = await resolveOAuthClient(peeked.client_id, {
+      redisGet: deps.redisGet,
+      redisSetEx: deps.redisSetEx,
+      fetch: deps.fetchClientMetadata,
+    });
+    if (!early.ok && early.transient) {
+      return htmlError('Service Unavailable', describeClientFailure(early), 503);
+    }
+    // A permanent failure is reported in step 5, after the link is spent.
+    preResolved = { clientId: peeked.client_id, result: early };
+  }
+
   // ----- 3. Atomic GETDEL mcp-grant:<n> -----
   let grantRedis: GrantRedisData | null;
   try {
@@ -394,27 +464,33 @@ export async function authorizeProHandler(req: Request, deps: AuthorizeProDeps):
   const { client_id, redirect_uri, code_challenge } = nonceData;
   const state = typeof nonceData.state === 'string' ? nonceData.state : '';
 
-  // ----- 5. Read oauth:client:<client_id> (no consume) -----
-  let clientData: ClientData | null;
-  try {
-    clientData = (await deps.redisGet(`oauth:client:${client_id}`)) as ClientData | null;
-  } catch {
-    return htmlError(
-      'Service Unavailable',
-      'Authorization service is temporarily unavailable. Please try again shortly.',
-      503,
-    );
-  }
-  if (!clientData) {
+  // ----- 5. Resolve the client (DCR row or CIMD document; no consume) -----
+  // Reuse step 2b's result only for the client_id it resolved.
+  const resolved = preResolved && preResolved.clientId === client_id
+    ? preResolved.result
+    : await resolveOAuthClient(client_id, {
+      redisGet: deps.redisGet,
+      redisSetEx: deps.redisSetEx,
+      fetch: deps.fetchClientMetadata,
+    });
+  if (!resolved.ok) {
+    if (resolved.transient) {
+      return htmlError('Service Unavailable', describeClientFailure(resolved), 503);
+    }
     return htmlError(
       'Unknown Client',
-      'The OAuth client registration has expired. Please re-register the client.',
+      resolved.reason === 'unknown_client'
+        ? 'The OAuth client registration has expired. Please re-register the client.'
+        : describeClientFailure(resolved),
     );
   }
+  const clientData = resolved.client as ClientData;
 
-  // ----- 6. Defense-in-depth: redirect_uri allowlist re-check -----
-  const uris = Array.isArray(clientData.redirect_uris) ? clientData.redirect_uris : [];
-  if (!uris.includes(redirect_uri)) {
+  // ----- 6. Defense-in-depth: redirect_uri re-check -----
+  // A DCR registration keeps the URIs it was created with, so re-check the
+  // current allowlist (as mcp-grant-mint.ts does) to honour a removal.
+  if (!clientAllowsRedirectUri(clientData, redirect_uri)
+    || (!clientData.cimd && !isAllowedRedirectUri(redirect_uri))) {
     return htmlError(
       'Redirect URI Mismatch',
       'The redirect_uri does not match any registered redirect URI for this client.',
@@ -433,28 +509,27 @@ export async function authorizeProHandler(req: Request, deps: AuthorizeProDeps):
   const gate = checkProMcpAccess(ent, deps.now(), {
     backendConfigured: isEntitlementBackendConfigured(),
   });
-  if (gate) {
-    if (gate.kind === 'billing_verification') return billingVerificationPage(gate.denial);
-    return htmlError(
-      'Pro Subscription Required',
-      'A WorldMonitor Pro subscription is required for this connection. Please subscribe and try again.',
-      403,
-    );
+  // #6716: a CONFIRMED free account completes authorization. This is the last
+  // of the three edge gates and it must agree with grant-context, grant-mint,
+  // and Convex issuance — a free account that cleared consent and minted a
+  // grant only to fail on the final redirect is worse than one refused up
+  // front. Their token meters against the free allowance on every gated call
+  // and is restricted to cache-backed tools.
+  if (gate && gate.kind !== 'free_account') {
+    if (gate.kind === 'billing_verification') {
+      return billingVerificationPage(gate.denial);
+    }
+    return proRequiredPage();
   }
 
   // ----- 8. Issue the Convex mcpProTokens row -----
-  const clientName = (typeof clientData.client_name === 'string' && clientData.client_name) || 'Unknown Client';
   let issueResult: { tokenId: string };
   try {
-    issueResult = await deps.issueProMcpTokenForUser(userId, client_id, `Connected via ${clientName}`);
+    issueResult = await deps.issueProMcpTokenForUser(userId, client_id, mcpGrantName(clientData.client_name));
   } catch (err) {
     if (err instanceof ProMcpIssueFailed) {
       if (err.kind === 'pro-required') {
-        return htmlError(
-          'Pro Subscription Required',
-          'A WorldMonitor Pro subscription is required for this connection. Please subscribe and try again.',
-          403,
-        );
+        return proRequiredPage();
       }
       if (err.kind === 'invalid-user-id') {
         return htmlError(
@@ -522,6 +597,7 @@ export async function authorizeProHandler(req: Request, deps: AuthorizeProDeps):
       );
       captureSilentError(err, {
         tags: { route: 'api/oauth/authorize-pro', step: 'rollback-revoke' },
+        fingerprint: ['api/oauth/authorize-pro', 'rollback-revoke', err instanceof Error ? err.name : 'Error'],
       });
     }
     return htmlError(
@@ -535,6 +611,10 @@ export async function authorizeProHandler(req: Request, deps: AuthorizeProDeps):
   const redirectUrl = new URL(redirect_uri);
   redirectUrl.searchParams.set('code', code);
   if (state) redirectUrl.searchParams.set('state', state);
+  // The issuer the client discovered, not this host (always api.*).
+  if (typeof nonceData.iss === 'string' && nonceData.iss) {
+    redirectUrl.searchParams.set('iss', nonceData.iss);
+  }
 
   return new Response(null, {
     status: 302,
@@ -556,6 +636,11 @@ export default async function handler(req: Request): Promise<Response> {
     redisGet: rawRedisGet,
     redisSetEx: rawRedisSetEx,
     verifyGrant,
+    // Keyed by the grant's user, because api/internal/mcp-grant-mint.ts limits
+    // minting per user (20 / 10 min). Fail closed like the mint.
+    rateLimit: (request, userId) => checkRateLimit(request, { 'Cache-Control': 'no-store' }, {
+      scope: 'oauth-authorize-pro', identifier: `user:${userId}`, limit: 30, window: '10 m', failClosed: true,
+    }),
     getEntitlements,
     issueProMcpTokenForUser,
     revokeProMcpToken,

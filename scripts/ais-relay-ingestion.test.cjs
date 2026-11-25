@@ -7,6 +7,9 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { setTimeout: sleep } = require('node:timers/promises');
 const test = require('node:test');
+// Node 24 loads the shared TypeScript module directly (type stripping), so the
+// emergency codes have one source of truth across TS, ESM and CommonJS.
+const { EMERGENCY_CODES } = require('../shared/aircraft-emergencies.ts');
 
 function get(port, requestPath, headers) {
   return new Promise((resolve, reject) => {
@@ -44,6 +47,7 @@ function spawnRelay(extraEnv) {
       ...process.env,
       PORT: '0',
       RELAY_TEST_MODE: 'true',
+      TELEGRAM_RPC_MIN_INTERVAL_MS: '1',
       RELAY_SHARED_SECRET: '',
       I_UNDERSTAND_THIS_DISABLES_AUTH: 'true',
       RELAY_RATE_LIMIT_MAX: '1000',
@@ -75,12 +79,633 @@ function spawnRelay(extraEnv) {
     });
   });
 
-  return { child, ready: ready.then(() => ({ child, port })) };
+  return {
+    child,
+    getOutput: () => output,
+    ready: ready.then(() => ({ child, port })),
+  };
 }
+
+test('Telegram custom lookups honor the relay startup delay', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '5000',
+    RELAY_TEST_TELEGRAM: 'true',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const response = await get(port, '/telegram/resolve?username=test_channel');
+    assert.equal(response.status, 503);
+    assert.equal(response.headers['cache-control'], 'no-store');
+    assert.ok(Number(response.headers['retry-after']) >= 1);
+    // Public copy only: the relay's internal phrasing ('startup delay active',
+    // 'session invalidated (AUTH_KEY_DUPLICATED)', raw MTProto text) must not
+    // reach a browser holding a free session token.
+    assert.match(response.body, /temporarily unavailable/);
+    assert.doesNotMatch(response.body, /startup delay/);
+    assert.doesNotMatch(relay.getOutput(), /Telegram client connected/);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('concurrent Telegram custom lookups share one cold connection', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_CONNECT_DELAY_MS: '100',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, () => get(port, '/telegram/resolve?username=test_channel')),
+    );
+    assert.deepEqual(responses.map(response => response.status), [200, 200, 200, 200, 200, 200]);
+    assert.equal(
+      (relay.getOutput().match(/Telegram client connected/g) || []).length,
+      1,
+      'all cold requests must await one connection attempt',
+    );
+    assert.equal((relay.getOutput().match(/getEntity test_channel/g) || []).length, 1);
+    assert.equal((relay.getOutput().match(/getFullChannel test_channel/g) || []).length, 1);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('Telegram channel lookups coalesce and normalize representative posts', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_RPC_DELAY_MS: '20',
+    RELAY_TEST_TELEGRAM_MESSAGES: JSON.stringify([
+      { id: 1, date: 1_700_000_000, message: 'Older update' },
+      { id: 2, date: 1_700_000_100, message: '' },
+      { id: 3, date: 1_700_000_200, message: 'Newer update' },
+    ]),
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const responses = await Promise.all(
+      Array.from({ length: 4 }, () => get(port, '/telegram/channel?username=test_channel&limit=20')),
+    );
+    assert.deepEqual(responses.map(response => response.status), [200, 200, 200, 200]);
+    const payload = JSON.parse(responses[0].body);
+    assert.equal(responses[0].headers['cache-control'], 'no-store');
+    assert.equal(responses[0].headers['cdn-cache-control'], 'no-store');
+    assert.equal(payload.count, 2);
+    assert.deepEqual(payload.items.map(item => item.id), ['test_channel:3', 'test_channel:1']);
+    assert.equal(payload.items[0].url, 'https://t.me/test_channel/3');
+    assert.equal(payload.items[0].topic, 'osint');
+    assert.equal((relay.getOutput().match(/getEntity test_channel/g) || []).length, 1);
+    assert.equal((relay.getOutput().match(/getMessages 20/g) || []).length, 1);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('timed-out Telegram RPCs reset the client and allow a clean reconnect', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_CHANNEL_TIMEOUT_MS: '25',
+    TELEGRAM_RPC_MAX_CONCURRENCY: '1',
+    // A client reset now needs a RUN of timeouts, so pin the threshold to 1 to
+    // keep exercising the reset-and-reconnect path this test is about. The
+    // "one slow channel fails alone" test covers the below-threshold case.
+    TELEGRAM_MAX_CONSECUTIVE_RPC_TIMEOUTS: '1',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_RPC_NEVER_USERNAMES: 'stuck_channel',
+    RELAY_TEST_TELEGRAM_DISCONNECT_DELAY_MS: '60',
+    RELAY_TEST_TELEGRAM_DISCONNECT_REJECT: 'true',
+    RELAY_TEST_TELEGRAM_SKIP_FULL_CHANNEL: 'true',
+  });
+  const { child, port } = await relay.ready;
+  const closed = once(child, 'close');
+
+  try {
+    const timedOut = await get(port, '/telegram/resolve?username=stuck_channel');
+    const recovered = await get(port, '/telegram/resolve?username=recovery_channel');
+    // 504, not 502: a timeout is a gateway timeout, and the explicit status is
+    // what lets the negative cache back a chronically slow channel off.
+    assert.equal(timedOut.status, 504);
+    assert.equal(recovered.status, 200);
+  } finally {
+    await stop(child);
+    await closed;
+  }
+  const [beforeShutdown] = relay.getOutput().split('[Relay] SIGTERM received');
+  const events = [...beforeShutdown.matchAll(/\[Relay\]\[TestTelegram\] (connect \d+|disconnect rejected|getEntity recovery_channel)/g)]
+    .map(match => match[1]);
+  assert.deepEqual(events, ['connect 1', 'disconnect rejected', 'connect 2', 'getEntity recovery_channel']);
+});
+
+test('a hung member-count lookup degrades to null instead of failing the channel', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_CHANNEL_TIMEOUT_MS: '25',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_FULL_NEVER_USERNAMES: 'stuck_channel',
+    RELAY_TEST_TELEGRAM_MESSAGES: JSON.stringify([
+      { id: 1, date: 1_700_000_000, message: 'Still readable' },
+    ]),
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const stuck = await get(port, '/telegram/channel?username=stuck_channel&limit=20');
+    // getFullChannel is explicitly best-effort (it only decorates the preview
+    // with a member count), so its timeout must not fail the read. Previously
+    // it tore the shared client down and surfaced as a 503.
+    assert.equal(stuck.status, 200);
+    const payload = JSON.parse(stuck.body);
+    assert.equal(payload.count, 1);
+    assert.equal(payload.items[0].text, 'Still readable');
+    assert.equal((relay.getOutput().match(/getMessages 20 stuck_channel/g) || []).length, 1);
+
+    const recovered = await get(port, '/telegram/channel?username=recovery_channel&limit=20');
+    assert.equal(recovered.status, 200);
+    // No teardown, so no reconnect: one connect for the whole test.
+    assert.equal((relay.getOutput().match(/\[Relay\]\[TestTelegram\] connect/g) || []).length, 1);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('Telegram RPC queue rejects excess and expired work with 429', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_CHANNEL_TIMEOUT_MS: '500',
+    TELEGRAM_RPC_MAX_CONCURRENCY: '1',
+    TELEGRAM_RPC_MAX_QUEUE: '1',
+    TELEGRAM_RPC_QUEUE_TIMEOUT_MS: '25',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_RPC_DELAY_MS: '100',
+    RELAY_TEST_TELEGRAM_SKIP_FULL_CHANNEL: 'true',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const responses = await Promise.all([
+      get(port, '/telegram/resolve?username=first_channel'),
+      get(port, '/telegram/resolve?username=second_channel'),
+      get(port, '/telegram/resolve?username=third_channel'),
+    ]);
+    assert.equal(responses.filter(response => response.status === 200).length, 1);
+    assert.equal(responses.filter(response => response.status === 429).length, 2);
+    assert.ok(responses.filter(response => response.status === 429)
+      .every(response => Number(response.headers['retry-after']) >= 1));
+  } finally {
+    await stop(child);
+  }
+});
+
+test('Telegram lookup failures are negative-cached by username', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_INVALID_USERNAMES: 'missing_channel',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const first = await get(port, '/telegram/resolve?username=missing_channel');
+    const second = await get(port, '/telegram/resolve?username=missing_channel');
+    assert.equal(first.status, 404);
+    assert.equal(second.status, 404);
+    assert.equal((relay.getOutput().match(/getEntity missing_channel/g) || []).length, 1);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('Telegram FLOOD_WAIT opens a relay-wide cooldown with Retry-After', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_FLOOD_USERNAME: 'flood_channel',
+    RELAY_TEST_TELEGRAM_FLOOD_SECONDS: '3',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const first = await get(port, '/telegram/resolve?username=flood_channel');
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    const cached = await get(port, '/telegram/resolve?username=flood_channel');
+    const duringCooldown = await get(port, '/telegram/resolve?username=other_channel');
+    assert.equal(first.status, 429);
+    assert.equal(cached.status, 429);
+    assert.equal(duringCooldown.status, 429);
+    assert.ok(Number(first.headers['retry-after']) >= 2);
+    assert.ok(Number(cached.headers['retry-after']) < Number(first.headers['retry-after']));
+    assert.ok(Number(duringCooldown.headers['retry-after']) >= 1);
+    assert.doesNotMatch(relay.getOutput(), /getEntity other_channel/);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('Telegram connect timeout clears the shared initializer for recovery', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_CONNECT_TIMEOUT_MS: '25',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_CONNECT_HANG_ATTEMPTS: '1',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const timedOut = await get(port, '/telegram/resolve?username=test_channel');
+    const recovered = await get(port, '/telegram/resolve?username=test_channel');
+    // A connect timeout is a gateway timeout like any other; getTelegramErrorStatus
+    // now classifies the shared TIMEOUT shape explicitly instead of defaulting to 502.
+    assert.equal(timedOut.status, 504);
+    assert.equal(recovered.status, 200);
+    assert.equal((relay.getOutput().match(/\[Relay\]\[TestTelegram\] connect/g) || []).length, 2);
+  } finally {
+    await stop(child);
+  }
+});
+
+// Regression: a username is attacker-controlled and gramjs interpolates it
+// verbatim into its lookup errors, so parsing a flood duration out of
+// error.message let one GET park the process-wide cooldown ~31 trillion years
+// out and permanently stop the curated poll along with every lookup.
+// Guards the curated poll's REQUEST RATE against the shared Telegram account.
+// The RPC queue paces start-to-start, so a poll that leans on the queue alone
+// rests only `max(interval, pair latency)` per channel instead of
+// `pair latency + interval` — roughly 1.75x main's rate, on the one account
+// whose FLOOD_WAIT takes the whole curated feed down. A lower bound is used
+// deliberately: it cannot flake upward on a slow machine.
+test('the curated poll rests after each channel, not merely between RPC dispatches', async () => {
+  const intervalMs = 25;
+  const rpcDelayMs = 25;
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_RPC_MIN_INTERVAL_MS: String(intervalMs),
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_POLL: 'true',
+    RELAY_TEST_TELEGRAM_RPC_DELAY_MS: String(rpcDelayMs),
+  });
+  const { child } = await relay.ready;
+
+  try {
+    let summary = null;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      summary = relay.getOutput().match(/Telegram poll: (\d+)\/\d+ channels.*?\(([\d.]+)s\)/);
+      if (summary) break;
+      await sleep(100);
+    }
+    assert.ok(summary, 'the poll cycle must log a summary');
+
+    const channelsPolled = Number(summary[1]);
+    const elapsedMs = Number(summary[2]) * 1000;
+    assert.ok(channelsPolled > 5, `expected a real channel set, polled ${channelsPolled}`);
+
+    // Two RPCs run inside one queue entry, then the loop rests.
+    const perChannelWithRest = (2 * rpcDelayMs) + intervalMs;
+    const perChannelWithoutRest = Math.max(intervalMs, 2 * rpcDelayMs);
+    // Midpoint between the two regimes, so the assertion sits ~20% clear of
+    // both: a 0.7x-of-expected floor left only a 40ms gap over 56 channels,
+    // which is flake territory rather than a real discriminator. (Verified by
+    // mutation: removing the post-channel rest drops the cycle below this.)
+    const floor = channelsPolled * ((perChannelWithRest + perChannelWithoutRest) / 2);
+
+    assert.ok(
+      perChannelWithRest > perChannelWithoutRest,
+      'the test constants must be able to tell the two pacing regimes apart',
+    );
+    assert.ok(
+      elapsedMs >= floor,
+      `poll cycle took ${elapsedMs}ms for ${channelsPolled} channels; expected >= ${Math.round(floor)}ms `
+      + `(~${perChannelWithRest}ms/channel with the post-channel rest, vs ~${perChannelWithoutRest}ms without it)`,
+    );
+  } finally {
+    await stop(child);
+  }
+});
+
+test('the curated poll rests after recoverable channel failures', async () => {
+  const intervalMs = 25;
+  const rpcDelayMs = 25;
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_RPC_MIN_INTERVAL_MS: String(intervalMs),
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_POLL: 'true',
+    RELAY_TEST_TELEGRAM_RPC_DELAY_MS: String(rpcDelayMs),
+    RELAY_TEST_TELEGRAM_RPC_REJECT_USERNAMES: '*',
+  });
+  const { child } = await relay.ready;
+
+  try {
+    let summary = null;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      summary = relay.getOutput().match(/Telegram poll: (\d+)\/(\d+) channels.*?, (\d+) errors.*?\(([\d.]+)s\)/);
+      if (summary) break;
+      await sleep(100);
+    }
+    assert.ok(summary, 'the failed poll cycle must log a summary');
+
+    const channelsPolled = Number(summary[1]);
+    const totalChannels = Number(summary[2]);
+    const channelsFailed = Number(summary[3]);
+    const elapsedMs = Number(summary[4]) * 1000;
+    assert.equal(channelsPolled, 0);
+    assert.equal(channelsFailed, totalChannels);
+    assert.ok(channelsFailed > 5, `expected a real failed channel set, got ${channelsFailed}`);
+
+    const perFailureWithRest = rpcDelayMs + intervalMs;
+    const perFailureWithoutRest = Math.max(intervalMs, rpcDelayMs);
+    const floor = channelsFailed * ((perFailureWithRest + perFailureWithoutRest) / 2);
+    assert.ok(
+      elapsedMs >= floor,
+      `failed poll cycle took ${elapsedMs}ms for ${channelsFailed} errors; expected >= ${Math.round(floor)}ms `
+      + `(~${perFailureWithRest}ms/failure with the post-channel rest, vs ~${perFailureWithoutRest}ms without it)`,
+    );
+  } finally {
+    await stop(child);
+  }
+});
+
+test('a stuck curated poll never starts a second poll owner', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_POLL_INTERVAL_MS: '20',
+    TELEGRAM_CHANNEL_TIMEOUT_MS: '500',
+    TELEGRAM_RPC_MIN_INTERVAL_MS: '1',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_POLL: 'true',
+    RELAY_TEST_TELEGRAM_POLL_STUCK_AFTER_MS: '40',
+    RELAY_TEST_TELEGRAM_RPC_NEVER_USERNAMES: 'abualiexpress',
+  });
+  const { child } = await relay.ready;
+
+  try {
+    await sleep(180);
+    const output = relay.getOutput();
+    assert.match(output, /Telegram poll stuck/);
+    assert.equal(
+      (output.match(/\[Relay\]\[TestTelegram\] getEntity VahidOnline/g) || []).length,
+      1,
+      'the unresolved poll must keep sole ownership of the scheduler slot',
+    );
+  } finally {
+    await stop(child);
+  }
+});
+
+test('a username shaped like FLOOD_WAIT cannot open a cooldown', async () => {
+  const hostile = 'flood_wait_999999999';
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_INVALID_USERNAMES: hostile,
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const attack = await get(port, `/telegram/resolve?username=${hostile}`);
+    assert.equal(attack.status, 404, 'a non-existent username is a 404, never a flood');
+    assert.equal(attack.headers['retry-after'], undefined, 'no cooldown may be derived from the username');
+
+    // The real proof: an unrelated lookup still reaches Telegram afterwards.
+    // Before the fix this returned 429 'FLOOD_WAIT cooldown active' forever.
+    const bystander = await get(port, '/telegram/resolve?username=healthy_channel');
+    assert.equal(bystander.status, 200);
+    assert.match(relay.getOutput(), /getEntity healthy_channel/);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('a genuine FLOOD_WAIT is capped so one upstream value cannot wedge the relay', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_MAX_FLOOD_WAIT_MS: '2000',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_FLOOD_USERNAME: 'flood_channel',
+    RELAY_TEST_TELEGRAM_FLOOD_SECONDS: '86400',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const flooded = await get(port, '/telegram/resolve?username=flood_channel');
+    assert.equal(flooded.status, 429);
+    assert.ok(
+      Number(flooded.headers['retry-after']) <= 2,
+      `expected the cap to clamp a 24h flood, got ${flooded.headers['retry-after']}s`,
+    );
+  } finally {
+    await stop(child);
+  }
+});
+
+test('non-channel and private entities are rejected without revealing which', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_USER_USERNAMES: 'a_real_person',
+    RELAY_TEST_TELEGRAM_PRIVATE_USERNAMES: 'private_channel',
+    RELAY_TEST_TELEGRAM_INVALID_USERNAMES: 'never_existed',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const user = await get(port, '/telegram/resolve?username=a_real_person');
+    const private_ = await get(port, '/telegram/resolve?username=private_channel');
+    const missing = await get(port, '/telegram/resolve?username=never_existed');
+
+    assert.equal(user.status, 404, 'a user account is not a public channel');
+    assert.equal(private_.status, 404, 'a channel with no public username is not resolvable');
+    // Identical status AND body: a distinct 400 here was a username-existence
+    // oracle paid for out of the shared account's resolve budget.
+    assert.equal(missing.status, 404);
+    assert.equal(user.body, missing.body);
+    assert.equal(private_.body, missing.body);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('a Telegram disconnect that never settles does not wedge later lookups', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_CHANNEL_TIMEOUT_MS: '25',
+    TELEGRAM_MAX_CONSECUTIVE_RPC_TIMEOUTS: '1',
+    TELEGRAM_DISCONNECT_TIMEOUT_MS: '50',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_RPC_NEVER_USERNAMES: 'stuck_channel',
+    RELAY_TEST_TELEGRAM_DISCONNECT_NEVER: 'true',
+    RELAY_TEST_TELEGRAM_SKIP_FULL_CHANNEL: 'true',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const timedOut = await get(port, '/telegram/resolve?username=stuck_channel');
+    assert.equal(timedOut.status, 504);
+
+    // initTelegramClientIfNeeded awaits the disconnect promise before anything
+    // else, so an unbounded await here blocked every future request forever.
+    const recovered = await get(port, '/telegram/resolve?username=recovery_channel');
+    assert.equal(recovered.status, 200);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('one slow channel fails alone instead of resetting the shared client', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    TELEGRAM_CHANNEL_TIMEOUT_MS: '25',
+    TELEGRAM_MAX_CONSECUTIVE_RPC_TIMEOUTS: '3',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_RPC_NEVER_USERNAMES: 'stuck_channel',
+    RELAY_TEST_TELEGRAM_SKIP_FULL_CHANNEL: 'true',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const timedOut = await get(port, '/telegram/resolve?username=stuck_channel');
+    assert.equal(timedOut.status, 504);
+    const recovered = await get(port, '/telegram/resolve?username=healthy_channel');
+    assert.equal(recovered.status, 200);
+    // A single timeout must not have torn the client down: exactly one connect.
+    assert.equal(
+      (relay.getOutput().match(/\[Relay\]\[TestTelegram\] connect/g) || []).length,
+      1,
+      'one slow channel must not reconnect the shared client',
+    );
+  } finally {
+    await stop(child);
+  }
+});
+
+test('the relay rejects a malformed username on its own, independent of the edge', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const bad = await get(port, '/telegram/resolve?username=bad%20handle');
+    const short = await get(port, '/telegram/channel?username=abc&limit=20');
+    assert.equal(bad.status, 400);
+    assert.equal(short.status, 400);
+    assert.doesNotMatch(relay.getOutput(), /getEntity bad/);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('the Telegram routes require the relay shared secret', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_SHARED_SECRET: 'test-relay-secret',
+    I_UNDERSTAND_THIS_DISABLES_AUTH: '',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    // Every other Telegram test runs with auth disabled, so nothing pinned
+    // these routes behind the gate. They are R4 post bodies on a public host.
+    for (const route of ['/telegram/resolve?username=test_channel', '/telegram/channel?username=test_channel&limit=5', '/telegram/feed?limit=5']) {
+      const anonymous = await get(port, route);
+      assert.equal(anonymous.status, 401, `${route} must not be publicly readable`);
+    }
+
+    const authorized = await get(port, '/telegram/resolve?username=test_channel', {
+      'x-relay-key': 'test-relay-secret',
+    });
+    assert.equal(authorized.status, 200);
+  } finally {
+    await stop(child);
+  }
+});
+
+test('malformed Telegram startup delay keeps the safe default', async () => {
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: 'not-a-number',
+    RELAY_TEST_TELEGRAM: 'true',
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    const response = await get(port, '/telegram/resolve?username=test_channel');
+    assert.equal(response.status, 503);
+    assert.ok(Number(response.headers['retry-after']) >= 100);
+    assert.doesNotMatch(relay.getOutput(), /\[Relay\]\[TestTelegram\] connect/);
+  } finally {
+    await stop(child);
+  }
+});
 
 // Mock Upstash REST endpoint: records every command, acknowledges writes, and
 // can return a deterministic response sequence for a specific Redis key.
-async function createUpstashMock({ setResponses = {} } = {}) {
+async function createUpstashMock({ setResponses = {}, getValues = {} } = {}) {
   const commands = [];
   const responseQueues = new Map(Object.entries(setResponses).map(([key, responses]) => [
     key,
@@ -94,6 +719,11 @@ async function createUpstashMock({ setResponses = {} } = {}) {
       try { command = JSON.parse(Buffer.concat(chunks).toString()); } catch { /* non-JSON body */ }
       commands.push({ path: req.url, command });
       res.setHeader('Content-Type', 'application/json');
+      if (req.url.startsWith('/get/')) {
+        const value = getValues[decodeURIComponent(req.url.slice('/get/'.length))];
+        res.end(JSON.stringify({ result: value === undefined ? null : JSON.stringify(value) }));
+        return;
+      }
       if (req.url === '/pipeline') {
         res.end(JSON.stringify((Array.isArray(command) ? command : []).map(() => ({ result: null }))));
         return;
@@ -437,6 +1067,33 @@ test('theater-posture Wingbits fallback publication is attributed to Wingbits, n
   }
 });
 
+for (const source of ['adsb.lol', 'wingbits', 'opensky']) {
+  // Emergency squawks stay in theater posture (Elie's decision); the
+  // emergency layer reads its own feed and shows them as well.
+  test(`theater-posture keeps synthetic 7500/7600/7700 military records from ${source}`, async () => {
+    const upstash = await createUpstashMock();
+    const { child, ready } = spawnRelay({
+      ...upstash.env,
+      RELAY_TEST_EMERGENCY_ROWS: '1',
+      RELAY_TEST_ADSB_MODE_SEQUENCE: source === 'adsb.lol' ? 'flight' : 'error',
+      WINGBITS_API_KEY: source === 'wingbits' ? 'test-wingbits-key' : '',
+      RELAY_TEST_OPENSKY_STATUS_SEQUENCE: source === 'opensky' ? '200' : '429',
+    });
+    try {
+      const { port } = await ready;
+      const response = await get(port, '/__test/seed-theater-posture');
+      assert.equal(response.status, 200);
+      assert.equal(JSON.parse(response.body).ok, true);
+      const metrics = JSON.parse((await get(port, '/metrics')).body);
+      assert.equal(metrics.theaterPosture.lastRun.flightCount, 1 + EMERGENCY_CODES.length);
+      assert.equal(upstash.setsFor('theater-posture:sebuf:v1').length, 1);
+    } finally {
+      await stop(child);
+      await upstash.close();
+    }
+  });
+}
+
 test('theater-posture rejects Wingbits rows without usable theater coordinates', async () => {
   const upstash = await createUpstashMock();
   const { child, ready } = spawnRelay({
@@ -696,6 +1353,212 @@ test('theater-posture uses adsb.lol, then Wingbits, without routine OpenSky debi
     assert.equal(metrics.opensky.requests, 0, 'Wingbits recovery must precede authenticated OpenSky');
     assert.equal(metrics.theaterPosture.emptyRejectionsSinceBoot, 1);
     assert.deepEqual(metrics.theaterPosture.sourceCountsSinceBoot, { opensky: 0, adsbLol: 1, wingbits: 1, vesselOnly: 0 });
+  } finally {
+    await stop(child);
+    await upstash.close();
+  }
+});
+
+// Google answers a rejected RPC with HTTP 200 and a `wrb.fr` row whose payload
+// slot is null and whose error slot holds the RPC status. Captured verbatim
+// from GetShoppingResults on 2026-10-16, when every search returned this.
+// Results-page bodies in the live framing: the shopping payload is the `ds:1`
+// block, and a rejected search carries `errorHasStatus: true` instead.
+const googlePage = (dataJson) => `<script>AF_initDataCallback({key: 'ds:1', hash: '9', data:${dataJson}, sideChannel: {}});</script>`;
+const GOOGLE_PAGE_REJECTION = `<script>AF_initDataCallback({key: 'ds:1',  data:[3,null,[["type.googleapis.com/travel.frontend.flights.ErrorResponse",[]]]],errorHasStatus: true,});</script>`;
+const googleShoppingPage = (items) => googlePage(JSON.stringify([null, null, items, null]));
+const googleFlightRow = () => {
+  const leg = [];
+  Object.assign(leg, { 3: 'JFK', 6: 'LHR', 8: [18, 30], 10: [6, 45], 11: 435, 20: [2026, 11, 15], 21: [2026, 11, 16], 22: ['BA', '178'] });
+  const flight = [];
+  Object.assign(flight, { 2: [leg], 9: 435 });
+  return [flight, [[null, 512]]];
+};
+
+test('Google Flights rejections fail the relay call instead of reading as zero flights', async () => {
+  const { child, ready } = spawnRelay({
+    RELAY_GOOGLE_FLIGHTS_RATE_LIMIT_MAX: '1000',
+    RELAY_TEST_GOOGLE_STATUS_SEQUENCE: Array(11).fill('200').join(','),
+    RELAY_TEST_GOOGLE_BODY_SEQUENCE: JSON.stringify([
+      GOOGLE_PAGE_REJECTION,
+      ...Array(8).fill(GOOGLE_PAGE_REJECTION),
+      googleShoppingPage(null),
+      googleShoppingPage([[googleFlightRow()]]),
+    ]),
+  });
+
+  try {
+    const { port } = await ready;
+
+    const rejected = await get(port, '/google-flights/search?origin=JFK&destination=LHR&departure_date=2026-11-15');
+    assert.equal(rejected.status, 502, 'an error page is an upstream failure, not an empty result');
+    assert.match(JSON.parse(rejected.body).error, /Google Flights rejected the search/);
+
+    const rejectedDates = await get(port, '/google-flights/search-dates?origin=JFK&destination=LHR&start_date=2026-11-15&end_date=2026-11-22');
+    assert.equal(rejectedDates.status, 502);
+    assert.match(JSON.parse(rejectedDates.body).error, /Google Flights rejected the search/);
+
+    const empty = await get(port, '/google-flights/search?origin=JFK&destination=LHR&departure_date=2026-11-16');
+    assert.equal(empty.status, 200, 'a well-formed payload without flight rows is a genuine empty result');
+    assert.deepEqual(JSON.parse(empty.body).flights, []);
+
+    const found = await get(port, '/google-flights/search?origin=JFK&destination=LHR&departure_date=2026-11-17');
+    assert.equal(found.status, 200);
+    const [flight] = JSON.parse(found.body).flights;
+    assert.equal(flight.price, 512);
+    assert.equal(flight.legs[0].flightNumber, '178');
+  } finally {
+    await stop(child);
+  }
+});
+
+test('Google Flights pages or rows in an unexpected shape fail instead of reading as results', async () => {
+  const { child, ready } = spawnRelay({
+    RELAY_GOOGLE_FLIGHTS_RATE_LIMIT_MAX: '1000',
+    RELAY_TEST_GOOGLE_STATUS_SEQUENCE: '200,200,200,200',
+    RELAY_TEST_GOOGLE_BODY_SEQUENCE: JSON.stringify([
+      '<html><body>Our systems have detected unusual traffic</body></html>',
+      googlePage('{}'),
+      googlePage('[1,'),
+      googleShoppingPage([[[[], []]]]),
+    ]),
+  });
+
+  try {
+    const { port } = await ready;
+    for (const [day, reason] of [
+      ['15', /Google Flights returned a page without flight results/],
+      ['16', /Google Flights returned an unrecognized payload/],
+      ['17', /Google Flights returned an unreadable results page/],
+      ['18', /Google Flights returned flight rows in an unrecognized shape/],
+    ]) {
+      const response = await get(port, `/google-flights/search?origin=JFK&destination=LHR&departure_date=2026-11-${day}`);
+      assert.equal(response.status, 502, `departure 2026-11-${day} must not read as a successful search`);
+      assert.match(JSON.parse(response.body).error, reason);
+    }
+  } finally {
+    await stop(child);
+  }
+});
+
+// A relay deploy starts with an empty in-memory feed and waits
+// TELEGRAM_STARTUP_DELAY_MS before its first poll. On 2026-10-27 that left
+// /telegram/feed answering `enabled: true, items: []` for 3 minutes, and every
+// open dashboard replaced 50 posts with "No messages available" on its next
+// refresh. The last good poll is snapshotted to Redis and served until the new
+// container polls.
+const TELEGRAM_ITEMS_SNAPSHOT_KEY = 'intelligence:telegram-feed:items:v1';
+
+test('a restarted relay serves the last Telegram snapshot before its first poll', async () => {
+  const savedAt = new Date(Date.now() - 90_000).toISOString();
+  const snapshotItems = [
+    { id: 'clashreport:41', source: 'telegram', channel: 'clashreport', channelTitle: 'Clash Report', text: 'Tanker on fire near Hormuz', ts: savedAt, topic: 'conflict', tags: [], earlySignal: true, mediaUrls: [] },
+    { id: 'witness:7', source: 'telegram', channel: 'witness', channelTitle: 'Witness', text: 'Second post', ts: savedAt, topic: 'breaking', tags: [], earlySignal: true, mediaUrls: [] },
+  ];
+  const upstash = await createUpstashMock({
+    getValues: { [TELEGRAM_ITEMS_SNAPSHOT_KEY]: { savedAt, items: snapshotItems } },
+  });
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '600000',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_POLL: 'true',
+    ...upstash.env,
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    let feed = null;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      feed = JSON.parse((await get(port, '/telegram/feed?limit=50')).body);
+      if (feed.items.length) break;
+      await sleep(100);
+    }
+    assert.deepEqual(feed.items.map(item => item.id), ['clashreport:41', 'witness:7']);
+    assert.equal(feed.enabled, true);
+    // updatedAt is when those posts were last polled, not the restart time.
+    assert.equal(feed.updatedAt, savedAt);
+    assert.doesNotMatch(relay.getOutput(), /Telegram poll loop started/, 'the snapshot must arrive before any poll');
+  } finally {
+    await stop(child);
+    await upstash.close();
+  }
+});
+
+test('a restored Telegram snapshot drops entries that are not feed items', async () => {
+  const savedAt = new Date(Date.now() - 90_000).toISOString();
+  const upstash = await createUpstashMock({
+    getValues: {
+      [TELEGRAM_ITEMS_SNAPSHOT_KEY]: {
+        savedAt,
+        items: [
+          null,
+          { text: 'no id' },
+          { id: 'clashreport:41', source: 'telegram', channel: 'clashreport', channelTitle: 'Clash Report', text: 'Tanker on fire near Hormuz', ts: savedAt, topic: 'conflict', tags: [], earlySignal: true, mediaUrls: [] },
+        ],
+      },
+    },
+  });
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '600000',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_POLL: 'true',
+    ...upstash.env,
+  });
+  const { child, port } = await relay.ready;
+
+  try {
+    let feed = null;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      feed = JSON.parse((await get(port, '/telegram/feed?limit=50')).body);
+      if (feed.items.length) break;
+      await sleep(100);
+    }
+    assert.deepEqual(feed.items.map(item => item.id), ['clashreport:41']);
+    // A null entry used to reach the topic filter and fail the request.
+    const filtered = await get(port, '/telegram/feed?limit=50&topic=conflict');
+    assert.equal(filtered.status, 200);
+    assert.deepEqual(JSON.parse(filtered.body).items.map(item => item.id), ['clashreport:41']);
+  } finally {
+    await stop(child);
+    await upstash.close();
+  }
+});
+
+test('a successful Telegram poll snapshots its items to Redis', async () => {
+  const upstash = await createUpstashMock();
+  const relay = spawnRelay({
+    TELEGRAM_API_ID: '123',
+    TELEGRAM_API_HASH: 'test-hash',
+    TELEGRAM_SESSION: 'test-session',
+    TELEGRAM_STARTUP_DELAY_MS: '0',
+    RELAY_TEST_TELEGRAM: 'true',
+    RELAY_TEST_TELEGRAM_POLL: 'true',
+    RELAY_TEST_TELEGRAM_MESSAGES: JSON.stringify([{ id: 9, message: 'Strait of Hormuz update', date: Math.floor(Date.now() / 1000) }]),
+    ...upstash.env,
+  });
+  const { child } = await relay.ready;
+
+  try {
+    let sets = [];
+    for (let attempt = 0; attempt < 200; attempt++) {
+      sets = upstash.setsFor(TELEGRAM_ITEMS_SNAPSHOT_KEY);
+      if (sets.length) break;
+      await sleep(100);
+    }
+    assert.ok(sets.length, 'the poll must write the items snapshot');
+    const [, , value, ex, ttl] = sets[0].command;
+    const snapshot = JSON.parse(value);
+    assert.ok(snapshot.items.length > 0);
+    assert.ok(snapshot.items.every(item => item.text === 'Strait of Hormuz update'));
+    assert.ok(Number.isFinite(Date.parse(snapshot.savedAt)));
+    assert.equal(ex, 'EX');
+    assert.ok(Number(ttl) > 0);
   } finally {
     await stop(child);
     await upstash.close();

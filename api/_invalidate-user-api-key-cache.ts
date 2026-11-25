@@ -19,6 +19,8 @@ import { jsonResponse } from './_json-response.js';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from './_sentry-edge.js';
 import { validateBearerToken } from '../server/auth-session';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from './_rate-limit.js';
 import { invalidateApiKeyCache } from '../server/_shared/user-api-key';
 
 export default async function handler(
@@ -36,7 +38,7 @@ export default async function handler(
   }
 
   if (req.method !== 'POST') {
-    return jsonResponse({ error: 'Method not allowed' }, 405, cors);
+    return jsonResponse({ error: 'Method not allowed' }, 405, { ...cors, Allow: 'POST, OPTIONS' });
   }
 
   const authHeader = req.headers.get('Authorization') ?? '';
@@ -45,10 +47,15 @@ export default async function handler(
     return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
   }
 
-  const session = await validateBearerToken(token);
+  const session = await validateBearerToken(token, { resolvePlan: false });
   if (!session.valid || !session.userId) {
     return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
   }
+
+  const limited = await checkRateLimit(req, cors, {
+    scope: 'invalidate-user-api-key-cache', identifier: `user:${session.userId}`, limit: 20, window: '60 s',
+  });
+  if (limited) return limited;
 
   let body: { keyHash?: string };
   try {
@@ -98,6 +105,7 @@ export default async function handler(
     console.warn('[invalidate-cache] Ownership check failed:', err instanceof Error ? err.message : String(err));
     captureSilentError(err, {
       tags: { route: 'api/invalidate-user-api-key-cache', step: 'ownership-check' },
+      fingerprint: ['api/invalidate-user-api-key-cache', 'ownership-check', err instanceof Error ? err.name : 'Error'],
       ctx,
     });
     return jsonResponse({ error: 'Service unavailable' }, 503, cors);

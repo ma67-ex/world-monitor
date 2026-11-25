@@ -5,10 +5,13 @@
  * - listArxivPapers (cs.AI default category)
  * - listHackernewsItems (top feed)
  * - listTechEvents (Techmeme ICS + dev.events RSS) — relay also seeds this
- * - listTrendingRepos (python, javascript, typescript daily)
+ * - listTrendingRepos (python, javascript, typescript daily; github.com/trending, GitHub search fallback)
  */
 
+import ARXIV_CATEGORIES from './shared/research-arxiv-categories.json' with { type: 'json' };
+
 import { loadEnvFile, CHROME_UA, runSeed, writeExtraKeyWithMeta, sleep } from './_seed-utils.mjs';
+import { decodeHtmlEntities } from './_html-entities.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -19,13 +22,28 @@ export const RESEARCH_MAX_STALE_MIN = 150;
 // the ~hourly cron so a single arXiv blip stays a graceful exit-0 RETRY rather than exit-1 +
 // `researchArxivHnTrending` EMPTY in prod (issue #5409). Was 3600 (≈1× cron, BELOW the gate).
 export const ARXIV_TTL = 10800;
-const HN_TTL = 600;
+// ≈3× the hourly cron, like ARXIV_TTL: 600s left every HN feed EMPTY for ~50 min of each hour.
+export const HN_TTL = 10800;
 const TECH_EVENTS_TTL = 28800; // 8h — outlives maxStaleMin:480 for health buffer
-const TRENDING_TTL = 3600;
+// Distinct seed-meta key for this seeder's tech-events mirror. MUST NOT share
+// seed-meta:research:tech-events with scripts/ais-relay.cjs: the relay writes
+// research:tech-events-bootstrap:v1 (the payload /api/health counts and
+// bootstrap hydration serves) plus that meta, and defers its boot seed while
+// the meta is younger than its 6h interval. The default meta-key derivation
+// strips ':v1', so this file's extra-key write used to refresh the relay's
+// meta on every hourly seed-research run (Railway cron 0 */1 * * *; two live
+// meta writes on 2026-09-23 were 62min apart) while never writing the
+// bootstrap payload — the relay then postponed its first seed on every restart
+// (age always < 6h), the bootstrap key silently expired, and health reported
+// EMPTY records=0 next to a fresh seedAge. seed-health intervalMin 240 is the
+// declared expected interval, not this seeder's real write cadence. See
+// incident 2026-09-23.
+export const TECH_EVENTS_SEED_META_KEY = 'seed-meta:research:tech-events:seeder';
+// ≈3× the hourly cron, like ARXIV_TTL and HN_TTL.
+export const TRENDING_TTL = 10800;
 
 // ─── arXiv Papers ───
 
-const ARXIV_CATEGORIES = ['cs.AI', 'cs.CL', 'cs.CR'];
 
 // Parse arXiv Atom XML into paper records. Pure — split out so the fetch path stays testable.
 function parseArxivEntries(xml) {
@@ -59,7 +77,7 @@ function parseArxivEntries(xml) {
 // every attempt failed (the caller isolates that per-category). `fetchFn`/`sleepFn` injectable
 // for tests.
 export async function fetchArxivCategory(cat, { fetchFn = fetch, retries = 1, sleepFn = sleep } = {}) {
-  const url = `https://export.arxiv.org/api/query?search_query=cat:${cat}&start=0&max_results=50`;
+  const url = `https://export.arxiv.org/api/query?search_query=cat:${cat}&sortBy=submittedDate&sortOrder=descending&start=0&max_results=50`;
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
@@ -100,50 +118,54 @@ export async function fetchArxivPapers({ fetchFn = fetch, retries = 1, sleepFn =
 
 // ─── Hacker News ───
 
-async function fetchHackerNews() {
-  const feeds = ['top', 'best'];
+export async function fetchHackerNews() {
+  const feeds = ['top', 'new', 'best', 'ask', 'show', 'job'];
   const results = {};
 
   for (const feed of feeds) {
-    const idsResp = await fetch(`https://hacker-news.firebaseio.com/v0/${feed}stories.json`, {
-      headers: { 'User-Agent': CHROME_UA },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!idsResp.ok) { console.warn(`  HN ${feed}: HTTP ${idsResp.status}`); continue; }
-    const allIds = await idsResp.json();
-    if (!Array.isArray(allIds)) continue;
+    try {
+      const idsResp = await fetch(`https://hacker-news.firebaseio.com/v0/${feed}stories.json`, {
+        headers: { 'User-Agent': CHROME_UA },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!idsResp.ok) { console.warn(`  HN ${feed}: HTTP ${idsResp.status}`); continue; }
+      const allIds = await idsResp.json();
+      if (!Array.isArray(allIds)) continue;
 
-    const ids = allIds.slice(0, 30);
-    const items = [];
+      const ids = allIds.slice(0, 30);
+      const items = [];
 
-    for (let i = 0; i < ids.length; i += 10) {
-      const batch = ids.slice(i, i + 10);
-      const batchResults = await Promise.all(
-        batch.map(async (id) => {
-          try {
-            const res = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {
-              headers: { 'User-Agent': CHROME_UA },
-              signal: AbortSignal.timeout(5_000),
-            });
-            if (!res.ok) return null;
-            const raw = await res.json();
-            if (!raw || raw.type !== 'story') return null;
-            return {
-              id: raw.id || 0, title: raw.title || '', url: raw.url || '',
-              score: raw.score || 0, commentCount: raw.descendants || 0,
-              by: raw.by || '', submittedAt: (raw.time || 0) * 1000,
-            };
-          } catch { return null; }
-        }),
-      );
-      items.push(...batchResults.filter(Boolean));
+      for (let i = 0; i < ids.length; i += 10) {
+        const batch = ids.slice(i, i + 10);
+        const batchResults = await Promise.all(
+          batch.map(async (id) => {
+            try {
+              const res = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {
+                headers: { 'User-Agent': CHROME_UA },
+                signal: AbortSignal.timeout(5_000),
+              });
+              if (!res.ok) return null;
+              const raw = await res.json();
+              if (!raw || (raw.type !== 'story' && raw.type !== 'job')) return null;
+              return {
+                id: raw.id || 0, title: raw.title || '', url: raw.url || '',
+                score: raw.score || 0, commentCount: raw.descendants || 0,
+                by: raw.by || '', submittedAt: (raw.time || 0) * 1000,
+              };
+            } catch { return null; }
+          }),
+        );
+        items.push(...batchResults.filter(Boolean));
+      }
+
+      const cacheKey = `research:hackernews:v1:${feed}:30`;
+      if (items.length > 0) {
+        results[cacheKey] = { items, pagination: undefined };
+      }
+      console.log(`  HN ${feed}: ${items.length} stories`);
+    } catch (error) {
+      console.warn(`  HN ${feed} failed: ${error?.message || error}`);
     }
-
-    const cacheKey = `research:hackernews:v1:${feed}:30`;
-    if (items.length > 0) {
-      results[cacheKey] = { items, pagination: undefined };
-    }
-    console.log(`  HN ${feed}: ${items.length} stories`);
   }
   return results;
 }
@@ -221,25 +243,6 @@ async function fetchTechEvents() {
     }
   } catch (e) { console.warn(`  dev.events RSS: ${e.message}`); }
 
-  // Curated major conferences (must match list-tech-events.ts CURATED_EVENTS)
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const CURATED = [
-    { id: 'gitex-global-2026', title: 'GITEX Global 2026', type: 'conference', location: 'Dubai World Trade Centre, Dubai',
-      coords: { lat: 25.2285, lng: 55.2867, country: 'UAE', original: 'Dubai World Trade Centre, Dubai', virtual: false },
-      startDate: '2026-12-07', endDate: '2026-12-11', url: 'https://www.gitex.com', source: 'curated', description: "World's largest tech & startup show" },
-    { id: 'token2049-dubai-2026', title: 'TOKEN2049 Dubai 2026', type: 'conference', location: 'Dubai, UAE',
-      coords: { lat: 25.2048, lng: 55.2708, country: 'UAE', original: 'Dubai, UAE', virtual: false },
-      startDate: '2026-04-29', endDate: '2026-04-30', url: 'https://www.token2049.com', source: 'curated', description: 'Premier crypto event in Dubai' },
-    { id: 'collision-2026', title: 'Collision 2026', type: 'conference', location: 'Toronto, Canada',
-      coords: { lat: 43.6532, lng: -79.3832, country: 'Canada', original: 'Toronto, Canada', virtual: false },
-      startDate: '2026-06-22', endDate: '2026-06-25', url: 'https://collisionconf.com', source: 'curated', description: "North America's fastest growing tech conference" },
-    { id: 'web-summit-2026', title: 'Web Summit 2026', type: 'conference', location: 'Lisbon, Portugal',
-      coords: { lat: 38.7223, lng: -9.1393, country: 'Portugal', original: 'Lisbon, Portugal', virtual: false },
-      startDate: '2026-11-02', endDate: '2026-11-05', url: 'https://websummit.com', source: 'curated', description: "The world's premier tech conference" },
-  ];
-  for (const c of CURATED) { if (new Date(c.startDate) >= now) events.push(c); }
-
   // Deduplicate
   const seen = new Set();
   const deduped = events.filter(e => {
@@ -260,27 +263,46 @@ async function fetchTechEvents() {
 
 // ─── Trending Repos ───
 
-const OSSINSIGHT_LANG_MAP = { python: 'Python', javascript: 'JavaScript', typescript: 'TypeScript' };
+const TRENDING_CARD_RE = /<article class="Box-row">([\s\S]*?)<\/article>/g;
+const parseCount = (text) => Number(String(text ?? '').replace(/,/g, '')) || 0;
+const cleanText = (html) => decodeHtmlEntities(String(html ?? '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 
-async function fetchTrendingFromOSSInsight(lang) {
-  const ossLang = OSSINSIGHT_LANG_MAP[lang] || lang;
-  const resp = await fetch(
-    `https://api.ossinsight.io/v1/trends/repos/?language=${ossLang}&period=past_24_hours`,
-    {
-      headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
-      signal: AbortSignal.timeout(10_000),
-    },
-  );
+// Parse github.com/trending HTML into repo records. Pure, so it is tested against a captured page.
+// The repo name comes from the card's <h2> link: the card also links /sponsors/<user> and contributors.
+export function parseGitHubTrendingHtml(html, lang) {
+  const repos = [];
+  for (const [, card] of String(html ?? '').matchAll(TRENDING_CARD_RE)) {
+    const fullName = card.match(/<h2[^>]*>[\s\S]*?href="\/([\w.-]+\/[\w.-]+)"/)?.[1];
+    if (!fullName) continue;
+    // Counts are read only after the description, so text like "100 stars today" in it cannot win.
+    const stats = card.slice(card.lastIndexOf('</p>') + 1);
+    const count = (suffix) => parseCount(stats.match(new RegExp(`/${suffix}"[^>]*>[^<]*(?:<svg[\\s\\S]*?</svg>)?\\s*([\\d,]+)\\s*</a>`))?.[1]);
+    repos.push({
+      fullName,
+      description: cleanText(card.match(/<p class="[^"]*">([\s\S]*?)<\/p>/)?.[1]),
+      language: cleanText(card.match(/itemprop="programmingLanguage">([^<]*)</)?.[1]) || lang,
+      stars: count('stargazers'),
+      starsToday: parseCount(stats.match(/([\d,]+) stars? today/)?.[1]),
+      forks: count('forks'),
+      url: `https://github.com/${fullName}`,
+    });
+  }
+  return repos;
+}
+
+async function fetchTrendingFromGitHubTrending(lang) {
+  const resp = await fetch(`https://github.com/trending/${lang}?since=daily`, {
+    headers: { Accept: 'text/html', 'User-Agent': CHROME_UA },
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!resp.ok) return null;
-  const json = await resp.json();
-  const rows = json?.data?.rows;
-  if (!Array.isArray(rows)) return null;
-  return rows.slice(0, 50).map(r => ({
-    fullName: r.repo_name || '', description: r.description || '',
-    language: r.primary_language || lang, stars: r.stars || 0,
-    starsToday: 0, forks: r.forks || 0,
-    url: r.repo_name ? `https://github.com/${r.repo_name}` : '',
-  }));
+  const repos = parseGitHubTrendingHtml(await resp.text(), lang);
+  // Cards that parse without star counts mean the markup changed: fall back rather than publish zeros.
+  if (repos.length && !repos.every((r) => r.stars > 0 && r.starsToday > 0)) {
+    console.warn(`  Trending ${lang}: github.com/trending markup unrecognised, falling back to search`);
+    return null;
+  }
+  return repos;
 }
 
 async function fetchTrendingFromGitHubSearch(lang) {
@@ -303,19 +325,24 @@ async function fetchTrendingFromGitHubSearch(lang) {
   }));
 }
 
-async function fetchTrendingRepos() {
+export async function fetchTrendingRepos() {
   const languages = ['python', 'javascript', 'typescript'];
   const results = {};
 
   for (const lang of languages) {
     try {
-      let repos = await fetchTrendingFromOSSInsight(lang);
-      if (!repos) repos = await fetchTrendingFromGitHubSearch(lang);
+      let source = 'github.com/trending';
+      // A rejected trending fetch (timeout, network) must still reach the search fallback.
+      let repos = await fetchTrendingFromGitHubTrending(lang).catch((e) => {
+        console.warn(`  Trending ${lang}: github.com/trending failed (${e.message}), falling back to search`);
+        return null;
+      });
+      if (!repos?.length) { source = 'GitHub search'; repos = await fetchTrendingFromGitHubSearch(lang); }
       if (!repos || repos.length === 0) { console.warn(`  Trending ${lang}: no data from any source`); continue; }
 
       const cacheKey = `research:trending:v1:${lang}:daily:50`;
       results[cacheKey] = { repos, pagination: undefined };
-      console.log(`  Trending ${lang}: ${repos.length} repos`);
+      console.log(`  Trending ${lang}: ${repos.length} repos from ${source}`);
       await sleep(500);
     } catch (e) {
       console.warn(`  Trending ${lang}: ${e.message}`);
@@ -358,11 +385,22 @@ async function fetchAll() {
     }
   }
   if (allData.hn) { for (const [key, data] of Object.entries(allData.hn)) await writeExtraKeyWithMeta(key, data, HN_TTL, data.items?.length ?? 0); }
-  if (allData.techEvents?.events?.length > 0) await writeExtraKeyWithMeta('research:tech-events:v1', allData.techEvents, TECH_EVENTS_TTL, allData.techEvents.events.length);
+  if (allData.techEvents?.events?.length > 0) await writeTechEventsMirror(allData.techEvents);
   if (allData.trending) { for (const [key, data] of Object.entries(allData.trending)) await writeExtraKeyWithMeta(key, data, TRENDING_TTL, data.repos?.length ?? 0); }
 
   const primaryKey = allData.arxiv?.['research:arxiv:v1:cs.AI::50'];
   return primaryKey || { papers: [], pagination: undefined };
+}
+
+// Persist the tech-events mirror under the SEEDER-owned meta key. Extracted so
+// the write path stays behaviorally testable (see
+// tests/seed-research-tech-events-meta-ownership.test.mjs): the meta key
+// override is load-bearing — the default derivation would collide with the
+// relay-owned seed-meta:research:tech-events and starve the bootstrap payload.
+export async function writeTechEventsMirror(techEvents, deps = {}) {
+  if (!techEvents.events.some(event => event.source !== 'curated')) return;
+  const write = deps.writeExtraKeyWithMeta ?? writeExtraKeyWithMeta;
+  await write('research:tech-events:v1', techEvents, TECH_EVENTS_TTL, techEvents.events.length, TECH_EVENTS_SEED_META_KEY);
 }
 
 function validate(data) {

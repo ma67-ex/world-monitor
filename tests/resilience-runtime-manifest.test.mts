@@ -69,7 +69,7 @@ describe('resilience runtime manifest', () => {
       [modules.RESILIENCE_INTERVALS_META_KEY]: {
         fetchedAt: Date.parse('2026-05-29T11:45:00.000Z'),
       },
-      'resilience:intervals:v11:US': {
+      'resilience:intervals:v12:US': {
         p05: 65.2,
         p95: 72.8,
         _formula: 'pc',
@@ -82,13 +82,13 @@ describe('resilience runtime manifest', () => {
     const request = new Request('https://worldmonitor.app/api/resilience/v1/get-runtime-manifest');
     const response = await modules.getResilienceRuntimeManifest({ request } as never);
 
-    assert.equal(response.manifestVersion, 5);
+    assert.equal(response.manifestVersion, 6);
     assert.match(response.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(response.deployedCommitSha, '');
     assert.equal(response.vercelEnv, '');
     assert.equal(response.formulaTag, 'pc');
     assert.equal(response.dataVersion, '2026-05-28');
-    assert.deepEqual(response.constructVersions, { energy: 'legacy', education: 'active' });
+    assert.deepEqual(response.constructVersions, { energy: 'legacy', education: 'active', financialSystemExposure: 'active' });
     assert.deepEqual(response.flags, []);
     assert.deepEqual(response.cache, {
       scorePrefix: '',
@@ -121,7 +121,7 @@ describe('resilience runtime manifest', () => {
       request: new Request('https://worldmonitor.app/api/resilience/v1/get-runtime-manifest'),
     } as never);
 
-    assert.deepEqual(response.constructVersions, { energy: 'legacy', education: 'rollback' });
+    assert.deepEqual(response.constructVersions, { energy: 'legacy', education: 'rollback', financialSystemExposure: 'rollback' });
     assert.deepEqual(response.flags, []);
   });
 
@@ -140,7 +140,7 @@ describe('resilience runtime manifest', () => {
     assert.equal(response.vercelEnv, '');
     assert.equal(response.formulaTag, 'd6');
     assert.equal(response.dataVersion, '');
-    assert.deepEqual(response.constructVersions, { energy: 'legacy', education: 'active' });
+    assert.deepEqual(response.constructVersions, { energy: 'legacy', education: 'active', financialSystemExposure: 'rollback' });
     assert.deepEqual(response.rankingCache, { fetchedAt: '', count: 0, scored: 0, total: 0 });
     assert.deepEqual(response.intervals, {
       available: false,
@@ -157,7 +157,7 @@ describe('resilience runtime manifest', () => {
       [modules.RESILIENCE_INTERVALS_META_KEY]: {
         fetchedAt: Date.parse('2026-05-30T10:00:00.000Z'),
       },
-      'resilience:intervals:v11:US': {
+      'resilience:intervals:v12:US': {
         p05: 65.2,
         p95: 72.8,
         _formula: 'd6',
@@ -185,7 +185,7 @@ describe('resilience runtime manifest', () => {
       [modules.RESILIENCE_INTERVALS_META_KEY]: {
         fetchedAt: Date.parse('2026-05-30T10:00:00.000Z'),
       },
-      'resilience:intervals:v11:US': {
+      'resilience:intervals:v12:US': {
         p05: 65.2,
         p95: 72.8,
         _formula: 'pc',
@@ -223,7 +223,7 @@ describe('resilience runtime manifest', () => {
     } as never);
     const serialized = JSON.stringify(response);
 
-    assert.deepEqual(response.constructVersions, { energy: 'v2', education: 'active' });
+    assert.deepEqual(response.constructVersions, { energy: 'v2', education: 'active', financialSystemExposure: 'active' });
     assert.deepEqual(response.intervals, {
       available: false,
       methodology: 'weight-perturbation-sensitivity-v3',
@@ -268,14 +268,22 @@ describe('resilience runtime manifest gateway auth', () => {
     assert.deepEqual(
       [...PUBLIC_NO_AUTH_RPC_PATHS],
       [
-        '/api/conflict/v1/list-acled-events',
-        '/api/natural/v1/list-natural-events',
+        '/api/scorecard/v1/get-five-factor-scorecard',
+        '/api/scorecard/v1/get-bloc-scorecard',
+        '/api/scorecard/v1/list-five-factor-scorecards',
         '/api/intelligence/v1/get-china-decision-signals',
         '/api/resilience/v1/get-runtime-manifest',
-        '/api/seismology/v1/list-earthquakes',
-        '/api/unrest/v1/list-unrest-events',
         '/api/leads/v1/submit-contact',
         '/api/leads/v1/register-interest',
+        // #9093: anonymous error reports and the secret-gated review queue.
+        '/api/news/v1/submit-error-report',
+        // #8721: anonymous agent feedback; admission buckets live in the handler.
+        '/api/feedback/v1/submit-report',
+        '/api/news/v1/list-label-changes',
+        '/api/news/v1/list-error-reports',
+        '/api/news/v1/review-error-report',
+        '/api/news/v1/search-fact-checks',
+        '/api/news/v1/search-claim-headlines',
       ],
     );
     assert.equal(PREMIUM_RPC_PATHS.has('/api/resilience/v1/get-runtime-manifest'), false);
@@ -292,7 +300,7 @@ describe('resilience runtime manifest gateway auth', () => {
       constructVersions?: { energy?: string; education?: string };
       intervals?: { available?: boolean; methodology?: string; sampleCountry?: string; lastObservedAt?: string };
     };
-    assert.equal(body.manifestVersion, 5);
+    assert.equal(body.manifestVersion, 6);
     assert.equal(body.formulaTag, 'pc');
     assert.equal(body.constructVersions?.energy, 'legacy');
     assert.equal(body.constructVersions?.education, 'active');

@@ -6,6 +6,8 @@
  * panels, and drives map overlays via `MapContainer` primitives.
  */
 
+import { WEB_APP_ORIGIN } from '@/config/web-origin';
+import { openExternalUrl } from '@/services/external-navigation';
 import { CountryPicker } from './CountryPicker';
 import { Hs2Picker } from './Hs2Picker';
 import { CargoTypeDropdown } from './CargoTypeDropdown';
@@ -16,6 +18,7 @@ import { AlternativesTab } from './tabs/AlternativesTab';
 import { LandTab } from './tabs/LandTab';
 import { CountryImpactTab } from './tabs/CountryImpactTab';
 import { inferCargoFromHs2, type ExplorerCargo } from './RouteExplorer.utils';
+import COUNTRY_PORT_CLUSTERS from '../../../scripts/shared/country-port-clusters.json';
 import {
   parseExplorerUrl,
   serializeExplorerUrl,
@@ -26,16 +29,37 @@ import {
 } from './url-state';
 import type { GetRouteExplorerLaneResponse, GetRouteImpactResponse, BypassCorridorOption } from '@/generated/server/worldmonitor/supply_chain/v1/service_server';
 import { fetchRouteExplorerLane, fetchRouteImpact } from '@/services/supply-chain';
-import { track, type UmamiEvent } from '@/services/analytics';
+import { hasPremiumAccess } from '@/services/panel-gating';
+import { getAuthState } from '@/services/auth-state';
+import { trackGateHit, track, type UmamiEvent } from '@/services/analytics';
 
+import { TRADE_ROUTES } from '@/config/trade-routes';
+import { buildLane } from '@/config/trade-route-lanes';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { copyText } from '@/utils/copy-text';
 
 
 const TAB_LABELS: Record<ExplorerTab, string> = { 1: 'Current', 2: 'Alternatives', 3: 'Land', 4: 'Impact' };
 const FETCH_DEBOUNCE_MS = 250;
 
+const CARGO_TO_ROUTE_CATEGORY: Record<string, string> = {
+  container: 'container',
+  tanker: 'energy',
+  bulk: 'bulk',
+  roro: 'container',
+};
+
+const ROUTE_CATEGORY_MAP = new Map(TRADE_ROUTES.map((r) => [r.id, r.category]));
+
+interface MapLane {
+  routeId: string;
+  path: [number, number][];
+  chokepointIds: string[];
+}
+
 interface MapRef {
   highlightRoute(routeIds: string[]): void;
+  highlightLane(lane: MapLane, occluder?: { left: number; right: number }): void;
   clearHighlightedRoute(): void;
   setBypassRoutes(corridors: Array<{ fromPort: [number, number]; toPort: [number, number] }>): void;
   clearBypassRoutes(): void;
@@ -44,6 +68,7 @@ interface MapRef {
 
 interface TestHook {
   lastHighlightedRouteIds?: string[];
+  lastHighlightedLane?: MapLane;
   lastBypassRoutes?: Array<{ fromPort: [number, number]; toPort: [number, number] }>;
   lastClearHighlight?: number;
   lastClearBypass?: number;
@@ -79,9 +104,10 @@ export class RouteExplorer {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private laneData: GetRouteExplorerLaneResponse | null = null;
   public isLoading = false;
-  private displayMode: 'idle' | 'loading' | 'data' | 'error' = 'idle';
+  private displayMode: 'idle' | 'loading' | 'data' | 'error' | 'gate' = 'idle';
   private openedAt = 0;
   private queryCount = 0;
+  private gateHitTracked = false;
 
   constructor() {
     this.state = { ...DEFAULT_EXPLORER_STATE };
@@ -111,6 +137,10 @@ export class RouteExplorer {
     this.isOpen = true;
     this.openedAt = Date.now();
     this.queryCount = 0;
+    if (!this.gateHitTracked && this.tier === 'free') {
+      trackGateHit('route-explorer');
+      this.gateHitTracked = true;
+    }
     this.trackEvent('route-explorer:opened', { source });
     document.addEventListener('keydown', this.handleGlobalKeydown, { capture: true });
     this.focusInitial();
@@ -120,6 +150,7 @@ export class RouteExplorer {
   public close(): void {
     if (!this.isOpen || !this.root) return;
     this.generationId++;
+    this.isLoading = false;
     if (this.debounceTimer) { clearTimeout(this.debounceTimer); this.debounceTimer = null; }
     document.removeEventListener('keydown', this.handleGlobalKeydown, { capture: true });
     this.helpOverlay?.element.remove();
@@ -179,7 +210,7 @@ export class RouteExplorer {
     }, FETCH_DEBOUNCE_MS);
   }
 
-  private resetLaneState(mode?: 'loading' | 'error'): void {
+  private resetLaneState(mode?: 'loading' | 'error' | 'gate'): void {
     this.laneData = null;
     this.impactData = null;
     this.clearMapState();
@@ -193,6 +224,14 @@ export class RouteExplorer {
 
   private async fetchLane(): Promise<void> {
     if (!this.isQueryComplete()) return;
+    if (!hasPremiumAccess(getAuthState())) {
+      this.generationId++;
+      this.displayMode = 'gate';
+      this.resetLaneState('gate');
+      this.renderFreeGate();
+      this.applyPublicRouteHighlight();
+      return;
+    }
 
     const gen = ++this.generationId;
     this.displayMode = 'loading';
@@ -261,13 +300,36 @@ export class RouteExplorer {
 
   // ─── Map integration ──────────────────────────────────────────────────
 
+  /** Highlight one lane, fitting it beside the explorer panel rather than under it. */
+  private showLane(lane: MapLane): void {
+    if (!this.mapRef) return;
+    const surface = this.root?.querySelector<HTMLElement>('.re-modal__surface');
+    const box = surface?.getBoundingClientRect();
+    this.mapRef.highlightLane(lane, box && box.width > 0 ? { left: box.left, right: box.right } : undefined);
+    const hook = typeof window !== 'undefined' ? window.__routeExplorerTestHook : undefined;
+    if (hook) {
+      hook.lastHighlightedLane = lane;
+      hook.lastHighlightedRouteIds = [lane.routeId];
+    }
+  }
+
   private applyMapState(data: GetRouteExplorerLaneResponse): void {
     if (!this.mapRef || data.noModeledLane || !data.primaryRouteId) return;
+    const hook = typeof window !== 'undefined' ? window.__routeExplorerTestHook : undefined;
+    // Draw the pair's own lane when the server sent one, so a lane that ends
+    // in India or Korea does not light up the route on to Singapore or
+    // Rotterdam, nor pulse chokepoints it never reaches.
+    if (data.primaryRouteGeometry.length >= 2) {
+      this.showLane({
+        routeId: data.primaryRouteId,
+        path: data.primaryRouteGeometry.map((p) => [p.lon, p.lat] as [number, number]),
+        chokepointIds: data.chokepointExposures.map((e) => e.chokepointId),
+      });
+      return;
+    }
     this.mapRef.zoomToRoutes([data.primaryRouteId]);
     this.mapRef.highlightRoute([data.primaryRouteId]);
-    if (typeof window !== 'undefined' && window.__routeExplorerTestHook) {
-      window.__routeExplorerTestHook.lastHighlightedRouteIds = [data.primaryRouteId];
-    }
+    if (hook) hook.lastHighlightedRouteIds = [data.primaryRouteId];
   }
 
   private handleBypassSelect(option: BypassCorridorOption): void {
@@ -293,6 +355,8 @@ export class RouteExplorer {
   // ─── Rendering ────────────────────────────────────────────────────────
 
   private applyData(data: GetRouteExplorerLaneResponse): void {
+    this.leftRail.element.classList.remove('re-leftrail--blurred');
+    this.leftRail.element.removeAttribute('aria-hidden');
     this.leftRail.updateLane(data);
     this.currentTab.update(data);
     this.alternativesTab.update(data);
@@ -312,9 +376,62 @@ export class RouteExplorer {
     }
   }
 
+  private renderFreeGate(): void {
+    this.leftRail?.element.classList.add('re-leftrail--blurred');
+    this.leftRail?.element.setAttribute('aria-hidden', 'true');
+    if (this.contentEl) {
+      setTrustedHtml(this.contentEl, trustedHtml('<div class="re-content__gate">' +
+        '<h3>Unlock route intelligence</h3>' +
+        '<ul><li>Current route with chokepoint risk</li><li>Ranked bypass alternatives</li><li>Overland corridor options</li></ul>' +
+        '<button class="re-content__upgrade" type="button">Upgrade to PRO</button>' +
+        '</div>', "legacy direct innerHTML migration"));
+      const btn = this.contentEl.querySelector<HTMLButtonElement>('.re-content__upgrade');
+      btn?.addEventListener('click', () => {
+        this.trackEvent('route-explorer:free-cta-click', {
+          from: this.state.fromIso2 ?? '',
+          to: this.state.toIso2 ?? '',
+          hs2: this.state.hs2 ?? '',
+        });
+        void import('@/services/upgrade-flow')
+          .then((m) => m.openUpgradePlans())
+          .catch(() => openExternalUrl(`${WEB_APP_ORIGIN}/pro`));
+      }, { once: true });
+    }
+  }
+
+  private applyPublicRouteHighlight(): void {
+    if (!this.mapRef || !this.state.fromIso2 || !this.state.toIso2) return;
+    const clusters = COUNTRY_PORT_CLUSTERS as unknown as Record<string, { nearestRouteIds: string[] }>;
+    const fromRoutes = new Set(clusters[this.state.fromIso2]?.nearestRouteIds ?? []);
+    const toRoutes = new Set(clusters[this.state.toIso2]?.nearestRouteIds ?? []);
+    const shared = [...fromRoutes].filter((r) => toRoutes.has(r));
+    if (shared.length === 0) return;
+    const cargoCategory = CARGO_TO_ROUTE_CATEGORY[this.getEffectiveCargo()] ?? 'container';
+    const ranked = [...shared].sort((a, b) => {
+      const catA = ROUTE_CATEGORY_MAP.get(a) ?? '';
+      const catB = ROUTE_CATEGORY_MAP.get(b) ?? '';
+      return (catA === cargoCategory ? 0 : 1) - (catB === cargoCategory ? 0 : 1);
+    });
+    const routeId = ranked[0] ?? '';
+    if (!routeId) return;
+    // Same lane the server draws for subscribers: the pair's own stretch of
+    // the route, not the whole route through to its fixed end port.
+    const lane = buildLane(routeId, this.state.fromIso2, this.state.toIso2);
+    if (lane.geometry.length >= 2) {
+      this.showLane({
+        routeId,
+        path: lane.geometry.map((p) => [p.lon, p.lat] as [number, number]),
+        chokepointIds: [...lane.waypointIds],
+      });
+      return;
+    }
+    this.mapRef.highlightRoute([routeId]);
+    this.mapRef.zoomToRoutes([routeId]);
+  }
+
   private showActiveTab(): void {
     if (!this.contentEl) return;
-    if (this.displayMode === 'loading' || this.displayMode === 'error') {
+    if (this.displayMode === 'loading' || this.displayMode === 'error' || this.displayMode === 'gate') {
       return;
     }
     setTrustedHtml(this.contentEl, trustedHtml('', "legacy direct innerHTML migration"));
@@ -520,12 +637,26 @@ export class RouteExplorer {
     return false;
   }
 
+  /**
+   * AviationCommandBar and the findings modal mount on `document.body` with
+   * aria-modal=true while Route Explorer is still open. The Explorer capture
+   * listener is registered first, so without this check Escape (and the
+   * number/letter shortcuts) steal keys from the stacked dialog.
+   */
+  private isStackedModalFocused(): boolean {
+    const el = document.activeElement;
+    if (!(el instanceof Element) || !this.root) return false;
+    const modal = el.closest('[aria-modal="true"]');
+    return modal !== null && !this.root.contains(modal);
+  }
+
   private blurActiveInput(): void {
     (document.activeElement as HTMLElement | null)?.blur();
   }
 
   private handleGlobalKeydown = (e: KeyboardEvent): void => {
     if (!this.isOpen || !this.root) return;
+    if (this.isStackedModalFocused()) return;
 
     if (e.key === 'Escape') {
       if (this.helpOverlay) {
@@ -562,7 +693,7 @@ export class RouteExplorer {
         e.preventDefault();
         if (this.laneData?.primaryRouteId && this.mapRef) {
           this.mapRef.clearHighlightedRoute();
-          this.mapRef.highlightRoute([this.laneData.primaryRouteId]);
+          this.applyMapState(this.laneData);
         }
         return;
       case '?': e.preventDefault(); this.openHelp(); return;
@@ -606,16 +737,19 @@ export class RouteExplorer {
     const url = new URL(window.location.href);
     const serialized = serializeExplorerUrl(this.state);
     if (serialized) url.searchParams.set('explorer', serialized);
-    if (navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(url.toString());
-      this.trackEvent('route-explorer:share-copied');
-    }
+    void copyText(url.toString()).then((copied) => {
+      if (copied) this.trackEvent('route-explorer:share-copied');
+    });
   }
 
   // ─── Analytics ─────────────────────────────────────────────────────────
 
+  private get tier(): 'pro' | 'free' {
+    return hasPremiumAccess(getAuthState()) ? 'pro' : 'free';
+  }
+
   private trackEvent(event: UmamiEvent, props?: Record<string, unknown>): void {
-    track(event, props);
+    track(event, { tier: this.tier, ...props });
   }
 
   // ─── Test hook ────────────────────────────────────────────────────────

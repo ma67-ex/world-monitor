@@ -22,9 +22,12 @@ import assert from 'node:assert/strict';
 import {
   EXTRACTORS,
   SOURCE_KEYS,
+  aggregateCrossSourceSignals,
+  detectCompositeEscalation,
   extractCommodityShock,
   extractCyberEscalation,
   extractDisplacementSurge,
+  extractInternalDisplacementSurge,
   extractEarthquakeSignificant,
   extractForecastDeterioration,
   extractGpsJamming,
@@ -33,6 +36,7 @@ import {
   extractMediaToneDeterioration,
   extractMilitaryFlightSurge,
   extractOrefAlertCluster,
+  extractPhysicalPremiumRegimeTransition,
   extractRadiationAnomaly,
   extractRegulatoryAction,
   extractRiskScoreSpike,
@@ -53,6 +57,18 @@ const REDIS_URL = 'https://cross-source-signals.test.upstash.io';
 const HOUR = 3600 * 1000;
 const now = Date.now();
 const iso = (msAgo = 0) => new Date(now - msAgo).toISOString();
+
+function freshPhysicalReadings(at = now) {
+  const physicalAsOf = new Date(at).toISOString().slice(0, 10);
+  const paperAsOf = new Date(at).toISOString();
+  return ['gold', 'silver'].map((metal) => ({
+    metal,
+    state: 'ok',
+    physicalAsOf,
+    paperAsOf,
+    provenance: { fxAsOf: paperAsOf },
+  }));
+}
 
 function seedEnvelope(data, fetchedAt = now) {
   return {
@@ -153,6 +169,16 @@ describe('readAllSourceKeys envelope handling', () => {
 
     const data = await readAllSourceKeys();
     assert.equal('seismology:earthquakes:v1' in data, false);
+  });
+
+  it('retains shipping through three missed ticks and rejects it after the 19h budget', async (t) => {
+    t.mock.method(Date, 'now', () => now);
+    const key = 'supply_chain:shipping:v2';
+    for (const [ageMin, present] of [[720, true], [1080, true], [1140, true], [1141, false]]) {
+      stubPipeline({ [key]: JSON.stringify(seedEnvelope({ indices: [] }, now - ageMin * 60_000)) });
+      const data = await readAllSourceKeys();
+      assert.equal(key in data, present, `shipping at ${ageMin} minutes`);
+    }
   });
 
   it('keeps recent OREF waves when the quiet-history envelope is older than 15 minutes', async () => {
@@ -509,6 +535,44 @@ const FIXTURES = [
       recordCount: 1,
     },
   },
+  {
+    extractor: extractPhysicalPremiumRegimeTransition,
+    expectTheater: 'Global Markets',
+    expectDetectedAt: (p) => p.transitions[0].detectedAt,
+    key: 'market:physical-divergence:v1',
+    enveloped: false,
+    payload: {
+      methodologyVersion: 'physical-divergence-v2',
+      readings: freshPhysicalReadings(),
+      transitions: [{
+        id: `physical-premium:gold:normal-elevated:${now - HOUR}`,
+        metal: 'gold',
+        fromRegime: 'normal',
+        toRegime: 'elevated',
+        detectedAt: now - HOUR,
+        methodologyVersion: 'physical-divergence-v2',
+      }],
+    },
+  },
+  {
+    // seed-idmc-idu-displacement.mjs (contract mode). detectedAt is the latest
+    // displacement date: IDMC publishes weeks late, so the read clock would lie.
+    extractor: extractInternalDisplacementSurge,
+    expectTheater: 'East Asia',
+    expectDetectedAt: (p) => Date.parse(`${p.countries[0].latestDisplacementDate}T00:00:00Z`),
+    key: 'displacement:idmc-idu:v1',
+    enveloped: true,
+    payload: {
+      source: 'IDMC Internal Displacement Updates (via HDX)',
+      windowFrom: '2026-04-24',
+      missingCountries: [],
+      countries: [{
+        countryCode: 'PHL', countryName: 'Philippines', displaced30d: 759032, conflict30d: 51276, disaster30d: 707756,
+        events30d: 13, newlyReported7d: 0, latestDisplacementDate: '2026-10-01', baselineMonthly: 189566, surge: true,
+      }],
+      events: [],
+    },
+  },
 ];
 
 // extractDisplacementSurge is deliberately absent from FIXTURES: its key
@@ -537,6 +601,24 @@ describe('every extractor fires on the shape its writer actually publishes', () 
         assert.equal(signals[0].detectedAt, expectDetectedAt(payload),
           `${extractor.name} did not carry the timestamp its payload published`);
       }
+      if (extractor === extractPhysicalPremiumRegimeTransition) {
+        assert.equal(signals.length, 1, 'one stored regime transition must emit exactly one signal');
+        assert.deepEqual({
+          id: signals[0].id,
+          type: signals[0].type,
+          theater: signals[0].theater,
+          severity: signals[0].severity,
+          severityScore: signals[0].severityScore,
+          detectedAt: signals[0].detectedAt,
+        }, {
+          id: payload.transitions[0].id,
+          type: 'CROSS_SOURCE_SIGNAL_TYPE_PHYSICAL_PREMIUM_REGIME_TRANSITION',
+          theater: 'Global Markets',
+          severity: 'CROSS_SOURCE_SIGNAL_SEVERITY_MEDIUM',
+          severityScore: 2,
+          detectedAt: payload.transitions[0].detectedAt,
+        });
+      }
     });
   }
 
@@ -547,6 +629,187 @@ describe('every extractor fires on the shape its writer actually publishes', () 
       void enveloped;
       assert.deepEqual(extractor({ [key]: seedEnvelope(payload) }), []);
     });
+  }
+});
+
+it('physical premium transitions expire after the 48-hour emission cooldown', () => {
+  const now = Date.now();
+  const signals = extractPhysicalPremiumRegimeTransition({
+    'market:physical-divergence:v1': {
+      readings: freshPhysicalReadings(now),
+      transitions: [{
+        id: 'physical-premium:gold:normal-elevated:stale',
+        metal: 'gold',
+        fromRegime: 'normal',
+        toRegime: 'elevated',
+        detectedAt: now - 48 * HOUR,
+      }],
+    },
+  });
+
+  assert.deepEqual(signals, []);
+});
+
+it('rejects non-canonical physical premium transitions', () => {
+  const now = Date.now();
+  const base = {
+    id: `physical-premium:gold:normal-elevated:${now}`,
+    metal: 'gold',
+    fromRegime: 'normal',
+    toRegime: 'elevated',
+    detectedAt: now,
+    methodologyVersion: 'physical-divergence-v2',
+  };
+  for (const transition of [
+    { ...base, fromRegime: '<script>' },
+    { ...base, methodologyVersion: 'future-method' },
+    { ...base, id: 'attacker-controlled' },
+    {
+      ...base,
+      detectedAt: now + HOUR,
+      id: `physical-premium:gold:normal-elevated:${now + HOUR}`,
+    },
+  ]) {
+    assert.deepEqual(extractPhysicalPremiumRegimeTransition({
+      'market:physical-divergence:v1': {
+        readings: freshPhysicalReadings(now),
+        transitions: [transition],
+      },
+    }), []);
+  }
+});
+
+it('rejects a recent transition when the transitioning metal input clock is stale', () => {
+  const readings = freshPhysicalReadings(now);
+  readings[0].paperAsOf = new Date(now - 37 * HOUR).toISOString();
+  assert.deepEqual(extractPhysicalPremiumRegimeTransition({
+    'market:physical-divergence:v1': {
+      readings,
+      transitions: [{
+        id: `physical-premium:gold:normal-elevated:${now - HOUR}`,
+        metal: 'gold',
+        fromRegime: 'normal',
+        toRegime: 'elevated',
+        detectedAt: now - HOUR,
+        methodologyVersion: 'physical-divergence-v2',
+      }],
+    },
+  }), []);
+});
+
+// #7425: transitions are per-metal. Silver still ramping (or failing independently)
+// must not suppress a valid gold regime transition — the composite's all-or-nothing
+// rule is a separate contract and must stay untouched.
+it('still emits a gold transition when silver is insufficient_history', () => {
+  const detectedAt = now - HOUR;
+  const readings = freshPhysicalReadings(now);
+  readings[1].state = 'insufficient_history';
+  delete readings[1].physicalAsOf;
+  delete readings[1].paperAsOf;
+  delete readings[1].provenance;
+  const [signal] = extractPhysicalPremiumRegimeTransition({
+    'market:physical-divergence:v1': {
+      readings,
+      transitions: [{
+        id: `physical-premium:gold:normal-elevated:${detectedAt}`,
+        metal: 'gold',
+        fromRegime: 'normal',
+        toRegime: 'elevated',
+        detectedAt,
+        methodologyVersion: 'physical-divergence-v2',
+      }],
+    },
+  });
+  assert.equal(signal?.id, `physical-premium:gold:normal-elevated:${detectedAt}`);
+  assert.equal(signal?.type, 'CROSS_SOURCE_SIGNAL_TYPE_PHYSICAL_PREMIUM_REGIME_TRANSITION');
+});
+
+it('does not emit transitions from missing or malformed input clocks', () => {
+  const transition = {
+    id: `physical-premium:gold:normal-elevated:${now - HOUR}`,
+    metal: 'gold',
+    fromRegime: 'normal',
+    toRegime: 'elevated',
+    detectedAt: now - HOUR,
+    methodologyVersion: 'physical-divergence-v2',
+  };
+  for (const mutate of [
+    (reading) => { reading.physicalAsOf = ''; },
+    (reading) => { reading.physicalAsOf = '2026-02-31'; },
+    (reading) => { reading.paperAsOf = 'not-an-instant'; },
+    (reading) => { reading.provenance.fxAsOf = ''; },
+  ]) {
+    const readings = freshPhysicalReadings(now);
+    mutate(readings[0]);
+    assert.deepEqual(extractPhysicalPremiumRegimeTransition({
+      'market:physical-divergence:v1': { readings, transitions: [transition] },
+    }), []);
+  }
+});
+
+it('fails closed when a divergence reading has an unknown state', () => {
+  const readings = freshPhysicalReadings(now);
+  readings[0].state = 'future_state';
+  assert.throws(
+    () => extractPhysicalPremiumRegimeTransition({
+      'market:physical-divergence:v1': { readings, transitions: [] },
+    }),
+    /Unknown physical divergence state/,
+  );
+});
+
+// #6448 requires an unknown state to surface rather than silently map to "normal". Publishing
+// an aggregate that merely omits the physical signal is exactly that silent mapping: the
+// consumer cannot tell "this source reported nothing" from "this build could not read it".
+// A genuinely flaky extractor is still contained — see the warn path in the same catch.
+it('fails the production aggregate when a present divergence reading has no known state', async () => {
+  for (const state of ['future_state', undefined, null]) {
+    const readings = freshPhysicalReadings(now);
+    readings[0].state = state;
+    await assert.rejects(
+      aggregateCrossSourceSignals({
+        readSourceData: async () => ({
+          'market:physical-divergence:v1': { readings, transitions: [] },
+          'seismology:earthquakes:v1': {
+            earthquakes: [{
+              id: 'kept-quake',
+              place: '120km E of Honshu, Japan',
+              magnitude: 7.2,
+              occurredAt: now - HOUR,
+            }],
+          },
+        }),
+      }),
+      /Unknown physical divergence state/,
+    );
+  }
+});
+
+it('pins every physical premium transition severity tier', () => {
+  const expected = {
+    normal: [1.5, 'CROSS_SOURCE_SIGNAL_SEVERITY_MEDIUM'],
+    elevated: [2, 'CROSS_SOURCE_SIGNAL_SEVERITY_MEDIUM'],
+    stressed: [3, 'CROSS_SOURCE_SIGNAL_SEVERITY_HIGH'],
+    extreme: [4, 'CROSS_SOURCE_SIGNAL_SEVERITY_CRITICAL'],
+  };
+  for (const [toRegime, [severityScore, severity]] of Object.entries(expected)) {
+    const detectedAt = now - HOUR;
+    const fromRegime = toRegime === 'normal' ? 'elevated' : 'normal';
+    const [signal] = extractPhysicalPremiumRegimeTransition({
+      'market:physical-divergence:v1': {
+        readings: freshPhysicalReadings(now),
+        transitions: [{
+          id: `physical-premium:gold:${fromRegime}-${toRegime}:${detectedAt}`,
+          metal: 'gold',
+          fromRegime,
+          toRegime,
+          detectedAt,
+          methodologyVersion: 'physical-divergence-v2',
+        }],
+      },
+    });
+    assert.equal(signal.severityScore, severityScore);
+    assert.equal(signal.severity, severity);
   }
 });
 
@@ -712,6 +975,65 @@ describe('newly readable sources preserve semantics and time', () => {
       },
     }), []);
   });
+
+  it('maps weather countries to canonical theaters and keeps the strongest two', () => {
+    const signals = extractWeatherExtreme({
+      'weather:alerts:v1': {
+        alerts: [
+          { id: 'nws-1', severity: 'Extreme', countryCode: 'US' },
+          { id: 'swic-jp', severity: 'Extreme', countryCode: 'JP', source: 'swic' },
+          ...Array.from({ length: 3 }, (_, index) => ({
+            id: `swic-in-${index}`,
+            severity: 'Extreme',
+            countryCode: 'IN',
+            source: 'swic',
+          })),
+          ...Array.from({ length: 5 }, (_, index) => ({
+            id: `swic-kz-${index}`,
+            severity: 'Extreme',
+            countryCode: 'KZ',
+            source: 'swic',
+          })),
+        ],
+      },
+    });
+
+    assert.deepEqual(
+      signals.map((signal) => signal.theater),
+      ['Western Europe', 'South Asia'],
+      'the cap must use canonical theaters and retain the highest alert counts',
+    );
+    assert.ok(signals[0].severityScore > signals[1].severityScore);
+    assert.equal(signals.every((s) => s.type === 'CROSS_SOURCE_SIGNAL_TYPE_WEATHER_EXTREME'), true);
+    assert.equal(signals.every((s) => s.id.startsWith('weather:')), true);
+  });
+
+  it('lets SWIC weather join other signal categories in the same canonical theater', () => {
+    const [weather] = extractWeatherExtreme({
+      'weather:alerts:v1': {
+        alerts: [{ id: 'swic-in', severity: 'Extreme', countryCode: 'IN', source: 'swic' }],
+      },
+    });
+    const composites = detectCompositeEscalation([
+      weather,
+      {
+        id: 'forecast-south-asia',
+        type: 'CROSS_SOURCE_SIGNAL_TYPE_FORECAST_DETERIORATION',
+        theater: 'South Asia',
+        severityScore: 2,
+      },
+      {
+        id: 'unrest-south-asia',
+        type: 'CROSS_SOURCE_SIGNAL_TYPE_UNREST_SURGE',
+        theater: 'South Asia',
+        severityScore: 2,
+      },
+    ]);
+
+    assert.equal(weather.theater, 'South Asia');
+    assert.equal(composites.length, 1);
+    assert.equal(composites[0].theater, 'South Asia');
+  });
 });
 
 describe('extractor registry stays covered', () => {
@@ -748,5 +1070,56 @@ describe('extractDisplacementSurge is intentionally silent', () => {
     assert.deepEqual(extractDisplacementSurge({
       [`displacement:summary:v1:${new Date().getFullYear()}`]: asReadByTheSeeder(seedEnvelope(payload)),
     }), []);
+  });
+});
+
+describe('IDMC internal displacement surges', () => {
+  const country = (overrides) => ({
+    countryCode: 'PHL', countryName: 'Philippines', displaced30d: 759032, latestDisplacementDate: '2026-10-01',
+    baselineMonthly: 189566, surge: true, ...overrides,
+  });
+  const read = (countries) => extractInternalDisplacementSurge({ 'displacement:idmc-idu:v1': { countries } });
+
+  it('names the lag, the 30-day total and the multiple of the usual month', () => {
+    const [signal] = read([country({})]);
+    assert.equal(signal.id, 'displacement-idu:PHL');
+    assert.equal(signal.type, 'CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE');
+    assert.equal(signal.summary, 'Philippines: 759,032 people displaced inside the country in 30 days (4.0x its monthly average), latest 2026-10-01 (IDMC, published with a lag of weeks)');
+    assert.equal('displaced30d' in signal, false, 'the sort field never reaches the published signal');
+  });
+
+  it('stays silent for non-surges, unknown codes, small totals and undated or future rows', () => {
+    for (const patch of [{ surge: false }, { countryCode: 'XXX' }, { displaced30d: 4999 }, { latestDisplacementDate: '' }, { latestDisplacementDate: '2999-01-01' }]) {
+      assert.deepEqual(read([country(patch)]), [], JSON.stringify(patch));
+    }
+    assert.deepEqual(extractInternalDisplacementSurge({}), []);
+  });
+
+  it('keeps the five largest surges', () => {
+    const codes = ['PHL', 'ETH', 'VNM', 'CMR', 'THA', 'GHA'];
+    const signals = read(codes.map((code, i) => country({ countryCode: code, countryName: code, displaced30d: 10_000 * (i + 1) })));
+    assert.deepEqual(signals.map((s) => s.id), ['GHA', 'THA', 'CMR', 'VNM', 'ETH'].map((c) => `displacement-idu:${c}`));
+  });
+
+  it('runs on every aggregation and reads the IDMC key', () => {
+    assert.ok(EXTRACTORS.includes(extractInternalDisplacementSurge));
+    assert.ok(SOURCE_KEYS.includes('displacement:idmc-idu:v1'));
+  });
+});
+
+describe('operational cross-border arrival surges', () => {
+  it('fires for a fresh source-confirmed arrival surge and stays silent for flat, stale, stock and encounter data', () => {
+    const asOf = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const route = { id: 'english-channel', name: 'Channel', kind: 'arrival', countryCode: 'GB', asOf, surge: true, last7Days: 7000 };
+    const data = { 'displacement:border-uk:v1': { routes: [route] } };
+    const signals = extractDisplacementSurge(data);
+    assert.equal(signals.length, 1);
+    assert.equal(signals[0].type, 'CROSS_SOURCE_SIGNAL_TYPE_DISPLACEMENT_SURGE');
+    assert.equal(signals[0].detectedAt, Date.parse(asOf));
+    assert.ok(Number.isFinite(signals[0].severityScore));
+    assert.match(signals[0].summary, /7,000 arrivals/);
+    for (const patch of [{ surge: false }, { kind: 'encounter' }, { kind: 'outflow' }, { asOf: '2020-01-01' }]) {
+      assert.deepEqual(extractDisplacementSurge({ 'displacement:border-uk:v1': { routes: [{ ...route, ...patch }] } }), []);
+    }
   });
 });

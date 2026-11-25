@@ -1,7 +1,7 @@
-import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
 import { jsonResponse } from './_json-response.js';
 import { captureSilentError } from './_sentry-edge.js';
+import { loadUpstashRatelimit } from './_upstash-ratelimit.js';
+import { upstashRedisOptions } from './_upstash-redis-options.js';
 import {
   durationToSeconds,
   limitWithFallback,
@@ -9,21 +9,17 @@ import {
 } from './_rate-limit-fallback.js';
 import {
   RATE_LIMIT_DEGRADED_HEADERS,
-  getClientIp,
+  getClientRateLimitKey,
+  hasUnprovenCloudflareClientIp,
 } from './_client-ip.js';
 export {
   RATE_LIMIT_DEGRADED_HEADERS,
   UNKNOWN_CLIENT_IP,
   getClientIp,
+  getClientRateLimitKey,
+  hasCloudflareTransitProof,
+  hasUnprovenCloudflareClientIp,
 } from './_client-ip.js';
-
-// @upstash/redis defaults to 5 retries with exponential backoff (~4.3s total)
-// before surfacing an unreachable-Redis error. Under the node test runner
-// (NODE_TEST_CONTEXT is set) skip retries so fail-open / fail-closed tests that
-// point UPSTASH_REDIS_REST_URL at a fake host degrade immediately instead of
-// stalling. Production (env unset) keeps the resilient default. Mirrors
-// REDIS_TEST_RETRY_OPTS in server/_shared/rate-limit.ts and PR #3963.
-const REDIS_TEST_RETRY_OPTS = process.env.NODE_TEST_CONTEXT ? { retry: false } : {};
 
 const DEFAULT_RATE_LIMIT_SCOPE = 'global';
 const DEFAULT_RATE_LIMIT = 600;
@@ -39,7 +35,7 @@ function getRateLimitPolicy(opts = {}) {
   };
 }
 
-function getRatelimit(policy) {
+async function getRatelimit(policy) {
   const cacheKey = `${policy.scope}|${policy.limit}|${policy.window}`;
   const cached = ratelimits.get(cacheKey);
   if (cached) return cached;
@@ -48,8 +44,9 @@ function getRatelimit(policy) {
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
 
+  const { Ratelimit, Redis } = await loadUpstashRatelimit();
   const ratelimit = new Ratelimit({
-    redis: new Redis({ url, token, ...REDIS_TEST_RETRY_OPTS }),
+    redis: new Redis(upstashRedisOptions(url, token)),
     limiter: Ratelimit.slidingWindow(policy.limit, policy.window),
     prefix: policy.scope === DEFAULT_RATE_LIMIT_SCOPE ? 'rl' : `rl:${policy.scope}`,
     analytics: false,
@@ -94,7 +91,7 @@ export function rateLimitErrorLevel(stage, msg) {
 // Failure-mode suffixes worth their own Sentry issue. Closed set — unlike a
 // route or scope, these describe HOW the limiter failed, not who called it.
 // Mirrored verbatim in server/_shared/rate-limit.ts.
-const RATE_LIMIT_FINGERPRINT_SUFFIXES = new Set(['missing-config', 'timeout']);
+const RATE_LIMIT_FINGERPRINT_SUFFIXES = new Set(['missing-config', 'timeout', 'edge-proof']);
 
 /**
  * Collapse a limiter stage to the low-cardinality token Sentry should GROUP on.
@@ -130,6 +127,25 @@ function logRateLimitDegraded(stage, err, ctx) {
   });
 }
 
+// One-per-isolate latch for edge-proof rejections. Spoofed cf-connecting-ip
+// headers are caller-controlled on a direct origin hit; reporting every 403
+// would create an amplification path (mirrors api/mcp/auth.ts). (#8402)
+const EDGE_PROOF_RATE_LIMIT_LATCH = Symbol.for('worldmonitor.rate-limit.edge-proof-reported.v1');
+
+function reportEdgeProofRequiredOnce(stage, err, ctx) {
+  const existing = Reflect.get(globalThis, EDGE_PROOF_RATE_LIMIT_LATCH);
+  const latch = existing ?? { reported: false };
+  if (!existing) Reflect.set(globalThis, EDGE_PROOF_RATE_LIMIT_LATCH, latch);
+  if (latch.reported) return;
+  latch.reported = true;
+  logRateLimitDegraded(stage, err, ctx);
+}
+
+export function resetEdgeProofRateLimitReportedForTest() {
+  const latch = Reflect.get(globalThis, EDGE_PROOF_RATE_LIMIT_LATCH);
+  if (latch) latch.reported = false;
+}
+
 function rateLimitDegradedResponse(corsHeaders) {
   return jsonResponse(
     { error: 'Rate-limit service temporarily unavailable' },
@@ -138,10 +154,20 @@ function rateLimitDegradedResponse(corsHeaders) {
   );
 }
 
+// 403 for IP-scoped budgets when cf-connecting-ip arrives without a valid
+// x-wm-edge-proof. Distinct from the Redis-degraded 503. (#8402)
+function edgeProofRequiredResponse(corsHeaders) {
+  return jsonResponse(
+    { error: 'Cloudflare edge proof required' },
+    403,
+    { 'X-RateLimit-Mode': 'edge-proof', ...corsHeaders },
+  );
+}
+
 /**
  * @param {Request} request
  * @param {Record<string, string>} corsHeaders
- * @param {{ failClosed?: boolean, ctx?: { waitUntil: (p: Promise<unknown>) => void }, scope?: string, limit?: number, window?: import('@upstash/ratelimit').Duration }} [opts]
+ * @param {{ failClosed?: boolean, ctx?: { waitUntil: (p: Promise<unknown>) => void }, scope?: string, identifier?: string, limit?: number, window?: import('@upstash/ratelimit').Duration }} [opts]
  *   When `failClosed` is true and Redis is unavailable, return a 503 with
  *   the `X-RateLimit-Mode: degraded` marker instead of allowing the
  *   request through. Pass `true` for endpoints where the rate-limit IS
@@ -150,12 +176,29 @@ function rateLimitDegradedResponse(corsHeaders) {
  *   doesn't black-hole the whole site. `ctx` is the Vercel handler
  *   context — passing it lets the Sentry envelope dispatch survive
  *   isolate teardown. Top-level Edge handlers may pass `scope`, `limit`,
- *   and `window` for explicit endpoint budgets while retaining the shared
- *   degraded/429 response semantics. (#3531)
+ *   `identifier`, `limit`, and `window` for explicit endpoint budgets while
+ *   retaining the shared degraded/429 response semantics. `identifier`
+ *   defaults to the caller IP; a stable explicit identifier lets sibling
+ *   handlers share one provider-wide Redis bucket. (#3531)
  */
 export async function checkRateLimit(request, corsHeaders, opts = {}) {
   const policy = getRateLimitPolicy(opts);
-  const rl = getRatelimit(policy);
+
+  // Default identifier is the caller IP. A cf-connecting-ip without proof is
+  // either a direct-origin spoof or a Transform Rule miss — reject rather than
+  // share a Cloudflare PoP bucket (#8402). Explicit non-IP identifiers skip.
+  // Run before the Redis availability gate so fail-open Redis outages cannot
+  // re-admit unproven CF client IPs.
+  if (opts.identifier == null && hasUnprovenCloudflareClientIp(request)) {
+    reportEdgeProofRequiredOnce(
+      'checkRateLimit:edge-proof',
+      new Error('Cloudflare client IP arrived without a valid x-wm-edge-proof'),
+      opts.ctx,
+    );
+    return edgeProofRequiredResponse(corsHeaders);
+  }
+
+  const rl = await getRatelimit(policy);
   if (!rl) {
     if (opts.failClosed) {
       logRateLimitDegraded('checkRateLimit:missing-config', new Error('Upstash Redis is not configured'), opts.ctx);
@@ -164,13 +207,13 @@ export async function checkRateLimit(request, corsHeaders, opts = {}) {
     return null;
   }
 
-  const ip = getClientIp(request);
+  const identifier = opts.identifier ?? getClientRateLimitKey(request);
   try {
     const fallbackPrefix = policy.scope === DEFAULT_RATE_LIMIT_SCOPE ? 'rl:fw' : `rl:${policy.scope}:fw`;
     const result = await limitWithFallback(
       rl,
-      ip,
-      `${fallbackPrefix}:${ip}`,
+      identifier,
+      `${fallbackPrefix}:${identifier}`,
       policy.limit,
       durationToSeconds(policy.window),
     );

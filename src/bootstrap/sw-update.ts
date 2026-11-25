@@ -1,4 +1,14 @@
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { findReloadBlockingModal } from '@/utils/open-modal';
+import { markPageUnloading } from '@/bootstrap/page-unload-signal';
+import { SOFT_RELOAD_MIN_PAGE_AGE_MS, currentSoftReloadHold, type SoftReloadHold } from '@/bootstrap/soft-reload-policy';
+
+/**
+ * How long a dismissed "Update Available" toast stays away. Deploys land about
+ * hourly on a working day and a visible tab is no longer reloaded for them, so
+ * without this the toast would return after every one.
+ */
+export const TOAST_SNOOZE_MS = SOFT_RELOAD_MIN_PAGE_AGE_MS;
 interface VisibleElementLike {
   checkVisibility?: () => boolean;
   getClientRects?: () => { length: number };
@@ -9,7 +19,7 @@ interface DocumentLike {
   querySelector: (sel: string) => Element | null;
   querySelectorAll: (sel: string) => Iterable<Element & VisibleElementLike>;
   createElement: (tag: string) => HTMLElement;
-  body: { appendChild: (el: Element) => void; contains: (el: Element | null) => boolean };
+  body: { appendChild: (el: Element) => void; contains: (el: Element | null) => boolean } | null;
   addEventListener: (type: string, cb: () => void) => void;
   removeEventListener: (type: string, cb: () => void) => void;
 }
@@ -30,14 +40,19 @@ interface ServiceWorkerContainerLike {
  * passes and the first real READ throws, which at module scope takes the rest
  * of the entry module's top-level statements down with it (WORLDMONITOR-Y5).
  *
- * Returns null whenever the container is unreadable or absent, so every caller
- * can treat "no service worker here" as one ordinary branch.
+ * An automation browser can also replace the container with a plain object that
+ * has no `addEventListener`, which threw the same way (WORLDMONITOR-1FB).
+ *
+ * Returns null whenever the container is unreadable, absent or not a real
+ * event target, so every caller can treat "no service worker here" as one
+ * ordinary branch.
  */
 export function readServiceWorkerContainer(
   nav: Navigator = navigator,
 ): ServiceWorkerContainerLike | null {
   try {
-    return (nav as { serviceWorker?: ServiceWorkerContainerLike }).serviceWorker ?? null;
+    const container = (nav as { serviceWorker?: ServiceWorkerContainerLike }).serviceWorker;
+    return typeof container?.addEventListener === 'function' ? container : null;
   } catch {
     return null;
   }
@@ -57,6 +72,13 @@ export interface SwUpdateHandlerOptions {
   debug?: boolean;
   /** App version string included in debug log entries. */
   version?: string;
+  /**
+   * Why the tab-hide auto-reload must not fire right now, or null when it may.
+   * Default: the live page's sound and age (src/bootstrap/soft-reload-policy.ts).
+   */
+  softReloadHold?: () => SoftReloadHold | null;
+  /** Override the clock (for tests). Default: Date.now. */
+  now?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,43 +90,10 @@ export interface SwUpdateHandlerOptions {
 export const SW_DEBUG_LOG_KEY = 'wm-sw-debug-log';
 const SW_DEBUG_LOG_MAX = 30;
 
-// Selectors that identify a modal/dialog candidate. Many site modals mount
-// at app startup and stay in the DOM (e.g. UnifiedSettings sets
-// role="dialog" in its constructor), so a raw selector match alone would
-// permanently disable auto-reload. We only treat a match as "open" when
-// the element is actually rendered — see isModalOpen() below.
-export const OPEN_MODAL_SELECTOR =
-  '[aria-modal="true"], [role="dialog"], .cl-modalBackdrop, .modal-overlay, dialog[open]';
-
-/**
- * Any candidate that's actually visible → a real open modal.
- *
- * Preferred: `element.checkVisibility()` (Chrome 105+, Safari 17.4+, FF 125+).
- *
- * Fallback for older engines: `getClientRects().length > 0`. This returns 0
- * when the element has `display: none` (exactly how persistent overlays
- * hide — see main.css `.modal-overlay { display: none }` /
- * `.active { display: flex }`) and non-zero for rendered elements,
- * including `position: fixed` overlays. We cannot use `offsetParent` here:
- * MDN specifies it returns `null` for every `position: fixed` element
- * regardless of visibility, so it would false-negative on the Story overlay
- * (main.css:3442), the active Country Intel overlay (main.css:18415), and
- * `.modal-overlay` itself — all of which are fixed-positioned.
- */
-function isModalOpen(doc: DocumentLike): boolean {
-  for (const el of doc.querySelectorAll(OPEN_MODAL_SELECTOR)) {
-    const checkVisibility = el.checkVisibility;
-    if (typeof checkVisibility === 'function') {
-      if (checkVisibility.call(el)) return true;
-      continue;
-    }
-    const getClientRects = el.getClientRects;
-    if (typeof getClientRects === 'function' && getClientRects.call(el).length > 0) {
-      return true;
-    }
-  }
-  return false;
-}
+// Modal detection moved to src/utils/open-modal.ts so the passkey offer
+// controller shares one predicate with this updater. Re-exported because the
+// selector is part of this module's existing public surface.
+export { RELOAD_BLOCKING_MODAL_SELECTOR } from '@/utils/open-modal';
 
 function appendDebugLog(entry: Record<string, unknown>): void {
   try {
@@ -131,7 +120,13 @@ function appendDebugLog(entry: Record<string, unknown>): void {
  * 2. Session-restore ghost reload: session-restore briefly marks tabs visible for
  *    one animation frame, which would allow a hidden-tab auto-reload prematurely.
  *
- * Dismissing one version never suppresses toasts for future deploys.
+ * Dismissing the toast keeps it away for TOAST_SNOOZE_MS; a deploy after that
+ * shows it again.
+ *
+ * The tab-hide auto-reload also waits for the shared quiet rules: nothing
+ * playing with sound, and a page old enough that one deploy after another
+ * cannot reload the tab each time the viewer looks away. The Reload button
+ * ignores them.
  */
 export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): void {
   // No readable container (sandboxed iframe, or an engine without SW support)
@@ -151,6 +146,10 @@ export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): vo
     try { return localStorage.getItem('wm-debug-sw') === '1'; } catch { return false; }
   })();
   const version = options.version;
+  const softReloadHold = options.softReloadHold ?? (() => currentSoftReloadHold(doc));
+  const now = options.now ?? Date.now;
+  /** No toast before this time: the viewer dismissed one recently. */
+  let snoozedUntil = 0;
 
   function logSw(event: string, extra: Record<string, unknown> = {}): void {
     if (!debugEnabled) return;
@@ -185,6 +184,9 @@ export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): vo
       currentDwellCancel = null;
     }
     doc.querySelector('.update-toast')?.remove();
+
+    const body = doc.body;
+    if (!body) return;
 
     const toast = doc.createElement('div');
     toast.className = 'update-toast';
@@ -237,16 +239,27 @@ export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): vo
         logSw('dwell-timer-cancelled-on-hide');
       }
       logSw('visibility-hidden', { autoReloadAllowed, dismissed });
-      if (!dismissed && autoReloadAllowed && doc.body.contains(toast)) {
+      if (!dismissed && autoReloadAllowed && doc.body?.contains(toast)) {
         // Don't interrupt an in-flight modal flow (Clerk email-code wait,
         // Settings, ⌘K search, etc.). The reload stays armed — next tab-hide
         // after the modal closes will fire it. User can also click Reload
         // in the toast manually at any time.
-        if (isModalOpen(doc)) {
-          logSw('auto-reload-suppressed-modal-open');
+        // An overlay that declared itself reload-safe (the onboarding popover,
+        // the SignalModal) does not count: it holds nothing a reload would
+        // lose. See src/utils/open-modal.ts and WORLDMONITOR-15X.
+        const blocker = findReloadBlockingModal(doc);
+        if (blocker !== null) {
+          logSw('auto-reload-suppressed-modal-open', { blockedBy: blocker.label, reloadPolicy: blocker.policy });
+          return;
+        }
+        // Stays armed like the modal case: a later tab-hide retries.
+        const hold = softReloadHold();
+        if (hold !== null) {
+          logSw('auto-reload-held', { hold });
           return;
         }
         logSw('auto-reload-triggered');
+        markPageUnloading();
         reload();
       }
     };
@@ -258,12 +271,18 @@ export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): vo
         dwellTimerId = null;
         currentDwellCancel = null;
         logSw('reload-clicked');
+        markPageUnloading();
+        // reload:user-initiated — the user pressed Reload, so the modal guard
+        // does not apply. Deferring a direct instruction would be a bug, not a
+        // protection. The marker is what keeps this exception explicit rather
+        // than implied by the shape of the enclosing installer.
         reload();
       } else if (action === 'dismiss') {
         clearTimer(dwellTimerId);
         dwellTimerId = null;
         currentDwellCancel = null;
         dismissed = true;
+        snoozedUntil = now() + TOAST_SNOOZE_MS;
         logSw('dismiss-clicked');
         doc.removeEventListener('visibilitychange', onHidden);
         currentOnHidden = null;
@@ -275,7 +294,7 @@ export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): vo
     currentOnHidden = onHidden;
     currentDwellCancel = () => { clearTimer(dwellTimerId); dwellTimerId = null; };
     doc.addEventListener('visibilitychange', onHidden);
-    doc.body.appendChild(toast);
+    body.appendChild(toast);
     raf(() => toast.classList.add('visible'));
   };
 
@@ -285,6 +304,10 @@ export function installSwUpdateHandler(options: SwUpdateHandlerOptions = {}): vo
     logSw('controllerchange', { hadController });
     if (!hadController) {
       hadController = true;
+      return;
+    }
+    if (now() < snoozedUntil) {
+      logSw('toast-snoozed');
       return;
     }
     showToast();

@@ -5,14 +5,16 @@
  * Dodo's HOSTED checkout (`window.location.assign`). The overlay iframe could
  * not host Dodo's nested 3DS/fraud stack (it hung at "Processing…"), so we
  * navigate full-page; the buyer returns to the dashboard via the guarded
- * `?wm_checkout=return` contract. The Dodo overlay SDK Initialize/onEvent
- * machinery below is DORMANT, pending removal.
+ * `?wm_checkout=return` contract. The dormant overlay SDK machinery
+ * (`initOverlay`, its onEvent handler, and the entitlement watchdog it was
+ * the sole caller of) was removed in #7222, along with this bundle's
+ * `dodopayments-checkout` dependency — the hosted redirect needs no SDK.
  * No Convex client needed — the edge endpoint handles relay.
  */
 
 import * as Sentry from '@sentry/react';
-import type { CheckoutEvent } from 'dodopayments-checkout';
-import { ensureClerk, type LoadedClerk } from './clerk';
+import { viewportAnalyticsFields } from '../../../shared/analytics-viewport';
+import { ensureClerk, setAuthReturnUrls, SITE_DATA_BLOCKED_MESSAGE, SiteDataBlockedError, type LoadedClerk } from './clerk';
 export { ensureClerk } from './clerk';
 
 const API_BASE = 'https://api.worldmonitor.app/api';
@@ -25,22 +27,38 @@ import {
   stripCheckoutIntentFromSearch,
   buildCheckoutReturnUrl,
 } from './checkout-intent-url';
-import { createEntitlementWatchdog, type EntitlementWatchdog } from './entitlement-watchdog';
 import {
   createDefaultCheckoutTransportDeps,
   postCreateCheckout,
 } from './checkout-transport';
+import { createTimeoutSignal } from './timeout-signal';
+import { watchAuthModalDismissal } from './auth-modal-watch';
+import { IN_PLACE_UPGRADE_SOURCE_PLANS, runProBusinessUpgradeFlow } from './pro-business-upgrade';
 import {
   checkoutRetryAtMs,
   checkoutRetryRemainingSeconds,
   parseCheckoutRetryAfterSeconds,
 } from './checkout-rate-limit';
-import { DASHBOARD_CHECKOUT_SUCCESS_URL, DASHBOARD_CHECKOUT_RETURN_URL } from '../routes';
+import { DASHBOARD_CHECKOUT_RETURN_URL } from '../routes';
 import fallbackTiers from '../generated/tiers.json';
 import {
   getContentAttributionForAnalytics,
   withContentAttribution,
 } from '../../../shared/content-attribution';
+import {
+  CHECKOUT_ATTEMPT_STORAGE_KEY,
+  CHECKOUT_RETURN_SOURCE_PARAM,
+  parseMissionPreviewAttribution,
+  resolveCheckoutContext,
+  type CheckoutAttribution,
+} from '../../../shared/checkout-attribution';
+import {
+  DESKTOP_CHECKOUT_HANDOFF,
+  desktopAccountDigest,
+  UNKNOWN_DESKTOP_ACCOUNT,
+  type DesktopCheckoutHandoff,
+} from '../../../shared/desktop-checkout-handoff';
+import { getFirstTouchAcquisitionForCheckout } from '../../../shared/acquisition-source';
 
 let checkoutInFlight = false;
 
@@ -117,6 +135,7 @@ function flushPendingFunnelEvents(): boolean {
 }
 
 function trackFunnelEvent(event: string, data?: Record<string, unknown>): void {
+  if (event === 'checkout-start') data = { ...data, ...viewportAnalyticsFields() };
   const enrichedData = withContentAttribution(data, getContentAttributionForAnalytics());
   try {
     const umami = getUmami();
@@ -168,9 +187,9 @@ function bucketProductIdForAnalytics(productId: string): string {
 }
 
 /**
- * Phase machine for the checkout flow. `creating_checkout` drives the clicked
- * CTA spinner; `rate_limited` disables every paid CTA until Retry-After
- * expires. `awaiting_auth` is intentionally not exposed — while
+ * Phase machine for the checkout flow. `loading_auth` and `creating_checkout`
+ * drive the clicked CTA spinner; `rate_limited` disables every paid CTA until
+ * Retry-After expires. `awaiting_auth` is intentionally not exposed — while
  * the Clerk modal is open the pricing section is covered by the modal
  * backdrop, so a service-level UI signal for that window adds no user-
  * visible value and creates lifecycle-recovery problems (watchdogs,
@@ -179,14 +198,16 @@ function bucketProductIdForAnalytics(productId: string): string {
  * is already in the right state.
  *
  *   idle:               no checkout in progress; all CTAs clickable
+ *   loading_auth:       loading sign-in before its modal is available
  *   creating_checkout:  post-auth, inside doCheckout's try/finally;
  *                       the clicked tier's CTA shows spinner, siblings
- *                       stay clickable (any click simply updates intent)
+ *                       stay clickable (the service rejects concurrent starts)
  *   rate_limited:       provider cooldown; every paid CTA stays disabled
  *                       until retryAtMs and no checkout request is sent
  */
 export type CheckoutPhase =
   | { kind: 'idle' }
+  | { kind: 'loading_auth'; productId: string }
   | { kind: 'creating_checkout'; productId: string }
   | { kind: 'rate_limited'; retryAtMs: number };
 
@@ -227,202 +248,6 @@ function activateCheckoutRateLimit(retryAfterHeader: string | null): number {
   return retryAfterSeconds;
 }
 
-/**
- * Entitlement watchdog tuning.
- *
- * Why this exists at all: Dodo's overlay can navigate to
- * `/status/{id}/wallet-return` after a successful payment (observed on
- * subscription-trial `amount=0` flows) and never emit `checkout.status`
- * or `checkout.redirect_requested` back to the parent. Prior PRs (#3298
- * flip to manualRedirect:false, #3346 add redirect_requested handler,
- * #3354 Escape-key close hatch) all depended on Dodo emitting SOMETHING;
- * the wallet-return path emits nothing. The watchdog polls our own
- * entitlement endpoint so the post-checkout journey completes from the
- * webhook regardless of what Dodo's iframe does.
- *
- * INTERVAL: 3000ms floor. Below 2s our own pipeline is eventually
- * consistent (Convex + Upstash webhook latency) so faster polling just
- * burns Clerk token refreshes. 3s is imperceptible to humans.
- *
- * TIMEOUT: 10 minutes. A real user who paid and left the tab open 10min
- * without the webhook landing has a different problem (Dodo outage,
- * webhook pipeline broken) — the fix isn't a longer poll.
- */
-const WATCHDOG_INTERVAL_MS = 3_000;
-const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
-
-export function initOverlay(onSuccess?: () => void): void {
-  import('dodopayments-checkout').then(({ DodoPayments }) => {
-    const env = import.meta.env.VITE_DODO_ENVIRONMENT;
-
-    // Closure-scoped watchdog + idempotency state. Reset implicitly
-    // on each new overlay open because `checkout.opened` is what starts
-    // the watchdog and `_terminalFired` only gates within one session:
-    // `checkout.closed` clears both. The SDK Initialize is idempotent
-    // per the main-app comment in src/services/checkout.ts, so this
-    // closure wraps the one-and-only live onEvent handler.
-    let _terminalFired = false;
-    let watchdog: EntitlementWatchdog | null = null;
-
-    const stopWatchdog = (): void => {
-      watchdog?.stop();
-      watchdog = null;
-    };
-
-    const safeCloseOverlay = (): void => {
-      try {
-        if (DodoPayments.Checkout.isOpen?.()) {
-          DodoPayments.Checkout.close();
-        }
-      } catch {
-        // Overlay already gone / SDK mid-teardown.
-      }
-    };
-
-    // Single terminal-success entry point. Both the event handler and
-    // the watchdog route through here so double-fires are impossible.
-    // `redirectTo` optional: the event path supplies Dodo's
-    // redirect_to (which may embed payment_id etc.); the watchdog
-    // path falls back to our canonical success URL.
-    const fireTerminalSuccess = (
-      reason: 'event-status' | 'event-redirect' | 'watchdog',
-      redirectTo?: string,
-    ): void => {
-      if (_terminalFired) return;
-      _terminalFired = true;
-      stopWatchdog();
-
-      Sentry.addBreadcrumb({
-        category: 'checkout',
-        message: `terminal success (${reason})`,
-        level: 'info',
-        data: { reason },
-      });
-
-      // Counter-signal so Dodo's wallet-return deadlock prevalence is
-      // measurable in Sentry. We intentionally log `info`, not `error`
-      // — this is expected handling, not a failure. See
-      // `feedback_sentry_level_expected_user_states`.
-      if (reason === 'watchdog') {
-        Sentry.captureMessage('Dodo wallet-return deadlock — watchdog resolved', {
-          level: 'info',
-          tags: { surface: 'pro-marketing', code: 'watchdog_resolved' },
-        });
-      }
-
-      try {
-        onSuccess?.();
-      } catch (err) {
-        console.error('[checkout] onSuccess threw:', err);
-        Sentry.captureException(err, {
-          tags: { surface: 'pro-marketing', action: 'on-success' },
-        });
-      }
-
-      // The event-redirect path does its OWN navigation using the
-      // URL Dodo supplied (preserves payment_id / subscription_id
-      // query params downstream consumers may read). Watchdog and
-      // event-status paths use the canonical fallback — Dodo's
-      // status endpoint is authoritative for the entitlement; the
-      // URL params are informational at this point.
-      if (reason === 'event-redirect') {
-        window.location.href = redirectTo || DASHBOARD_CHECKOUT_SUCCESS_URL;
-      } else {
-        safeCloseOverlay();
-        window.location.href = DASHBOARD_CHECKOUT_SUCCESS_URL;
-      }
-    };
-
-    const startWatchdog = (): void => {
-      if (watchdog !== null || _terminalFired) return;
-      watchdog = createEntitlementWatchdog(
-        {
-          endpoint: `${API_BASE}/me/entitlement`,
-          intervalMs: WATCHDOG_INTERVAL_MS,
-          timeoutMs: WATCHDOG_TIMEOUT_MS,
-        },
-        {
-          getToken: getAuthToken,
-          fetch: (input, init) => fetch(input, init),
-          setInterval: (cb, ms) => window.setInterval(cb, ms),
-          clearInterval: (id) => window.clearInterval(id),
-          now: () => Date.now(),
-          onPro: () => fireTerminalSuccess('watchdog'),
-        },
-      );
-      watchdog.start();
-    };
-
-    DodoPayments.Initialize({
-      mode: env === 'live_mode' ? 'live' : 'test',
-      displayType: 'overlay',
-      onEvent: (event: CheckoutEvent) => {
-        // Breadcrumb every event — when a user reports "stuck on spinner
-        // after paying" we need the event log to tell whether we got
-        // `checkout.status=succeeded`, only `checkout.closed`, or
-        // nothing at all. Sentry picks up console.* via integration.
-        //
-        // Only log known-safe fields (event_type, status). Dodo's
-        // event.data can include customer PII (email, billing address,
-        // payment_id) depending on event type, and anything logged here
-        // lands in Sentry breadcrumbs via the console integration.
-        const data = event.data as Record<string, unknown> | undefined;
-        const msg = data?.message as Record<string, unknown> | undefined;
-        const status = msg?.status as string | undefined;
-        console.info('[checkout] dodo event', event.event_type,
-          status !== undefined ? { status } : undefined);
-
-        // `checkout.opened` is the only terminal-adjacent event Dodo
-        // emits reliably on BOTH the happy path and the wallet-return
-        // deadlock path (confirmed via HAR 2026-04-23). It's our
-        // earliest safe moment to arm the watchdog.
-        if (event.event_type === 'checkout.opened') {
-          _terminalFired = false;
-          startWatchdog();
-        }
-
-        // Dodo's documented `manualRedirect: true` flow emits TWO events
-        // on terminal success: `checkout.status` for UI updates, and
-        // `checkout.redirect_requested` carrying the URL WE must navigate
-        // to. The SDK explicitly hands navigation to the merchant in this
-        // mode — ignoring `checkout.redirect_requested` is what stranded
-        // users after paying (docs: overlay-checkout.mdx, inline-checkout.mdx).
-        //
-        // Status shape is ONLY `event.data.message.status` per docs — the
-        // legacy top-level `event.data.status` read was a guess against
-        // an older SDK version and most likely never matched.
-        if (event.event_type === 'checkout.status' && status === 'succeeded') {
-          fireTerminalSuccess('event-status');
-        }
-        if (event.event_type === 'checkout.redirect_requested') {
-          const redirectTo = msg?.redirect_to as string | undefined;
-          // DORMANT (#4449): this overlay handler no longer runs — checkout now
-          // redirects top-level to the hosted page (see startCheckout). The
-          // live return_url is the GUARDED `?wm_checkout=return` marker, which
-          // reconciles success only against authoritative Dodo evidence; it does
-          // NOT fire regardless of Dodo's appended params. Kept pending removal.
-          fireTerminalSuccess('event-redirect', redirectTo);
-        }
-        if (event.event_type === 'checkout.closed') {
-          // Cancel path. Do not fire success — user didn't pay, or
-          // the watchdog timed out gracefully.
-          stopWatchdog();
-        }
-        if (event.event_type === 'checkout.link_expired') {
-          // Not user-blocking — log-only for now; follow-up if Sentry
-          // shows volume.
-          Sentry.captureMessage('Dodo checkout link expired', {
-            level: 'info',
-            tags: { surface: 'pro-marketing', code: 'link_expired' },
-          });
-        }
-      },
-    });
-  }).catch((err) => {
-    console.error('[checkout] Failed to load Dodo overlay SDK:', err);
-  });
-}
-
 // Synchronous whole-start re-entrancy guard (#4934 round-4 F4):
 // `checkoutInFlight` is only set inside doCheckout, AFTER the awaited
 // ensureClerk() — rapid double-clicks both pass the entry check and
@@ -433,58 +258,197 @@ let startCheckoutEntryInFlight = false;
 
 export async function startCheckout(
   productId: string,
-  options?: { referralCode?: string; discountCode?: string; bypassPendingGuard?: boolean },
+  options?: {
+    referralCode?: string;
+    discountCode?: string;
+    attributionSource?: string;
+    checkoutAttribution?: CheckoutAttribution;
+    desktopHandoff?: DesktopCheckoutHandoff;
+    bypassPendingGuard?: boolean;
+  },
 ): Promise<boolean> {
   if (checkoutInFlight) return false;
   if (startCheckoutEntryInFlight) return false;
   startCheckoutEntryInFlight = true;
+  // Captured before loading_auth disables the clicked CTA (which drops its
+  // focus), so the auth chooser can hand focus back on cancel.
+  const trigger = (document.activeElement as HTMLElement | null) ?? null;
+  document.getElementById('wm-checkout-error-toast')?.remove();
+  if (_phase.kind === 'idle') setPhase({ kind: 'loading_auth', productId });
   try {
-    return await startCheckoutInner(productId, options);
+    return await startCheckoutInner(productId, options, trigger);
   } finally {
     startCheckoutEntryInFlight = false;
+    if (_phase.kind === 'loading_auth') setPhase({ kind: 'idle' });
   }
 }
 
 async function startCheckoutInner(
   productId: string,
-  options?: { referralCode?: string; discountCode?: string; bypassPendingGuard?: boolean },
+  options?: {
+    referralCode?: string;
+    discountCode?: string;
+    attributionSource?: string;
+    checkoutAttribution?: CheckoutAttribution;
+    desktopHandoff?: DesktopCheckoutHandoff;
+    bypassPendingGuard?: boolean;
+  },
+  trigger: HTMLElement | null = null,
 ): Promise<boolean> {
   let c: LoadedClerk;
   try {
     c = await ensureClerk();
   } catch (err) {
+    if (err instanceof SiteDataBlockedError) {
+      showCheckoutErrorToast(SITE_DATA_BLOCKED_MESSAGE);
+      return false;
+    }
     console.error('[checkout] Failed to load Clerk:', err);
     Sentry.captureException(err, { tags: { surface: 'pro-marketing', action: 'load-clerk' } });
+    showCheckoutErrorToast('Sign-in could not load. Please try again.');
     return false;
   }
 
   // Funnel (#4931): every /pro pricing CTA routes through here. authed:false
   // marks intent clicks that detour through the Clerk sign-in modal first.
+  const checkoutAttribution = parseMissionPreviewAttribution(
+    options?.checkoutAttribution?.missionId,
+    options?.checkoutAttribution?.panelKey,
+  );
   trackFunnelEvent('checkout-start', {
     productId: bucketProductIdForAnalytics(productId),
     surface: 'pro-page',
     authed: Boolean(c.user),
+    ...(checkoutAttribution
+      ? { missionId: checkoutAttribution.missionId, panelKey: checkoutAttribution.panelKey }
+      : {}),
   });
 
   if (!c.user) {
-    // Intent travels via afterSignInUrl / afterSignUpUrl — bound to
-    // THIS specific openSignIn call. On successful sign-in, Clerk
-    // navigates to the returnUrl which carries the checkout intent
-    // in its query string; tryResumeCheckoutFromUrl picks it up on
-    // page load. On dismissal, Clerk performs no navigation, so no
-    // resume. Other /pro sign-in paths don't set these URLs, so they
-    // can't trigger surprise purchases.
+    // Signed-out buyers pick the form before Clerk opens (#10842). Under strict
+    // enumeration protection each form strands the other group: a new address
+    // in sign-in, or an existing one in sign-up, reaches a code screen that
+    // sends no code. Both return URLs carry the checkout intent, so the footer
+    // link in either form still resumes via tryResumeCheckoutFromUrl. Never
+    // Clerk's combined sign-in/sign-up flow: it hid new-email sign-ups under
+    // strict enumeration protection (#10493).
+    // Auth has loaded: release the CTA so focus can return to it on cancel.
+    // The chooser's backdrop blocks clicks and the entry guard blocks re-entry.
+    if (_phase.kind === 'loading_auth') setPhase({ kind: 'idle' });
+    const form = await askCheckoutAuthForm(trigger);
+    if (form === 'cancel') return false;
     const returnUrl = buildCheckoutReturnUrl(window.location.href, productId, options);
+    setAuthReturnUrls({ afterSignInUrl: returnUrl, afterSignUpUrl: returnUrl });
     try {
-      c.openSignIn({ afterSignInUrl: returnUrl, afterSignUpUrl: returnUrl });
+      if (form === 'sign-up') c.openSignUp({ afterSignUpUrl: returnUrl, afterSignInUrl: returnUrl });
+      else c.openSignIn({ afterSignInUrl: returnUrl, afterSignUpUrl: returnUrl });
     } catch (err) {
-      console.error('[checkout] Failed to open sign in:', err);
-      Sentry.captureException(err, { tags: { surface: 'pro-marketing', action: 'checkout-sign-in' } });
+      console.error(`[checkout] Failed to open ${form}:`, err);
+      Sentry.captureException(err, { tags: { surface: 'pro-marketing', action: `checkout-${form}` } });
+      showCheckoutErrorToast(`${form === 'sign-up' ? 'Sign-up' : 'Sign-in'} could not open. Please try again.`);
+      return false;
     }
+    trackAuthStep(c, productId, form);
     return false;
   }
 
-  return doCheckout(productId, options ?? {});
+  return checkoutAs(c, productId, options ?? {});
+}
+
+type CheckoutAuthForm = 'sign-in' | 'sign-up';
+
+/** Funnel: the auth modal opened for a checkout click, and whether it closed without sign-in. */
+function trackAuthStep(c: LoadedClerk, productId: string, form: CheckoutAuthForm): void {
+  trackFunnelEvent('checkout-auth-shown', { productId: bucketProductIdForAnalytics(productId), surface: 'pro-page', form });
+  try {
+    watchAuthModalDismissal({
+      isSignedIn: () => Boolean(c.user),
+      onDismissed: ({ reachedCodeStep }) => {
+        trackFunnelEvent('checkout-auth-dismissed', {
+          productId: bucketProductIdForAnalytics(productId),
+          surface: 'pro-page',
+          form,
+          reachedCodeStep,
+        });
+      },
+    });
+  } catch {
+    /* analytics can never break checkout */
+  }
+}
+
+/** A resumed checkout counts as a new account when Clerk created the user this recently. */
+export const NEW_ACCOUNT_WINDOW_MS = 15 * 60_000;
+
+export function isRecentlyCreated(createdAt: Date | number | null | undefined, now: number): boolean {
+  const created = createdAt instanceof Date ? createdAt.getTime() : createdAt;
+  if (typeof created !== 'number' || !Number.isFinite(created)) return false;
+  const age = now - created;
+  return age >= 0 && age < NEW_ACCOUNT_WINDOW_MS;
+}
+
+type ProCheckoutOptions = NonNullable<Parameters<typeof startCheckout>[1]>;
+
+/**
+ * A desktop handoff names the account signed in to the app (#10342), but
+ * checkout runs on this browser's session. When they differ, the buyer picks:
+ * switch to the desktop account and resume this checkout after sign-in, or
+ * upgrade the browser account knowingly, which drops the "the app will
+ * update" return copy. Resolves the options to check out with and the
+ * account they were approved for, or null when checkout must not start now.
+ */
+async function confirmDesktopAccount(
+  c: LoadedClerk,
+  productId: string,
+  options: ProCheckoutOptions,
+): Promise<{ options: ProCheckoutOptions; userId?: string } | null> {
+  const desktopAccount = options.desktopHandoff?.account;
+  if (!c.user) return { options };
+  if (!desktopAccount || await desktopAccountDigest(c.user.id) === desktopAccount) {
+    return { options, userId: c.user.id };
+  }
+
+  const shownUserId = c.user.id;
+  const browserAccount = c.user.primaryEmailAddress?.emailAddress || 'this account';
+  const choice = await askDesktopAccountChoice(browserAccount, desktopAccount !== UNKNOWN_DESKTOP_ACCOUNT);
+  // Another tab can switch the browser session while the dialog is open. The
+  // buyer approved the account they were shown, not whichever is current.
+  if (choice !== 'cancel' && c.user?.id !== shownUserId) {
+    return confirmDesktopAccount(c, productId, options);
+  }
+  if (choice === 'upgrade-browser-account') {
+    const { desktopHandoff: _dropped, ...browserOptions } = options;
+    return { options: browserOptions, userId: shownUserId };
+  }
+  if (choice === 'switch-account') {
+    const returnUrl = buildCheckoutReturnUrl(window.location.href, productId, options);
+    try {
+      // The callback replaces Clerk's after-sign-out navigation, which would
+      // leave /pro before sign-in opens.
+      setAuthReturnUrls({ afterSignInUrl: returnUrl, afterSignUpUrl: returnUrl });
+      await c.signOut(() => c.openSignIn({ afterSignInUrl: returnUrl, afterSignUpUrl: returnUrl }));
+    } catch (err) {
+      console.error('[checkout] Failed to switch account:', err);
+      Sentry.captureException(err, { tags: { surface: 'pro-marketing', action: 'desktop-account-switch' } });
+      showCheckoutErrorToast('Sign-in could not open. Please try again.');
+    }
+  }
+  return null;
+}
+
+/**
+ * Checkout runs on whatever session Clerk holds when the token is read, and
+ * another tab can switch it after the account check. doCheckout re-reads the
+ * account at that point and comes back here, without a pending-payment
+ * bypass the new account never approved.
+ */
+async function checkoutAs(c: LoadedClerk, productId: string, options: ProCheckoutOptions): Promise<boolean> {
+  const confirmed = await confirmDesktopAccount(c, productId, options);
+  if (!confirmed) return false;
+  const { bypassPendingGuard: _dropped, ...fresh } = options;
+  return doCheckout(productId, confirmed.options, confirmed.userId
+    ? { userId: confirmed.userId, restart: () => checkoutAs(c, productId, fresh) }
+    : undefined);
 }
 
 export async function tryResumeCheckoutFromUrl(): Promise<boolean> {
@@ -503,17 +467,47 @@ export async function tryResumeCheckoutFromUrl(): Promise<boolean> {
     return false;
   }
   if (!c.user) return false;
-  const { productId, referralCode, discountCode } = intent;
+  const {
+    productId,
+    referralCode,
+    discountCode,
+    attributionSource,
+    checkoutAttribution,
+    desktopHandoff,
+  } = intent;
   // Funnel (#4931): post-sign-in auto-resume — the pre-auth click already
   // fired checkout-start{authed:false}; this marks the resumed attempt.
   // productId is URL-derived here — bucketed for analytics (round-4 F2).
-  trackFunnelEvent('checkout-start', { productId: bucketProductIdForAnalytics(productId), surface: 'pro-resume', authed: true });
-  return doCheckout(productId, { referralCode, discountCode });
+  const newAccount = isRecentlyCreated(c.user.createdAt, Date.now());
+  trackFunnelEvent('checkout-start', {
+    productId: bucketProductIdForAnalytics(productId),
+    surface: 'pro-resume',
+    authed: true,
+    newAccount,
+    ...(checkoutAttribution
+      ? { missionId: checkoutAttribution.missionId, panelKey: checkoutAttribution.panelKey }
+      : {}),
+  });
+  return checkoutAs(c, productId, {
+    referralCode,
+    discountCode,
+    attributionSource,
+    checkoutAttribution,
+    desktopHandoff,
+  });
 }
 
 async function doCheckout(
   productId: string,
-  options: { referralCode?: string; discountCode?: string; bypassPendingGuard?: boolean },
+  options: {
+    referralCode?: string;
+    discountCode?: string;
+    attributionSource?: string;
+    checkoutAttribution?: CheckoutAttribution;
+    desktopHandoff?: DesktopCheckoutHandoff;
+    bypassPendingGuard?: boolean;
+  },
+  account?: { userId: string; restart: () => Promise<boolean> },
 ): Promise<boolean> {
   const cooldownSeconds = currentCheckoutRateLimitSeconds();
   if (cooldownSeconds > 0) {
@@ -523,6 +517,22 @@ async function doCheckout(
   if (_phase.kind === 'rate_limited') setPhase({ kind: 'idle' });
   if (checkoutInFlight) return false;
   checkoutInFlight = true;
+  let redirecting = false;
+  let accountChanged = false;
+  const checkoutContext = resolveCheckoutContext({
+    surface: options.checkoutAttribution ? 'mission-preview' : 'dashboard',
+    attribution: options.checkoutAttribution,
+  });
+  try {
+    window.sessionStorage.setItem(CHECKOUT_ATTEMPT_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      productId,
+      referralCode: options.referralCode,
+      discountCode: options.discountCode,
+      startedAt: Date.now(),
+      context: checkoutContext,
+    }));
+  } catch {}
   // Phase transitions to creating_checkout ONLY here, not in
   // startCheckout's no-user branch. This narrow window (post-auth,
   // edge call + Dodo SDK import + overlay open) is the only time the
@@ -551,6 +561,11 @@ async function doCheckout(
     const token = await getAuthToken();
     if (!token) {
       console.error('[checkout] No auth token after retry');
+      showCheckoutErrorToast('Your sign-in could not be verified. Please sign in again and retry.');
+      return false;
+    }
+    if (account && (await ensureClerk().catch(() => null))?.user?.id !== account.userId) {
+      accountChanged = true;
       return false;
     }
 
@@ -568,9 +583,13 @@ async function doCheckout(
         // failure, cancel, pending) — `?wm_checkout=success` would false-succeed
         // a failed/pending/no-ID return. `?wm_checkout=return` only reconciles
         // success against authoritative Dodo evidence. See checkout-return.ts.
-        returnUrl: DASHBOARD_CHECKOUT_RETURN_URL,
+        returnUrl: options.desktopHandoff
+          ? `${DASHBOARD_CHECKOUT_RETURN_URL}&${CHECKOUT_RETURN_SOURCE_PARAM}=${DESKTOP_CHECKOUT_HANDOFF}`
+          : DASHBOARD_CHECKOUT_RETURN_URL,
         discountCode: options.discountCode,
         referralCode: options.referralCode,
+        attributionSource: options.attributionSource,
+        acquisition: getFirstTouchAcquisitionForCheckout(),
         // #4438: only set when the user confirmed "start a new checkout anyway"
         // from the pending-payment dialog. Skips the backend pending guard.
         ...(options.bypassPendingGuard ? { bypassPendingGuard: true } : {}),
@@ -602,11 +621,14 @@ async function doCheckout(
         // may spend longer than that reading the dialog before clicking.
         // Using a stale `token` would 401 at /customer-portal.
         const planKey = err?.subscription?.planKey;
-        showProDuplicateSubscriptionDialog({
+        // A paused hold is not an upgrade case: the card has to be fixed first.
+        const paused = err?.subscription?.status === 'on_hold';
+        const showGuidedDuplicateDialog = (): void => showProDuplicateSubscriptionDialog({
           planDisplayName: resolveProPlanDisplayName(planKey),
           // Picks the guided cancel-then-rebuy copy for the Pro → Pro Business
           // pairing; every other pairing keeps the portal line.
           targetProductId: productId,
+          paused,
           onConfirm: async () => {
             // Pre-open the tab SYNCHRONOUSLY inside the click handler
             // BEFORE any await so the popup blocker treats it as a
@@ -625,6 +647,31 @@ async function doCheckout(
           },
           onDismiss: () => { /* stay on /pro */ },
         });
+        // An active Pro moves to Pro Business in place (prorated Dodo plan
+        // change); the guided dialog stays the fallback when no preview comes back.
+        if (
+          !paused &&
+          PRO_BUSINESS_PRODUCT_IDS.has(productId) &&
+          typeof planKey === 'string' &&
+          IN_PLACE_UPGRADE_SOURCE_PLANS.has(planKey)
+        ) {
+          void runProBusinessUpgradeFlow({
+            apiBase: API_BASE,
+            planDisplayName: resolveProPlanDisplayName(planKey),
+            getToken: getAuthToken,
+            getUserId: async () => (await ensureClerk().catch(() => null))?.user?.id ?? null,
+            openPortal: () => {
+              const reservedWin = prereserveBillingPortalTab();
+              void getAuthToken().then((freshToken) => {
+                if (freshToken) void openBillingPortal(freshToken, reservedWin);
+                else if (reservedWin && !reservedWin.closed) reservedWin.close();
+              });
+            },
+            fallback: showGuidedDuplicateDialog,
+          });
+        } else {
+          showGuidedDuplicateDialog();
+        }
         Sentry.captureMessage('Duplicate subscription checkout attempt', {
           level: 'info',
           tags: { surface: 'pro-marketing', code: 'duplicate_subscription' },
@@ -640,7 +687,7 @@ async function doCheckout(
         showProPendingPaymentDialog({
           planDisplayName: resolveProPlanDisplayName(planKey),
           onConfirm: () => {
-            void doCheckout(productId, { ...options, bypassPendingGuard: true });
+            void doCheckout(productId, { ...options, bypassPendingGuard: true }, account);
           },
           onDismiss: () => { /* stay on /pro; pending payment may still complete */ },
         });
@@ -649,6 +696,31 @@ async function doCheckout(
           tags: { surface: 'pro-marketing', code: 'payment_in_progress' },
           extra: { serverMessage: err?.message },
         });
+      } else {
+        // Everything the chain above does not name. Previously this arm was a
+        // bare `return false`: the interstitial unmounted, no toast appeared,
+        // and nothing reached Sentry, so the buyer saw a click that did
+        // nothing and we saw no event at all.
+        //
+        // WORLDMONITOR-Q4 made that gap wider rather than narrower. This
+        // surface shares `checkout-transport.ts` byte-for-byte with the
+        // dashboard (tests/marketing-mirror-parity.test.mts), so it inherited
+        // the widened Cloudflare 52x retry — and with it the 409
+        // `idempotency_conflict` a replay draws when it races a still-running
+        // first attempt. The dashboard classifies that as retryable; here it
+        // has no branch at all. Reporting is the half that was never mirrored.
+        Sentry.captureMessage(`Checkout edge error: ${resp.status}`, {
+          level: 'error',
+          tags: {
+            surface: 'pro-marketing',
+            code: 'service_unavailable',
+            // Claims this as a first-party report for the zero-frame gate, the
+            // same contract src/services/checkout-sentry-policy.ts encodes.
+            kind: 'checkout_request_failed',
+          },
+          extra: { httpStatus: resp.status, serverMessage: err?.message ?? err?.error },
+        });
+        showCheckoutErrorToast();
       }
       return false;
     }
@@ -665,6 +737,7 @@ async function doCheckout(
         level: 'error',
         tags: { surface: 'pro-marketing', code: 'missing_checkout_url' },
       });
+      showCheckoutErrorToast();
       return false;
     }
 
@@ -676,16 +749,59 @@ async function doCheckout(
     // the primary flow. The overlay Initialize/onEvent machinery above is left
     // dormant pending removal.
     window.location.assign(hostedCheckoutUrl);
+    redirecting = true;
 
     return true;
   } catch (err) {
     console.error('[checkout] Failed:', err);
+    // The transport's 15s budget and a double network failure both land here.
+    // Console-only was the reason WORLDMONITOR-Q4 stayed open on this surface
+    // after the dashboard half was fixed: no event is emitted, so no filter
+    // policy — this bundle's or any other — gets a say. `kind` claims it as a
+    // first-party report so a zero-frame rejection is not read as extension
+    // noise wherever this event is filtered.
+    Sentry.captureException(err, {
+      level: 'error',
+      tags: {
+        surface: 'pro-marketing',
+        code: 'service_unavailable',
+        kind: 'checkout_request_failed',
+      },
+    });
+    showCheckoutErrorToast();
     return false;
   } finally {
-    checkoutInFlight = false;
-    unmountCheckoutInterstitial();
-    if (_phase.kind === 'creating_checkout') setPhase({ kind: 'idle' });
+    if (redirecting) holdCheckoutUntilNavigation();
+    else releaseCheckout();
+    if (accountChanged) void account?.restart();
   }
+}
+
+function releaseCheckout(): void {
+  checkoutInFlight = false;
+  unmountCheckoutInterstitial();
+  if (_phase.kind === 'creating_checkout') setPhase({ kind: 'idle' });
+}
+
+// `location.assign` only starts navigation: this page stays clickable until
+// Dodo's page loads, often 1-3 s later. Releasing the guard on return let a
+// second click create a second Dodo session. Hold the guard, spinner and
+// interstitial until the page is gone; release when the buyer comes back
+// through the back-forward cache, or when the navigation never happened
+// (stopped, blocked) so the CTA cannot stay dead.
+const REDIRECT_HOLD_MS = 15_000;
+
+function holdCheckoutUntilNavigation(): void {
+  const release = () => {
+    clearTimeout(timer);
+    window.removeEventListener('pageshow', onPageShow);
+    releaseCheckout();
+  };
+  const onPageShow = (event: PageTransitionEvent) => {
+    if (event.persisted) release();
+  };
+  window.addEventListener('pageshow', onPageShow);
+  const timer = setTimeout(release, REDIRECT_HOLD_MS);
 }
 
 // Dodo's hosted-checkout origins. Redirect mode (#4449) navigates the top
@@ -796,6 +912,36 @@ function showCheckoutLoadingToast(): void {
   setTimeout(() => toast.remove(), 5_000);
 }
 
+export function showCheckoutErrorToast(message = 'Checkout is unavailable right now. Please try again. If this continues, contact support@worldmonitor.app.'): void {
+  const id = 'wm-checkout-error-toast';
+  document.getElementById(id)?.remove();
+  const toast = document.createElement('div');
+  toast.id = id;
+  toast.setAttribute('role', 'alert');
+  Object.assign(toast.style, {
+    position: 'fixed',
+    top: '20px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    zIndex: '99995',
+    width: 'max-content',
+    maxWidth: 'calc(100% - 32px)',
+    boxSizing: 'border-box',
+    background: 'rgba(127, 29, 29, 0.97)',
+    color: '#fff',
+    padding: '12px 18px',
+    borderRadius: '6px',
+    border: '1px solid rgba(248, 113, 113, 0.55)',
+    fontSize: '14px',
+    lineHeight: '1.5',
+    fontFamily: "'SF Mono', Monaco, monospace",
+  });
+  // Never expose raw server errors or provider response bodies to the buyer.
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  window.setTimeout(() => toast.remove(), 10_000);
+}
+
 function showCheckoutRateLimitToast(retryAfterSeconds: number): void {
   const id = 'wm-checkout-rate-limit-toast';
   document.getElementById(id)?.remove();
@@ -879,7 +1025,7 @@ async function openBillingPortal(token: string, preopened?: Window | null): Prom
       headers: {
         Authorization: `Bearer ${token}`,
       },
-      signal: AbortSignal.timeout(15_000),
+      signal: createTimeoutSignal(15_000),
     });
 
     const result = await resp.json().catch(() => ({}));
@@ -935,6 +1081,8 @@ interface ProDuplicateDialogOptions {
   planDisplayName: string;
   /** Product the blocked checkout was for — selects the copy variant. */
   targetProductId?: string;
+  /** The blocking subscription is on_hold: its last payment failed. */
+  paused?: boolean;
   onConfirm: () => void;
   onDismiss: () => void;
 }
@@ -942,6 +1090,9 @@ interface ProDuplicateDialogOptions {
 /** Mirrors src/services/checkout-duplicate-dialog.ts — keep the copy in sync. */
 function proDuplicateBodyHtml(options: ProDuplicateDialogOptions): string {
   const plan = escapeHtml(options.planDisplayName);
+  if (options.paused === true) {
+    return `Your ${plan} subscription is paused because its last payment failed, so a new checkout would bill you twice. Update your payment method in the billing portal and your access comes back right away.`;
+  }
   if (options.targetProductId !== undefined && PRO_BUSINESS_PRODUCT_IDS.has(options.targetProductId)) {
     return `Your account already has an active ${plan} subscription. Pro Business is a separate plan, so the upgrade takes two steps: cancel ${plan} in the billing portal, then start the Pro Business checkout again — you don't have to wait for your current term to end. Your ${plan} access continues until the term you've already paid for runs out, and Pro Business starts a new billing cycle as soon as you buy it. Need a hand? Email <a href="mailto:support@worldmonitor.app" style="color:#44ff88;">support@worldmonitor.app</a>.`;
   }
@@ -983,13 +1134,13 @@ function showProDuplicateSubscriptionDialog(options: ProDuplicateDialogOptions):
   });
 
   card.innerHTML = `
-    <h2 style="font-size:16px;font-weight:600;margin:0 0 10px 0;color:#fff;">Subscription already active</h2>
+    <h2 style="font-size:16px;font-weight:600;margin:0 0 10px 0;color:#fff;">${options.paused === true ? 'Payment needs updating' : 'Subscription already active'}</h2>
     <p style="font-size:13px;line-height:1.5;margin:0 0 18px 0;color:#c8c8c8;">
       ${proDuplicateBodyHtml(options)}
     </p>
     <div style="display:flex;justify-content:flex-end;gap:10px;">
       <button id="${PRO_DUP_DIALOG_ID}-dismiss" type="button" style="background:transparent;color:#aaa;border:1px solid #2a2a2a;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Dismiss</button>
-      <button id="${PRO_DUP_DIALOG_ID}-confirm" type="button" style="background:#44ff88;color:#0a0a0a;border:none;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">Open billing portal</button>
+      <button id="${PRO_DUP_DIALOG_ID}-confirm" type="button" style="background:#44ff88;color:#0a0a0a;border:none;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">${options.paused === true ? 'Update payment method' : 'Open billing portal'}</button>
     </div>
   `;
 
@@ -1102,6 +1253,130 @@ function showProPendingPaymentDialog(options: ProDuplicateDialogOptions): void {
   document.getElementById(`${PRO_PENDING_DIALOG_ID}-dismiss`)?.addEventListener('click', dismiss);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
   document.addEventListener('keydown', keyHandler, true);
+}
+
+type DesktopAccountChoice = 'switch-account' | 'upgrade-browser-account' | 'cancel';
+
+const PRO_DESKTOP_ACCOUNT_DIALOG_ID = 'wm-pro-desktop-account-dialog';
+
+interface ChoiceButton<T extends string> {
+  choice: T;
+  label: string;
+  style: string;
+}
+
+const CHOICE_BUTTON_STYLE = 'border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;overflow-wrap:anywhere;';
+const PRIMARY_CHOICE_STYLE = 'background:#44ff88;color:#0a0a0a;border:none;font-weight:700;';
+const SECONDARY_CHOICE_STYLE = 'background:transparent;color:#e8e8e8;border:1px solid #444;';
+const CANCEL_CHOICE_STYLE = 'background:transparent;color:#aaa;border:1px solid #2a2a2a;';
+
+/** A modal with one button per choice. Escape and a backdrop click resolve `dismiss`. */
+function askChoice<T extends string>(
+  id: string,
+  titleHtml: string,
+  bodyHtml: string,
+  buttons: ChoiceButton<T>[],
+  { dismiss, focus, stacked = false, returnFocusTo = document.activeElement as HTMLElement | null }: {
+    dismiss: T;
+    focus: T;
+    stacked?: boolean;
+    returnFocusTo?: HTMLElement | null;
+  },
+): Promise<T> {
+  return new Promise((resolve) => {
+    document.getElementById(id)?.remove();
+    const backdrop = document.createElement('div');
+    backdrop.id = id;
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-labelledby', `${id}-title`);
+    Object.assign(backdrop.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: '99990',
+      background: 'rgba(10, 10, 10, 0.72)',
+      backdropFilter: 'blur(4px)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '24px',
+    });
+    const layout = stacked ? 'flex-direction:column;' : 'flex-wrap:wrap;justify-content:flex-end;';
+    backdrop.innerHTML = `
+      <div style="background:#141414;border:1px solid #2a2a2a;border-radius:8px;padding:20px 22px;max-width:460px;width:100%;color:#e8e8e8;font-family:'SF Mono', Monaco, 'Cascadia Code', 'Fira Code', monospace;box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+        <h2 id="${id}-title" style="font-size:16px;font-weight:600;margin:0 0 10px 0;color:#fff;">${titleHtml}</h2>
+        <p style="font-size:13px;line-height:1.5;margin:0 0 18px 0;color:#c8c8c8;overflow-wrap:anywhere;">
+          ${bodyHtml}
+        </p>
+        <div style="display:flex;${layout}gap:10px;">
+          ${buttons.map(b => `<button data-choice="${b.choice}" type="button" style="${CHOICE_BUTTON_STYLE}${b.style}">${b.label}</button>`).join('\n          ')}
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+
+    const buttonEls = Array.from(backdrop.querySelectorAll<HTMLButtonElement>('button'));
+    const finish = (choice: T) => {
+      document.removeEventListener('keydown', onKey, true);
+      backdrop.remove();
+      returnFocusTo?.focus?.();
+      resolve(choice);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        finish(dismiss);
+        return;
+      }
+      if (e.key !== 'Tab' || buttonEls.length === 0) return;
+      const index = buttonEls.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.shiftKey
+        ? buttonEls[index <= 0 ? buttonEls.length - 1 : index - 1]
+        : buttonEls[index === -1 || index === buttonEls.length - 1 ? 0 : index + 1];
+      e.preventDefault();
+      next?.focus();
+    };
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) return finish(dismiss);
+      const choice = (e.target as HTMLElement).closest('button')?.dataset.choice as T | undefined;
+      if (choice) finish(choice);
+    });
+    document.addEventListener('keydown', onKey, true);
+    backdrop.querySelector<HTMLButtonElement>(`[data-choice="${focus}"]`)?.focus();
+  });
+}
+
+function askDesktopAccountChoice(browserAccount: string, desktopAccountKnown: boolean): Promise<DesktopAccountChoice> {
+  const account = escapeHtml(browserAccount);
+  return askChoice<DesktopAccountChoice>(
+    PRO_DESKTOP_ACCOUNT_DIALOG_ID,
+    desktopAccountKnown ? 'This browser uses a different account' : 'Confirm the account to upgrade',
+    desktopAccountKnown
+      ? `This browser is signed in as <strong style="color:#fff;">${account}</strong>, but your desktop app uses a different account. Checking out here upgrades ${account}, and the desktop app keeps its current plan.`
+      : `This browser is signed in as <strong style="color:#fff;">${account}</strong>. Your desktop app had not finished loading its account, so check that this is the one you use there. Checking out here upgrades ${account}.`,
+    [
+      { choice: 'cancel', label: 'Cancel', style: CANCEL_CHOICE_STYLE },
+      { choice: 'upgrade-browser-account', label: 'Upgrade this account', style: SECONDARY_CHOICE_STYLE },
+      { choice: 'switch-account', label: 'Switch account', style: PRIMARY_CHOICE_STYLE },
+    ],
+    { dismiss: 'cancel', focus: 'switch-account' },
+  );
+}
+
+const PRO_AUTH_FORM_DIALOG_ID = 'wm-pro-auth-form-dialog';
+
+/** Which Clerk form a signed-out buyer needs; see startCheckoutInner (#10842). */
+function askCheckoutAuthForm(returnFocusTo: HTMLElement | null): Promise<CheckoutAuthForm | 'cancel'> {
+  return askChoice<CheckoutAuthForm | 'cancel'>(
+    PRO_AUTH_FORM_DIALOG_ID,
+    'Continue to checkout',
+    'Checkout needs a World Monitor account. Secure checkout opens right after.',
+    [
+      { choice: 'sign-up', label: 'New here? Create account', style: PRIMARY_CHOICE_STYLE },
+      { choice: 'sign-in', label: 'Have an account? Sign in', style: SECONDARY_CHOICE_STYLE },
+      { choice: 'cancel', label: 'Cancel', style: CANCEL_CHOICE_STYLE },
+    ],
+    { dismiss: 'cancel', focus: 'sign-up', stacked: true, returnFocusTo },
+  );
 }
 
 function escapeHtml(s: string): string {

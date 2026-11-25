@@ -166,7 +166,7 @@ describe('Railway deploy trigger lease-aware workflow', () => {
     assert.equal(upload.uses, 'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f');
     assert.equal(upload.with.name, '${{ steps.evidence.outputs.artifact_name }}');
     const download = stepNamed('verifier', 'Download immutable reconciliation result');
-    assert.equal(download.uses, 'actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53');
+    assert.equal(download.uses, 'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333');
     assert.equal(download.with.name, '${{ needs.mutation.outputs.artifact_name }}');
     assert.match(String(job('verifier').if), /manifest_ready == 'true'/);
     assert.match(
@@ -225,6 +225,19 @@ describe('Railway deploy trigger lease-aware workflow', () => {
         }
       }
     }
+  });
+
+  it('installs the Railway CLI in every workflow through the retrying pinned installer', () => {
+    const workflowDir = resolve(repoRoot, '.github/workflows');
+    const rawInstalls = [];
+    let installerSteps = 0;
+    for (const file of readdirSync(workflowDir).filter((name) => /\.ya?ml$/.test(name))) {
+      const text = readFileSync(resolve(workflowDir, file), 'utf8');
+      if (/npm (install|i)\b[^\n]*@railway\/cli/.test(text)) rawInstalls.push(file);
+      installerSteps += text.match(/node scripts\/install-railway-cli\.mjs/g)?.length ?? 0;
+    }
+    assert.deepEqual(rawInstalls, []);
+    assert.ok(installerSteps >= 7, `expected the installer in every Railway CLI job, found ${installerSteps}`);
   });
 
   it('contains no empty GitHub expression in any workflow', () => {

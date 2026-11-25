@@ -1,34 +1,38 @@
-/**
- * Regression test: scripts/notification-relay.cjs's watchlist ticker-scope
- * filter for `watchlist_story_alert` events (#4922 item e / U3).
- *
- * Modeled on tests/notification-relay-country-filter.test.mjs — two surfaces:
- *  1. Source-grep: the filter MUST be wired into the per-rule matching loop
- *     alongside shouldNotify/eventMatchesCountryScope, and the delivery loop
- *     must still consult the batch PRO gate (isUserPro → proSet).
- *  2. Behavioural: re-execute the filter logic against a synthetic
- *     rule × event matrix to lock in the OPT-IN semantics:
- *       - unlike `countries` (empty = unscoped, all events match), an empty
- *         or absent `rule.tickers` means NO delivery for this event type;
- *       - the rule must explicitly list 'watchlist_story_alert' in its
- *         eventTypes (the empty-eventTypes wildcard does NOT cover it);
- *       - a rule whose eventTypes only adds the watchlist opt-in keeps its
- *         wildcard behaviour for broadcast event types (rss_alert etc.).
- *
- * Also locks the tickers forwarding contract through the API layers
- * (api/_notification-channels.ts + convex/http.ts), mirroring
- * tests/notification-channels-countries-contract.test.mjs.
- *
- * Run: node --test tests/notification-relay-ticker-filter.test.mjs
- */
-
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import Module from 'node:module';
+import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+
+process.env.UPSTASH_REDIS_REST_URL ??= 'https://stub.upstash.io';
+process.env.UPSTASH_REDIS_REST_TOKEN ??= 'stub-token';
+process.env.CONVEX_URL ??= 'https://stub.convex.cloud';
+process.env.CONVEX_NOTIFICATION_RELAY_SECRET ??= 'stub-secret';
+process.env.TELEGRAM_BOT_TOKEN ??= 'stub-bot-token';
+
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, parent, ...rest) {
+  if (request === 'resend') return { Resend: class {} };
+  if (request === 'convex/browser') {
+    return { ConvexHttpClient: class { async query() {} } };
+  }
+  return originalLoad.call(this, request, parent, ...rest);
+};
+
+// These used to be hand-copied MIRRORS of the relay's predicates, 'kept in sync
+// via the source-grep tests below'. A mirror cannot fail when the relay
+// changes. The relay only starts its poll loop when require.main === module, so
+// requiring it here is side-effect free (same technique as
+// tests/notification-relay-country-scope-5359.test.mjs).
+const { eventMatchesTickerScope, ruleDropReason, ruleMatchesEventType } = require(
+  resolve(__dirname, '..', 'scripts', 'notification-relay.cjs'),
+);
+
 const relaySrc = readFileSync(
   resolve(__dirname, '..', 'scripts', 'notification-relay.cjs'),
   'utf-8',
@@ -37,34 +41,17 @@ const edgeSrc = readFileSync(resolve(__dirname, '..', 'api', '_notification-chan
 const convexHttpSrc = readFileSync(resolve(__dirname, '..', 'convex', 'http.ts'), 'utf-8');
 const convexRulesSrc = readFileSync(resolve(__dirname, '..', 'convex', 'alertRules.ts'), 'utf-8');
 
-// ── Mirror implementations (kept in sync via the source-grep tests below;
-// the relay file is a runtime script with no exports — same pattern as the
-// country-filter test). ──────────────────────────────────────────────────────
-
+// The one literal the fixtures below need. It is asserted against the relay's
+// own declaration by the source-grep contract further down, so a rename there
+// fails loudly rather than silently building fixtures nothing can match.
 const WATCHLIST_STORY_EVENT_TYPE = 'watchlist_story_alert';
-
-function ruleMatchesEventType(rule, event) {
-  if (event?.eventType === WATCHLIST_STORY_EVENT_TYPE) {
-    return rule.eventTypes.includes(WATCHLIST_STORY_EVENT_TYPE);
-  }
-  const broadcastTypes = rule.eventTypes.filter((t) => t !== WATCHLIST_STORY_EVENT_TYPE);
-  return broadcastTypes.length === 0 || broadcastTypes.includes(event.eventType);
-}
-
-function eventMatchesTickerScope(event, rule) {
-  if (event?.eventType !== WATCHLIST_STORY_EVENT_TYPE) return true;
-  if (!Array.isArray(rule.tickers) || rule.tickers.length === 0) return false;
-  const eventTickers = Array.isArray(event?.payload?.tickers) ? event.payload.tickers : [];
-  if (eventTickers.length === 0) return false;
-  const ruleSet = new Set(rule.tickers.map((t) => String(t).toUpperCase()));
-  return eventTickers.some((t) => ruleSet.has(String(t).toUpperCase()));
-}
 
 // Full matching predicate for a rule (eventTypes gate + ticker scope), so the
 // behavioural matrix exercises the same conjunction the relay's filter uses.
 function matchesWatchlist(rule, event) {
   return ruleMatchesEventType(rule, event) && eventMatchesTickerScope(event, rule);
 }
+
 
 describe('notification-relay watchlist ticker filter — source-grep contract', () => {
   it('declares eventMatchesTickerScope helper', () => {
@@ -97,11 +84,8 @@ describe('notification-relay watchlist ticker filter — source-grep contract', 
       /function\s+ruleMatchesEventType\s*\(\s*rule\s*,\s*event\s*\)/,
       'relay must declare ruleMatchesEventType(rule, event)',
     );
-    assert.match(
-      relaySrc,
-      /return\s+rule\.eventTypes\.includes\(WATCHLIST_STORY_EVENT_TYPE\)/,
-      'watchlist events must require explicit eventTypes inclusion',
-    );
+    assert.equal(ruleMatchesEventType({ eventTypes: [] }, { eventType: 'watchlist_story_alert', payload: {} }), false,
+      'watchlist events must require explicit eventTypes inclusion');
     // The legacy inline wildcard must be replaced by the helper in the
     // matching filter — otherwise wildcard rules would silently receive
     // watchlist events they never opted into.
@@ -113,39 +97,73 @@ describe('notification-relay watchlist ticker filter — source-grep contract', 
   });
 
   it('watchlist opt-in does not shrink the broadcast wildcard', () => {
-    assert.match(
-      relaySrc,
-      /const\s+broadcastTypes\s*=\s*rule\.eventTypes\.filter\(\s*\(?t\)?\s*=>\s*t\s*!==\s*WATCHLIST_STORY_EVENT_TYPE\s*\)/,
-      'ruleMatchesEventType must exclude the watchlist opt-in when evaluating the broadcast wildcard',
-    );
+    const rss = { eventType: 'rss_alert', payload: {} };
+    assert.equal(ruleMatchesEventType({ eventTypes: ['watchlist_story_alert'] }, rss), true,
+      'ruleMatchesEventType must exclude the watchlist opt-in when evaluating the broadcast wildcard');
   });
 
-  it('filter is wired into the per-rule matching loop alongside shouldNotify + country scope', () => {
-    assert.match(
-      relaySrc,
-      /ruleMatchesEventType\(r,\s*event\)\s*&&\s*\n?\s*shouldNotify\(r,\s*event\)\s*&&\s*\n?\s*eventMatchesCountryScope\(event,\s*r\)\s*&&\s*\n?\s*eventMatchesTickerScope\(event,\s*r\)/,
-      'eventMatchesTickerScope must be in the matching filter alongside shouldNotify/eventMatchesCountryScope',
-    );
+  it('the matching loop drops a watchlist story for a rule without its ticker', () => {
+    const story = { eventType: 'watchlist_story_alert', severity: 'critical', payload: { tickers: ['AAPL'] } };
+    const rule = { digestMode: 'realtime', sensitivity: 'critical', eventTypes: ['watchlist_story_alert'], countries: [] };
+    assert.equal(ruleDropReason({ ...rule, tickers: ['MSFT'] }, story), 'ticker_scope');
+    assert.equal(ruleDropReason({ ...rule, tickers: ['aapl'] }, story), null);
   });
 
-  it('layer-3 PRO gate still guards delivery for every matched rule (fail-closed isUserPro)', () => {
-    // The batch PRO check runs on the SAME `matching` set the ticker filter
-    // built, and the per-rule delivery loop skips non-PRO users. Watchlist
-    // events route through this unchanged code path.
+  it('layer-3 tier gate still guards delivery for every matched rule (fail-closed getUserTier)', () => {
+    // The batch tier check runs on the SAME `matching` set the ticker filter
+    // built, and the per-rule delivery loop clamps free-tier (and
+    // fail-closed) users to the free alert ladder (#4273). Watchlist events
+    // route through this unchanged code path.
     assert.match(
       relaySrc,
       /const uniqueUserIds = \[\.\.\.new Set\(matching\.map\(r => r\.userId\)\)\]/,
-      'batch PRO check must be derived from the matching set',
+      'batch tier check must be derived from the matching set',
     );
     assert.match(
       relaySrc,
-      /uniqueUserIds\.map\(async uid => \[uid, await isUserPro\(uid\)\]\)/,
-      'isUserPro must be consulted per unique user',
+      /uniqueUserIds\.map\(async uid => \[uid, await getUserTier\(uid\)\]\)/,
+      'getUserTier must be consulted per unique user',
     );
     assert.match(
       relaySrc,
-      /if \(!proSet\.has\(rule\.userId\)\) continue;/,
-      'delivery loop must skip users that failed the PRO gate',
+      /if \(!freeTierAllowsEvent\(userTier, eventSeverity\)\) \{/,
+      'delivery loop must clamp free-tier users to the free-ladder severity',
+    );
+    assert.match(
+      relaySrc,
+      /freeTierAllowsChannel\(userTier, c\.channelType\)/,
+      'channel delivery must clamp free-tier users to the free channel set',
+    );
+    assert.match(
+      relaySrc,
+      /freeTierCountryScope\(userTier, rule\.countries\)/,
+      'delivery loop must clamp free-tier rules to an explicit country scope',
+    );
+    assert.match(
+      relaySrc,
+      /freeTierAllowsChannel\(drainTier, c\.channelType\)/,
+      'the quiet-hours held-queue drain must apply the same free channel clamp',
+    );
+    // Strix review 4 on #10303: held entries are clamped at HOLD time against
+    // the tier the account had then, so the drain must re-apply the severity
+    // and country rungs against the CURRENT tier, or a downgrade inside the
+    // hold window delivers past-the-ladder alerts.
+    assert.match(
+      relaySrc,
+      /freeTierAllowsEvent\(drainTier, ev\.severity \?\? 'high'\)/,
+      'the held-queue drain must re-apply the free severity rung per entry',
+    );
+    assert.match(
+      relaySrc,
+      /drainTier < 1 && \(!drainScope\.ok \|\| !eventMatchesDeliveryScope\(ev, \{ countries: drainScope\.countries \}\)\)/,
+      'the held-queue drain must re-apply the free country rung per entry',
+    );
+    // Strix review 6 on #10303: the AI-composed impact block is paid output;
+    // tier-0 delivery must not trigger LLM inference.
+    assert.match(
+      relaySrc,
+      /AI_IMPACT_ENABLED && userTier >= 1/,
+      'AI impact generation must be gated on a paid tier',
     );
   });
 });

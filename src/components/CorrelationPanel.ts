@@ -3,15 +3,15 @@ import { t } from '@/services/i18n';
 import type { ConvergenceCard, CorrelationDomain } from '@/services/correlation-engine';
 import { h, replaceChildren } from '@/utils/dom-utils';
 import { readableTextColor } from '@/utils/contrast';
-import { getHydratedData } from '@/services/bootstrap';
-
-let correlationBootstrap: Record<string, ConvergenceCard[]> | null | undefined;
-function getCorrelationBootstrap(): Record<string, ConvergenceCard[]> | null {
-  if (correlationBootstrap === undefined) {
-    correlationBootstrap = (getHydratedData('correlationCards') as Record<string, ConvergenceCard[]>) ?? null;
-  }
-  return correlationBootstrap;
-}
+import {
+  publishLocalCorrelationCards,
+  subscribeCorrelationSnapshot,
+  type CorrelationSnapshotState,
+} from '@/services/correlation-snapshots';
+import { describeFreshness } from '@/services/persistent-cache';
+import { hasPremiumAccess } from '@/services/panel-gating';
+import type { ResolvedScope } from '@/services/tab-focus';
+import { PanelScopeFilter, focusedEmptyNode, scopeTagNode, type ScopeRow } from './panel-scope-filter';
 
 // Score-badge BACKGROUND colors. Badge text color is chosen per-background via
 // readableTextColor() so it clears WCAG AA on each: white on the dark `low`
@@ -30,29 +30,57 @@ const TREND_ICONS: Record<string, { symbol: string; color: string }> = {
   'de-escalating': { symbol: '\u2193', color: '#44cc44' },
 };
 
+const SIGNAL_TYPE_KEYS: Record<string, string> = {
+  military_flight: 'militaryFlight',
+  military_vessel: 'militaryVessel',
+  ais_gap: 'aisGap',
+  conflict_event: 'conflictEvent',
+  escalation_outage: 'escalationOutage',
+  news_severity: 'newsSeverity',
+  sanctions_news: 'sanctionsNews',
+  market_move: 'marketMove',
+  commodity_spike: 'commoditySpike',
+  earthquake: 'earthquake',
+  infra_outage: 'infraOutage',
+};
+
+function signalTypeLabel(type: string): string {
+  return t(`components.correlation.signalTypes.${SIGNAL_TYPE_KEYS[type] ?? 'other'}`);
+}
+
 export class CorrelationPanel extends Panel {
   private domain: CorrelationDomain;
   private expandedCard: string | null = null;
   private onMapNavigate?: (lat: number, lon: number) => void;
   private boundUpdateHandler: EventListener;
-  private hasLiveData = false;
+  private snapshotState: CorrelationSnapshotState = { status: 'loading', snapshot: null, offline: false };
+  private stopSnapshots?: () => void;
   private correlationDestroyed = false;
+  private assessmentHandler?: (cards: ConvergenceCard[]) => void;
+  private assessedCards?: ConvergenceCard[];
+  private renderedCards?: ConvergenceCard[];
+  private renderedOrigin?: 'seed' | 'local';
+  // Dashboard focus (#10453): every card carries the ISO codes of its countries.
+  protected readonly scopeFilter: PanelScopeFilter;
 
   constructor(id: string, title: string, domain: CorrelationDomain, infoTooltip?: string) {
     super({ id, title, showCount: true, infoTooltip });
     this.domain = domain;
+    this.scopeFilter = new PanelScopeFilter({ content: this.content, onChange: () => this.render() });
 
-    const bootstrap = getCorrelationBootstrap();
-    const cards = bootstrap?.[domain] ?? null;
-    if (cards && cards.length > 0) {
-      this.cards = cards;
-      this.requestRender();
-    } else {
-      this.showLoading(t('components.correlation.loading'));
-    }
+    this.requestRender();
+    this.observeNearViewport(() => {
+      if (this.correlationDestroyed) return;
+      this.stopSnapshots = subscribeCorrelationSnapshot(this.domain, state => {
+        const newData = state.snapshot !== null && state.snapshot !== this.snapshotState.snapshot;
+        this.snapshotState = state;
+        this.requestAssessments();
+        this.requestRender(false, newData);
+      });
+    }, 400);
 
     this.boundUpdateHandler = ((e: CustomEvent) => {
-      if (e.detail?.domains?.includes(this.domain)) {
+      if (e.detail?.assessmentUpdate && e.detail?.domains?.includes(this.domain)) {
         this.requestRender();
       }
     }) as EventListener;
@@ -61,12 +89,45 @@ export class CorrelationPanel extends Panel {
 
   override destroy(): void {
     this.correlationDestroyed = true;
+    this.assessmentHandler?.([]);
+    this.stopSnapshots?.();
     document.removeEventListener('wm:correlation-updated', this.boundUpdateHandler);
     super.destroy();
   }
 
+  public override applyScope(scope: ResolvedScope | null): void {
+    // A redraw must not erase a load failure, including one that arrives
+    // after this redraw is queued and before its frame.
+    if (this.scopeFilter.setScope(scope) && !this.showingLoadFailure) this.requestRender(true, false);
+  }
+
+  public override showLoading(message?: string): void {
+    this.scopeFilter?.hideStrip();
+    super.showLoading(message);
+  }
+
+  public override showError(message?: string, onRetry?: () => void, autoRetrySeconds?: number): void {
+    this.queuedRecoversFromFailure = false;
+    this.scopeFilter.hideStrip();
+    super.showError(message, onRetry, autoRetrySeconds);
+  }
+
   setMapNavigateHandler(handler: (lat: number, lon: number) => void): void {
     this.onMapNavigate = handler;
+  }
+
+  setAssessmentHandler(handler: (cards: ConvergenceCard[]) => void): void {
+    this.assessmentHandler = handler;
+    this.assessedCards = undefined;
+    this.requestAssessments();
+    this.requestRender();
+  }
+
+  private requestAssessments(): void {
+    const cards = this.snapshotState.snapshot?.cards;
+    if (!this.assessmentHandler || cards === this.assessedCards) return;
+    this.assessedCards = cards;
+    this.assessmentHandler(cards ?? []);
   }
 
   protected navigateToMap(lat: number, lon: number): void {
@@ -78,49 +139,100 @@ export class CorrelationPanel extends Panel {
   }
 
   private pendingRender = false;
+  private forceRender = false;
+  private queuedRecoversFromFailure = false;
   /** Schedule a safe redraw for subclasses that install deferred panel data. */
-  protected requestRender(): void {
+  protected requestRender(force = true, recoversFromFailure = false): void {
+    this.forceRender ||= force;
+    this.queuedRecoversFromFailure ||= recoversFromFailure;
     if (this.correlationDestroyed || this.pendingRender) return;
     this.pendingRender = true;
     requestAnimationFrame(() => {
       this.pendingRender = false;
       if (this.correlationDestroyed) return;
-      this.render();
+      const force = this.forceRender;
+      const recovers = this.queuedRecoversFromFailure;
+      this.forceRender = false;
+      this.queuedRecoversFromFailure = false;
+      // Only data may replace a load failure; a focus redraw may not.
+      if (!recovers && this.showingLoadFailure) return;
+      this.render(force);
     });
   }
 
-  private cards: ConvergenceCard[] = [];
-
   updateCards(cards: ConvergenceCard[]): void {
-    this.hasLiveData = true;
-    this.cards = cards;
-    this.requestRender();
+    if (!this.correlationDestroyed) publishLocalCorrelationCards(this.domain, cards);
   }
 
-  private render(): void {
+  private render(force = true): void {
     if (this.correlationDestroyed) return;
-    const cards = this.cards;
-    this.setCount(cards.length);
+    const cards = this.snapshotState.snapshot?.cards ?? [];
+    const view = this.scopeFilter.view(cards, (card) => card.countries);
+    this.setCount(view.rows.length);
+    if (this.countEl) this.countEl.hidden = this.snapshotState.snapshot === null;
+    const { snapshot, status, offline } = this.snapshotState;
+    const notice = h('div', {
+      className: 'correlation-status',
+      role: 'status',
+      style: 'padding:8px;opacity:0.7;font-size:calc(10px * var(--wm-panel-effective-scale, 1));line-height:1.5;',
+    }, snapshot
+      ? t(`components.correlation.${offline ? 'savedOffline' : status === 'updating' ? 'saved' : 'updated'}`, {
+        time: describeFreshness(snapshot.computedAt),
+      })
+      : t(`components.correlation.${offline ? 'offline' : status === 'loading' ? 'loading' : 'waiting'}`),
+    ...(snapshot?.origin === 'local' ? [h('div', {}, t('components.correlation.localSignals'))] : []));
+
+    const emptyText = t(`components.correlation.${status === 'updating' ? 'emptySaved' : 'empty'}`);
+    const previousNotice = this.content.querySelector('.correlation-status');
+    if (!force && !this.isLocked && previousNotice
+      && this.renderedCards === snapshot?.cards && this.renderedOrigin === snapshot?.origin) {
+      // Updating age/connectivity must not replace focused controls or reset scrolling.
+      previousNotice.replaceChildren(...notice.childNodes);
+      const empty = this.content.querySelector('.correlation-empty');
+      if (empty) empty.textContent = emptyText;
+      return;
+    }
+    this.renderedCards = snapshot?.cards;
+    this.renderedOrigin = snapshot?.origin;
     const supplement = this.renderSupplement();
+
+    if (!snapshot || cards.length === 0) this.scopeFilter.hideStrip();
+    else this.scopeFilter.renderStrip(view);
+
+    if (!snapshot) {
+      this.setContentNodes(...(supplement ? [supplement] : []), notice);
+      return;
+    }
 
     if (cards.length === 0) {
       const empty = h('div', {
         className: 'correlation-empty',
         style: 'padding:12px;text-align:center;opacity:0.5;font-size:calc(11px * var(--wm-panel-effective-scale, 1));',
-      }, t('components.correlation.empty'));
-      replaceChildren(this.content, ...(supplement ? [supplement] : []), empty);
+      }, emptyText);
+      // #6557: a settled empty state is authoritative content.
+      this.setContentNodes(...(supplement ? [supplement] : []), notice, empty);
       return;
     }
 
-    const cardEls = cards.map(card => this.buildCard(card));
-    replaceChildren(
-      this.content,
+    if (view.emptyByFocus) {
+      this.setContentNodes(
+        ...(supplement ? [supplement] : []),
+        notice,
+        focusedEmptyNode(t('focus.filter.emptyCorrelation')),
+      );
+      return;
+    }
+
+    const cardEls = view.rows.map(row => this.buildCard(row.item, row));
+    // #6557: success render with data — route through the sanctioned helper.
+    this.setContentNodes(
       ...(supplement ? [supplement] : []),
+      notice,
       h('div', { className: 'correlation-cards' }, ...cardEls),
     );
   }
 
-  private buildCard(card: ConvergenceCard): HTMLElement {
+  private buildCard(card: ConvergenceCard, row?: ScopeRow<ConvergenceCard>): HTMLElement {
     const scoreColor = card.score >= 70 ? SCORE_COLORS.critical
       : card.score >= 50 ? SCORE_COLORS.high
       : card.score >= 30 ? SCORE_COLORS.medium
@@ -139,6 +251,7 @@ export class CorrelationPanel extends Panel {
       h('span', {
         style: 'flex:1;font-size:calc(11px * var(--wm-panel-effective-scale, 1));line-height:1.3;',
       }, card.title),
+      scopeTagNode(row),
       h('span', {
         style: 'font-size:calc(9px * var(--wm-panel-effective-scale, 1));opacity:0.6;white-space:nowrap;',
       }, t('components.correlation.signals', { count: card.signals.length })),
@@ -172,7 +285,7 @@ export class CorrelationPanel extends Panel {
       h('div', { style: 'padding:2px 0;display:flex;gap:6px;align-items:baseline;' },
         h('span', {
           style: 'font-size:calc(8px * var(--wm-panel-effective-scale, 1));padding:1px 4px;border-radius:3px;background:rgba(255,255,255,0.1);white-space:nowrap;',
-        }, s.type),
+        }, signalTypeLabel(s.type)),
         h('span', { style: 'opacity:0.8;' }, s.label),
       ),
     );
@@ -181,11 +294,11 @@ export class CorrelationPanel extends Panel {
       h('div', { style: 'padding:6px 0;' }, ...signalList),
     ];
 
-    if (card.assessment) {
+    if (card.assessment && hasPremiumAccess()) {
       children.push(h('div', {
         style: 'padding:6px 8px;margin:4px 0;border-radius:4px;background:rgba(100,150,255,0.08);border-left:2px solid rgba(100,150,255,0.3);font-size:calc(10px * var(--wm-panel-effective-scale, 1));line-height:1.4;',
       }, card.assessment));
-    } else if (card.score >= 60 && this.hasLiveData) {
+    } else if (card.score >= 60 && this.assessmentHandler && hasPremiumAccess()) {
       children.push(h('div', {
         style: 'padding:4px;font-size:calc(9px * var(--wm-panel-effective-scale, 1));opacity:0.4;font-style:italic;',
       }, t('components.correlation.analyzing')));

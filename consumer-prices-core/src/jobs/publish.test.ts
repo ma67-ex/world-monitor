@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 
 const mockBuildCoverageSnapshot = vi.fn();
 const mockBuildFreshnessSnapshot = vi.fn();
@@ -6,12 +9,16 @@ const mockBuildOverviewSnapshot = vi.fn();
 const mockBuildMoversSnapshot = vi.fn();
 const mockBuildCategoriesSnapshot = vi.fn();
 const mockFetch = vi.fn();
+const mockLoadBaskets = vi.fn();
+const mockBuildRetailerSpreadSnapshot = vi.fn();
+const mockGetBasketRows = vi.fn();
 
 vi.mock('../config/loader.js', () => ({
   loadAllRetailerConfigs: () => [{ slug: 'retailer-a', marketCode: 'ae', enabled: true }],
-  loadAllBasketConfigs: () => [],
+  loadAllBasketConfigs: mockLoadBaskets,
 }));
 vi.mock('../db/client.js', () => ({ closePool: vi.fn() }));
+vi.mock('../basket-observations.js', () => ({ getBasketRows: mockGetBasketRows }));
 vi.mock('../snapshots/coverage.js', () => ({ buildCoverageSnapshot: mockBuildCoverageSnapshot }));
 vi.mock('../snapshots/worldmonitor.js', () => ({
   buildFreshnessSnapshot: mockBuildFreshnessSnapshot,
@@ -19,10 +26,10 @@ vi.mock('../snapshots/worldmonitor.js', () => ({
   buildMoversSnapshot: mockBuildMoversSnapshot,
   buildCategoriesSnapshot: mockBuildCategoriesSnapshot,
   buildBasketSeriesSnapshot: vi.fn(),
-  buildRetailerSpreadSnapshot: vi.fn(),
+  buildRetailerSpreadSnapshot: mockBuildRetailerSpreadSnapshot,
 }));
 
-const { publishAll } = await import('./publish.js');
+const { publishAll, runPublishCli } = await import('./publish.js');
 
 const coverage = {
   marketCode: 'ae',
@@ -32,7 +39,7 @@ const coverage = {
   failedPages: 4,
   completionRatio: 0.6667,
   rejectedCount: 3,
-  failureReasons: { 'missing-price': 2, 'provider-error': 1 },
+  failureReasons: { 'missing-price': 2, 'provider-error': 1, 'source-http-error': 1 },
   status: 'partial',
   minimumCompletionRatio: 0.5,
   retailers: [{ slug: 'retailer-a', name: 'Retailer A', coverageStatus: 'partial', rejectedCount: 3 }],
@@ -40,11 +47,20 @@ const coverage = {
 };
 
 function commands() {
-  return mockFetch.mock.calls.map(([, init]) => JSON.parse(init.body as string));
+  // Project the actual atomic write into the two persisted values checked below.
+  return mockFetch.mock.calls.flatMap(([, init]) => {
+    const command = JSON.parse(init.body as string);
+    if (command[0] === 'GET') return [];
+    if (command[0] !== 'EVAL') return [command];
+    return [['SET', command[3], command[5]], ['SET', command[4], command[7]]];
+  });
 }
 
 beforeEach(() => {
-  mockFetch.mockReset().mockResolvedValue({ ok: true, status: 200 });
+  mockFetch.mockReset().mockResolvedValue({ ok: true, status: 200, json: async () => ({ result: 1 }) });
+  mockLoadBaskets.mockReset().mockReturnValue([]);
+  mockGetBasketRows.mockReset().mockResolvedValue([]);
+  mockBuildRetailerSpreadSnapshot.mockReset().mockResolvedValue({ retailers: [], spreadPct: 0 });
   mockBuildCoverageSnapshot.mockReset().mockResolvedValue(coverage);
   mockBuildFreshnessSnapshot.mockReset().mockResolvedValue({ marketCode: 'ae', retailers: [{ freshnessMin: 10 }] });
   mockBuildOverviewSnapshot.mockReset().mockResolvedValue({ marketCode: 'ae' });
@@ -71,14 +87,73 @@ describe('consumer-price coverage publication', () => {
       failedPages: 4,
       completionRatio: 0.6667,
       rejectedCount: 3,
-      failureReasons: { 'missing-price': 2, 'provider-error': 1 },
+      failureReasons: { 'missing-price': 2, 'provider-error': 1, 'source-http-error': 1 },
     });
     expect(JSON.parse(coverageMeta[2]).coverage.retailers).toEqual(coverage.retailers);
   });
 
+  it('pairs a recovered category count with retained metadata when scraper freshness is over budget', async () => {
+    const retained = { fetchedAt: 1793244912466, recordCount: 0, coverage: { status: 'partial', retailers: [] } };
+    mockBuildFreshnessSnapshot.mockResolvedValue({ retailers: [{ freshnessMin: 200 }] });
+    mockBuildCategoriesSnapshot.mockResolvedValue({ categories: [{ slug: 'bread' }] });
+    mockFetch.mockImplementation(async (_url, init) => {
+      const command = JSON.parse(init.body);
+      return Response.json({ result: command[0] === 'GET' ? JSON.stringify(retained) : 1 });
+    });
+
+    await publishAll();
+
+    const writes = commands();
+    for (const range of ['7d', '30d', '90d']) {
+      const key = `consumer-prices:categories:ae:${range}`;
+      const payload = writes.find((command) => command[1] === key);
+      const meta = writes.find((command) => command[1] === `seed-meta:${key}`);
+      expect(JSON.parse(payload[2]).data.categories).toHaveLength(1);
+      expect(JSON.parse(meta[2])).toEqual({ ...retained, recordCount: 1 });
+    }
+  });
+
+  it('publishes each mover range with its own payload and seed metadata', async () => {
+    mockBuildMoversSnapshot.mockImplementation(async (marketCode, days) => ({
+      marketCode, range: `${days}d`, risers: [{ productId: `up-${days}` }], fallers: [],
+    }));
+    await publishAll();
+    const writes = commands();
+    for (const days of [7, 30, 90]) {
+      const payload = writes.find((command) => command[1] === `consumer-prices:movers:ae:${days}d`);
+      expect(JSON.parse(payload[2]).data).toMatchObject({ range: `${days}d`, risers: [{ productId: `up-${days}` }] });
+      const meta = writes.find((command) => command[1] === `seed-meta:consumer-prices:movers:ae:${days}d`);
+      expect(JSON.parse(meta[2]).recordCount).toBe(1);
+    }
+  });
+
+  it('skips the movers write without failing the run when every candidate is gated', async () => {
+    // seed-consumer-prices-publish, 2026-09-04: market `in` returned one 30d
+    // candidate, it was gated, and the throw exited the whole cron 1 while
+    // every other market published fine. A null snapshot is a data-quality
+    // skip, so the run stays green AND the last-good key is never overwritten
+    // -- publishing zero movers would stamp the envelope OK via recordCount's
+    // floor of 1 and read as a fresh, quiet market.
+    mockBuildMoversSnapshot.mockReset().mockResolvedValue(null);
+
+    await expect(publishAll()).resolves.toBeUndefined();
+
+    const writes = commands();
+    const moversWrite = writes.some(
+      (command) => command[0] === 'SET' && String(command[1]).startsWith('consumer-prices:movers:'),
+    );
+    const moversMeta = writes.some(
+      (command) => command[0] === 'SET' && String(command[1]).startsWith('seed-meta:consumer-prices:movers:'),
+    );
+    expect(moversWrite).toBe(false);
+    expect(moversMeta).toBe(false);
+    // the rest of the market still publishes
+    expect(writes.some((command) => command[0] === 'SET' && command[1] === 'consumer-prices:overview:ae')).toBe(true);
+  });
+
   it('keeps the last-good coverage key untouched when coverage rebuild fails, then recovers on the next run', async () => {
     mockBuildCoverageSnapshot.mockRejectedValueOnce(new Error('coverage query unavailable'));
-    await publishAll();
+    await expect(publishAll()).rejects.toThrow('1 snapshot publication failed');
 
     let writes = commands();
     expect(writes.some((command) => command[0] === 'DEL' && command[1] === 'consumer-prices:coverage:ae')).toBe(false);
@@ -90,96 +165,131 @@ describe('consumer-price coverage publication', () => {
     writes = commands();
     expect(writes.some((command) => command[0] === 'SET' && command[1] === 'consumer-prices:coverage:ae')).toBe(true);
   });
+
+  it('fails the CLI after a caught snapshot write error without printing its success marker', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('redis unavailable'));
+    const previousExitCode = process.exitCode;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    process.exitCode = undefined;
+
+    try {
+      await expect(runPublishCli()).rejects.toThrow('1 snapshot publication failed');
+      expect(process.exitCode).toBe(1);
+      expect(log.mock.calls.some(([message]) => String(message).includes('=== Done'))).toBe(false);
+      expect(error).toHaveBeenCalled();
+    } finally {
+      process.exitCode = previousExitCode;
+      log.mockRestore();
+      error.mockRestore();
+    }
+  });
 });
 
-// #6059 — WorldMonitor health softens the deploy-before-cron gap to a bounded
-// ROLLOUT_PENDING warn and revokes that softening permanently the instant this
-// marker appears. Writing it too eagerly re-arms the false critical; writing it
-// with a TTL lets an activated market read as pending-activation again.
-describe('coverage schema activation marker', () => {
-  const ACTIVATION_KEY = 'seed-activated:consumer-prices:coverage:v1:ae';
-  const activationWrites = () =>
-    commands().filter((command) => command[0] === 'SET' && command[1] === ACTIVATION_KEY);
+const redisCli = process.env.REDIS_CLI_BIN || 'redis-cli';
+const redisServer = process.env.REDIS_SERVER_BIN || 'redis-server';
+const hasRedis = spawnSync(redisCli, ['--version']).status === 0 && spawnSync(redisServer, ['--version']).status === 0;
 
-  it('SETs a durable versioned marker after publishing real coverage', async () => {
+it.skipIf(!hasRedis && !process.env.CI)('reconciles recovered and empty category counts without renewing retained clocks or expiry (real Redis)', async () => {
+  expect(hasRedis, 'CI requires redis-server and redis-cli for publisher expiry/concurrency proof').toBe(true);
+  const dir = mkdtempSync('/tmp/consumer-publish-');
+  const socket = join(dir, 'redis.sock');
+  const started = spawnSync(redisServer, ['--port', '0', '--unixsocket', socket, '--save', '', '--appendonly', 'no',
+    '--daemonize', 'yes', '--pidfile', join(dir, 'pid'), '--logfile', join(dir, 'log')], { encoding: 'utf8' });
+  expect(started.status, started.stderr).toBe(0);
+  const command = (...args: unknown[]) => JSON.parse(execFileSync(redisCli,
+    ['-s', socket, '--json', ...args.map(String)], { encoding: 'utf8' }));
+  const key = 'consumer-prices:categories:ae:30d';
+  const metaKey = `seed-meta:${key}`;
+  try {
+    let ready = false;
+    for (let i = 0; i < 100 && !ready; i++) {
+      try { ready = command('PING') === 'PONG'; } catch { /* socket not ready */ }
+      if (!ready) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(ready).toBe(true);
+    mockFetch.mockImplementation(async (_url, init) => Response.json({ result: command(...JSON.parse(init.body)) }));
+    await publishAll(); // Fresh scraper, failed aggregate: a real empty snapshot.
+    expect(JSON.parse(command('GET', metaKey)).recordCount).toBe(0);
+
+    const retained = { fetchedAt: 1793244912466, recordCount: 0,
+      coverage: { status: 'partial', failedPages: 1, retailers: [], failureReasons: { 'source-http-error': 1 } } };
+    command('SET', metaKey, JSON.stringify(retained), 'EX', 300);
+    const expiry = command('PEXPIRETIME', metaKey);
+    mockBuildFreshnessSnapshot.mockResolvedValue({ marketCode: 'ae', retailers: [{ freshnessMin: 200 }] });
+    mockBuildCategoriesSnapshot.mockResolvedValue({ marketCode: 'ae', categories: [{ slug: 'bread' }] });
+    await publishAll(); // Later aggregate recovers after the freshness gate closes.
+    const recovered = JSON.parse(command('GET', metaKey));
+    expect(JSON.parse(command('GET', key)).data.categories).toHaveLength(1);
+    expect(recovered).toEqual({ ...retained, recordCount: 1 });
+    expect(command('PEXPIRETIME', metaKey)).toBe(expiry);
+
+    mockBuildCategoriesSnapshot.mockResolvedValue({ categories: [] });
+    await publishAll(); // A later empty replacement must not retain a positive count either.
+    expect(JSON.parse(command('GET', metaKey))).toEqual(retained);
+    expect(command('PEXPIRETIME', metaKey)).toBe(expiry);
+
+    command('DEL', metaKey);
     await publishAll();
+    expect(command('GET', metaKey)).toBeNull(); // No invented clock on a first stale publication.
+    command('SET', metaKey, 'invalid-json', 'EX', 60);
+    await publishAll();
+    expect(command('GET', metaKey)).toBe('invalid-json');
 
-    const writes = activationWrites();
-    expect(writes).toHaveLength(1);
-    const [, , value, ...rest] = writes[0];
-    expect(rest).toEqual([]); // no EX — must outlive the 7d seed-meta TTL
-    expect(JSON.parse(value)).toMatchObject({
-      schemaVersion: 1,
-      marketCode: 'ae',
-      attemptedPages: 12,
+    // Another publisher wins between GET and EVAL. The losing writer must not
+    // replace either half or revive the older clock.
+    const winner = { fetchedAt: 1793251925853, recordCount: 2 };
+    command('SET', metaKey, JSON.stringify(retained), 'EX', 300);
+    let replaced = false;
+    mockFetch.mockImplementation(async (_url, init) => {
+      const args = JSON.parse(init.body);
+      const result = command(...args);
+      if (!replaced && args[0] === 'GET' && args[1] === metaKey) {
+        replaced = true;
+        command('SET', key, JSON.stringify({ data: { categories: [{ slug: 'winner' }, { slug: 'other' }] } }));
+        command('SET', metaKey, JSON.stringify(winner), 'EX', 100);
+      }
+      return Response.json({ result });
     });
+    await expect(publishAll()).rejects.toThrow('1 snapshot publication failed');
+    expect(JSON.parse(command('GET', metaKey))).toEqual(winner);
+    expect(JSON.parse(command('GET', key)).data.categories).toHaveLength(2);
+  } finally {
+    try { command('SHUTDOWN', 'NOSAVE'); } catch { /* shutdown closes the socket */ }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('fails publication on an HTTP 200 Redis command error', async () => {
+  mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ error: 'ERR command failed' }) });
+  await expect(publishAll()).rejects.toThrow('1 snapshot publication failed');
+});
+
+it('prices the overview and the retailer comparison from one read of the basket', async () => {
+  mockLoadBaskets.mockReturnValue([{ slug: 'essentials-ae', marketCode: 'ae' }]);
+  await publishAll();
+
+  const overviewLoader = mockBuildOverviewSnapshot.mock.calls[0][1];
+  const spreadLoader = mockBuildRetailerSpreadSnapshot.mock.calls[0][2];
+  expect(overviewLoader).toBeTypeOf('function');
+  expect(spreadLoader).toBe(overviewLoader);
+});
+
+it('retries the basket read for the retailer comparison when the overview read failed', async () => {
+  mockLoadBaskets.mockReturnValue([{ slug: 'essentials-ae', marketCode: 'ae' }]);
+  mockGetBasketRows.mockRejectedValueOnce(new Error('db down')).mockResolvedValueOnce([]);
+  mockBuildOverviewSnapshot.mockImplementation(async (_market, load) => {
+    await load('essentials-ae', 'ae');
+    return { marketCode: 'ae' };
+  });
+  mockBuildRetailerSpreadSnapshot.mockImplementation(async (_market, slug, load) => {
+    await load(slug, 'ae');
+    return { retailers: [], spreadPct: 0 };
   });
 
-  it('orders the marker after the coverage snapshot it attests to', async () => {
-    await publishAll();
+  await expect(publishAll()).rejects.toThrow('1 snapshot publication failed');
 
-    const sequence = commands().map((command) => command[1]);
-    expect(sequence.indexOf(ACTIVATION_KEY)).toBeGreaterThan(
-      sequence.indexOf('consumer-prices:coverage:ae'),
-    );
-  });
-
-  it('withholds the marker when the market has never attempted a page', async () => {
-    mockBuildCoverageSnapshot.mockResolvedValue({ ...coverage, attemptedPages: 0, completedPages: 0, completionRatio: null });
-    await publishAll();
-
-    expect(activationWrites()).toHaveLength(0);
-    expect(commands().some((command) => command[1] === 'consumer-prices:coverage:ae')).toBe(true);
-  });
-
-  it('withholds the marker when the coverage snapshot could not be built', async () => {
-    mockBuildCoverageSnapshot.mockRejectedValueOnce(new Error('coverage query unavailable'));
-    await publishAll();
-
-    expect(activationWrites()).toHaveLength(0);
-  });
-
-  it('attributes a marker-write failure to the marker, not to the coverage publish', async () => {
-    // `publishAll() resolves` and `overview still published` are NOT evidence for
-    // the inner try/catch: overview publishes from its own independent try, and
-    // without the inner catch the error is simply swallowed by the enclosing
-    // coverage catch, so publishAll() resolves either way. Verified by deleting
-    // the inner catch — every assertion of that shape stayed green. The only
-    // observable the inner catch actually produces is WHICH failure gets logged:
-    // with it, `coverage-activation:ae failed`; without it, the coverage snapshot
-    // is falsely blamed via `coverage:ae failed` and pagesFailed is incremented
-    // for a coverage write that in fact succeeded.
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockFetch.mockImplementation(async (_url: string, init: { body: string }) => {
-      const command = JSON.parse(init.body);
-      if (command[1] === ACTIVATION_KEY) return { ok: false, status: 500 };
-      return { ok: true, status: 200 };
-    });
-
-    await expect(publishAll()).resolves.toBeUndefined();
-
-    const logged = errSpy.mock.calls.map((call) => call.join(' '));
-    expect(logged.some((line) => line.includes('coverage-activation:ae failed'))).toBe(true);
-    expect(
-      logged.some((line) => /coverage:ae failed/.test(line)),
-      'the coverage snapshot published fine — blaming it would send an operator to the wrong subsystem',
-    ).toBe(false);
-    expect(commands().some((command) => command[1] === 'consumer-prices:overview:ae')).toBe(true);
-    errSpy.mockRestore();
-  });
-
-  it('withholds the marker when the coverage snapshot itself fails to persist', async () => {
-    // Distinct from the build-failure case above: here buildCoverageSnapshot
-    // succeeds but the Redis SET of the coverage key throws. The marker must not
-    // claim activation for a snapshot that never landed.
-    mockFetch.mockImplementation(async (_url: string, init: { body: string }) => {
-      const command = JSON.parse(init.body);
-      if (command[1] === 'consumer-prices:coverage:ae') return { ok: false, status: 500 };
-      return { ok: true, status: 200 };
-    });
-
-    await publishAll();
-
-    expect(activationWrites()).toHaveLength(0);
-  });
+  expect(mockGetBasketRows).toHaveBeenCalledTimes(2);
+  const spreadWrite = commands().find((command) => command[0] === 'SET' && command[1] === 'consumer-prices:retailer-spread:ae:essentials-ae');
+  expect(spreadWrite).toBeDefined();
 });

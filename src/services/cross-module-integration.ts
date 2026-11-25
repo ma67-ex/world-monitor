@@ -2,10 +2,10 @@ import { getLocationName, type GeoConvergenceAlert } from './geo-convergence';
 import type { CountryScore } from './country-instability';
 import { getLatestSanctionsPressure, type SanctionsPressureResult } from './sanctions-pressure';
 import { getLatestRadiationWatch, type RadiationObservation } from './radiation';
-import type { CascadeResult, CascadeImpactLevel } from '@/types';
+import type { CascadeImpactLevel } from '@/types';
 import { isInLearningMode } from './country-instability';
 import { getCachedCountryScores, isElevatedCiiScore } from './cached-risk-scores';
-import { getCountryNameByCode } from './country-geometry';
+import { getCountryAtCoordinates, getCountryNearCoordinates, getCountryNameByCode } from './country-geometry';
 import { t } from '@/services/i18n';
 import type { TheaterPostureSummary } from '@/services/military-surge';
 import { detectCiiScoreChanges } from './cii-score-changes';
@@ -71,7 +71,7 @@ export interface RadiationAlert {
   unit: string;
   baselineValue: number;
   delta: number;
-  zScore: number;
+  zScore: number | null;
   severity: 'elevated' | 'spike';
   confidence: RadiationObservation['confidence'];
   corroborated: boolean;
@@ -89,7 +89,7 @@ export interface RadiationAlert {
 
 export interface StrategicRiskOverview {
   convergenceAlerts: number;
-  avgCIIDeviation: number;
+  topCIIScore: number;
   infrastructureIncidents: number;
   compositeScore: number;
   trend: 'escalating' | 'stable' | 'de-escalating';
@@ -108,11 +108,6 @@ const ALERT_MERGE_DISTANCE_KM = 200;
 
 function getAuthoritativeCIIScores(): CountryScore[] {
   return getCachedCountryScores();
-}
-
-let alertIdCounter = 0;
-function generateAlertId(): string {
-  return `alert-${Date.now()}-${++alertIdCounter}`;
 }
 
 function haversineDistance(
@@ -140,13 +135,6 @@ function getPriorityFromCIIChange(change: number, level: CountryScore['level']):
   if (level === 'critical') return 'critical';
   if (level === 'high' || absChange >= 30) return 'high';
   if (level === 'elevated' || absChange >= 15) return 'medium';
-  return 'low';
-}
-
-function getPriorityFromCascadeImpact(impact: CascadeImpactLevel, count: number): AlertPriority {
-  if (impact === 'critical' || (impact === 'high' && count >= 3)) return 'critical';
-  if (impact === 'high' || count >= 5) return 'high';
-  if (impact === 'medium' || count >= 3) return 'medium';
   return 'low';
 }
 
@@ -184,16 +172,19 @@ function getPriorityFromRadiation(observation: RadiationObservation, spikeCount:
 }
 
 function buildConvergenceAlert(convergence: GeoConvergenceAlert, alertId: string): UnifiedAlert {
-  const location = getCountriesNearLocation(convergence.lat, convergence.lon).join(', ') || 'Unknown';
+  const country = getCountryNearCoordinates(convergence.lat, convergence.lon);
+  const countries = country ? [country.code] : [];
+  const location = country?.name ?? getLocationName(convergence.lat, convergence.lon);
+  const types = convergence.types.map(type => t(`alerts.eventTypes.${type}`)).join(', ');
   return {
     id: alertId,
     type: 'convergence',
     priority: getPriorityFromConvergence(convergence.score, convergence.types.length),
     title: t('alerts.geoAlert', { location }),
-    summary: t('alerts.eventsDetected', { count: convergence.totalEvents, lat: convergence.lat.toFixed(1), lon: convergence.lon.toFixed(1) }),
+    summary: t('alerts.eventsDetected', { count: convergence.totalEvents, types, lat: convergence.lat.toFixed(1), lon: convergence.lon.toFixed(1) }),
     components: { convergence },
     location: { lat: convergence.lat, lon: convergence.lon },
-    countries: getCountriesNearLocation(convergence.lat, convergence.lon),
+    countries,
     timestamp: new Date(),
   };
 }
@@ -236,35 +227,6 @@ export function createCIIAlert(
     summary: t(summaryKey, { from: previousScore, to: currentScore, change: changeStr, driver }),
     components: { ciiChange },
     countries: [country],
-    timestamp: new Date(),
-  };
-
-  return addAndMergeAlert(alert);
-}
-
-export function createCascadeAlert(cascade: CascadeResult): UnifiedAlert | null {
-  if (cascade.countriesAffected.length === 0) return null;
-
-  const highestImpact = cascade.countriesAffected[0]?.impactLevel || 'low';
-  const cascadeAlert: CascadeAlert = {
-    sourceId: cascade.source.id,
-    sourceName: cascade.source.name,
-    sourceType: cascade.source.type,
-    countriesAffected: cascade.countriesAffected.length,
-    highestImpact,
-  };
-
-  const alert: UnifiedAlert = {
-    id: generateAlertId(),
-    type: 'cascade',
-    priority: getPriorityFromCascadeImpact(highestImpact, cascade.countriesAffected.length),
-    title: t('alerts.infraAlert', { name: cascade.source.name }),
-    summary: t('alerts.countriesAffected', { count: cascade.countriesAffected.length, impact: highestImpact }),
-    components: { cascade: cascadeAlert },
-    location: cascade.source.coordinates
-      ? { lat: cascade.source.coordinates[1], lon: cascade.source.coordinates[0] }
-      : undefined,
-    countries: cascade.countriesAffected.map(c => c.country),
     timestamp: new Date(),
   };
 
@@ -324,7 +286,7 @@ function getRadiationRank(observation: RadiationObservation): number {
   const confidenceRank = observation.confidence === 'high' ? 2 : observation.confidence === 'medium' ? 1 : 0;
   const corroborationBonus = observation.corroborated ? 300 : 0;
   const conflictPenalty = observation.conflictingSources ? 250 : 0;
-  return severityRank * 1000 + confidenceRank * 200 + corroborationBonus + observation.zScore * 100 + observation.delta - conflictPenalty;
+  return severityRank * 1000 + confidenceRank * 200 + corroborationBonus + (observation.zScore ?? 0) * 100 + observation.delta - conflictPenalty;
 }
 
 function createRadiationAlert(): UnifiedAlert | null {
@@ -342,7 +304,7 @@ function createRadiationAlert(): UnifiedAlert | null {
   const strongest = [...anomalies].sort((a, b) => getRadiationRank(b) - getRadiationRank(a))[0];
   if (!strongest) return null;
 
-  const countries = strongest.country ? [strongest.country] : getCountriesNearLocation(strongest.lat, strongest.lon);
+  const countries = strongest.country ? [strongest.country] : getCountriesAtLocation(strongest.lat, strongest.lon);
   const radiation: RadiationAlert = {
     siteId: strongest.id,
     siteName: strongest.location,
@@ -540,30 +502,9 @@ function addAndMergeAlert(alert: UnifiedAlert): UnifiedAlert {
   return alert;
 }
 
-function getCountriesNearLocation(lat: number, lon: number): string[] {
-  const countries: string[] = [];
-
-  const regionCountries = {
-    europe: ['DE', 'FR', 'GB', 'PL', 'UA'],
-    middle_east: ['IR', 'IL', 'SA', 'TR', 'SY', 'YE'],
-    east_asia: ['CN', 'TW', 'KP'],
-    south_asia: ['IN', 'PK', 'MM'],
-    americas: ['US', 'VE'],
-  } as const;
-
-  if (lat > 35 && lat < 70 && lon > -10 && lon < 40) {
-    countries.push(...regionCountries.europe);
-  } else if (lat > 15 && lat < 45 && lon > 25 && lon < 65) {
-    countries.push(...regionCountries.middle_east);
-  } else if (lat > 15 && lat < 55 && lon > 100 && lon < 145) {
-    countries.push(...regionCountries.east_asia);
-  } else if (lat > 5 && lat < 40 && lon > 65 && lon < 100) {
-    countries.push(...regionCountries.south_asia);
-  } else if (lat > -60 && lat < 70 && lon > -130 && lon < -30) {
-    countries.push(...regionCountries.americas);
-  }
-
-  return countries;
+function getCountriesAtLocation(lat: number, lon: number): string[] {
+  const country = getCountryAtCoordinates(lat, lon);
+  return country ? [country.code] : [];
 }
 
 export function checkCIIChanges(): UnifiedAlert[] {
@@ -604,8 +545,8 @@ function getHighestComponent(score: CountryScore): string {
 function updateAlerts(convergenceAlerts: GeoConvergenceAlert[]): void {
   // Prune old alerts (older than 24 hours)
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  while (alerts.length > 0 && alerts[0]!.timestamp.getTime() < cutoff) {
-    alerts.shift();
+  for (let i = alerts.length - 1; i >= 0; i--) {
+    if (alerts[i]!.timestamp.getTime() < cutoff) alerts.splice(i, 1);
   }
 
   // Add convergence alerts (addAndMergeAlert handles deduplication by stable ID)
@@ -702,7 +643,7 @@ export function calculateStrategicRiskOverview(
 
   return {
     convergenceAlerts: convergenceAlerts.length,
-    avgCIIDeviation: topCIIScore,  // Now shows top country score
+    topCIIScore,
     infrastructureIncidents: countInfrastructureIncidents(),
     compositeScore: composite,
     trend,

@@ -51,17 +51,20 @@ describe('UnifiedSettings account handoff', () => {
     const keysResult = new Promise((resolve) => {
       resolveKeys = resolve;
     });
+    let dismissedSecrets = 0;
     const Harness = transpileHarness(
       [
         extractMethod(settingsSource, 'private handleAccountIdentityChange('),
+        extractMethod(settingsSource, 'private closeDeletionDialog('),
         extractMethod(settingsSource, 'private captureAccountRequest('),
         extractMethod(settingsSource, 'private isAccountRequestCurrent('),
         extractMethod(settingsSource, 'private async loadApiKeys('),
       ],
-      ['getAuthState', 'listApiKeys'],
+      ['getAuthState', 'listApiKeys', 'dismissSecretCopyFallback'],
     )(
       () => ({ user: currentUserId ? { id: currentUserId } : null }),
       () => keysResult,
+      () => { dismissedSecrets += 1; },
     );
     const instance = new Harness();
     const renders = [];
@@ -72,7 +75,12 @@ describe('UnifiedSettings account handoff', () => {
     instance.apiKeys = [{ id: 'key-a' }];
     instance.apiKeysLoading = false;
     instance.apiKeysError = 'A error';
+    instance.secretCopySession = 0;
     instance.newlyCreatedKey = 'wm_a_plaintext';
+    instance.embedKeys = [{ id: 'embed-key-a' }];
+    instance.embedKeysLoading = true;
+    instance.embedKeysError = 'A embed error';
+    instance.newlyCreatedEmbedKey = 'wme_a_plaintext';
     instance.planLimitNotices = [{ _id: 'notice-a' }];
     instance.planLimitNoticesLoading = true;
     instance.mcpClients = [{ id: 'client-a' }];
@@ -85,8 +93,14 @@ describe('UnifiedSettings account handoff', () => {
         seatsReset += 1;
       },
     };
+    let enterpriseSeatsReset = 0;
+    instance.enterpriseSeatsSection = {
+      resetForAccountChange: () => {
+        enterpriseSeatsReset += 1;
+      },
+    };
     instance.overlay = { classList: { contains: () => true } };
-    instance.render = (loadAccountData) => renders.push(loadAccountData);
+    instance.rebuild = (runEnter) => renders.push(runEnter);
     let listRenders = 0;
     instance.renderApiKeysList = () => {
       listRenders += 1;
@@ -104,7 +118,12 @@ describe('UnifiedSettings account handoff', () => {
     assert.deepEqual(instance.apiKeys, []);
     assert.equal(instance.apiKeysLoading, false);
     assert.equal(instance.apiKeysError, '');
+    assert.equal(dismissedSecrets, 1, 'a revealed API key must leave the page with the account that owned it');
     assert.equal(instance.newlyCreatedKey, null);
+    assert.deepEqual(instance.embedKeys, []);
+    assert.equal(instance.embedKeysLoading, false);
+    assert.equal(instance.embedKeysError, '');
+    assert.equal(instance.newlyCreatedEmbedKey, null, 'a wme_ plaintext must never survive an account handoff');
     assert.deepEqual(instance.planLimitNotices, []);
     assert.equal(instance.planLimitNoticesLoading, false);
     assert.deepEqual(instance.mcpClients, []);
@@ -112,9 +131,34 @@ describe('UnifiedSettings account handoff', () => {
     assert.equal(instance.mcpClientsError, '');
     assert.equal(instance.mcpQuota, null);
     assert.equal(seatsReset, 1);
-    assert.deepEqual(renders, [false], 'the synchronous rerender must suppress account loads');
+    assert.equal(enterpriseSeatsReset, 1, 'account B must not see account A\'s Enterprise roster');
+    assert.deepEqual(renders, [false], 'the synchronous rebuild must not run page entry loads');
     assert.equal(listRenders, 1, 'A settlement must not render after B clears the surface');
     assert.equal(instance.isAccountRequestCurrent(requestA), false);
+    assert.equal(instance.secretCopySession, 1);
+  });
+
+  it('does not reveal a settings secret after that settings session closes', async () => {
+    assert.match(
+      extractMethod(settingsSource, 'private teardownSettings('),
+      /this\.secretCopySession \+= 1/,
+    );
+    let retain = () => true;
+    const Harness = transpileHarness(
+      [extractMethod(settingsSource, 'private copyOwnedSecret(')],
+      ['copyText'],
+    )((_secret, options) => {
+      retain = options.retain;
+      return Promise.resolve(false);
+    });
+    const instance = new Harness();
+    instance.secretCopySession = 4;
+    instance.overlay = { querySelector: () => null };
+    instance.copyOwnedSecret('wm_live', () => instance.overlay.classList?.contains('active') !== false, '.api-keys-copy-btn');
+    assert.equal(retain(), true, 'an open session can still show the manual field');
+    instance.secretCopySession += 1;
+    assert.equal(retain(), false, 'closing settings retires the pending copy');
+    await Promise.resolve();
   });
 
   it('generation-guards every account-scoped async settings path', () => {
@@ -124,6 +168,9 @@ describe('UnifiedSettings account handoff', () => {
       'loadApiKeys',
       'handleCreateApiKey',
       'handleRevokeApiKey',
+      'loadEmbedKeys',
+      'handleCreateEmbedKey',
+      'handleRevokeEmbedKey',
       'loadMcpClients',
       'refreshMcpQuota',
       'handleRevokeMcpClient',

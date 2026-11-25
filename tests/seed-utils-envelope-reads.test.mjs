@@ -21,11 +21,16 @@ const { readSeedSnapshot, verifySeedKey } = await import('../scripts/_seed-utils
 const originalFetch = globalThis.fetch;
 
 function mockFetch(upstashResult) {
-  globalThis.fetch = async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ result: upstashResult == null ? null : JSON.stringify(upstashResult) }),
-  });
+  const requests = [];
+  globalThis.fetch = async (_url, options) => {
+    requests.push(options);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ result: upstashResult == null ? null : JSON.stringify(upstashResult) }),
+    };
+  };
+  return requests;
 }
 
 function mockUpstashBody(body) {
@@ -40,11 +45,12 @@ beforeEach(() => { /* per-test mock set inside test body */ });
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 test('readSeedSnapshot: envelope-wrapped value returns inner data only', async () => {
-  mockFetch({
+  const requests = mockFetch({
     _seed: { fetchedAt: 1, recordCount: 3, sourceVersion: 'v1', schemaVersion: 1, state: 'OK' },
     data: { countries: [{ code: 'US' }, { code: 'GB' }, { code: 'MY' }] },
   });
   const snap = await readSeedSnapshot('economic:bigmac:v1');
+  assert.ok(new Headers(requests[0].headers).get('User-Agent'));
   assert.deepEqual(snap, { countries: [{ code: 'US' }, { code: 'GB' }, { code: 'MY' }] });
   assert.equal(snap._seed, undefined);
 });
@@ -79,6 +85,15 @@ test('readSeedSnapshot: strict mode accepts a valid envelope and unwraps it', as
     data: { samples: [1] },
   });
   assert.deepEqual(await readSeedSnapshot('rolling:baseline:v1', { strict: true }), { samples: [1] });
+});
+
+test('readSeedSnapshot: can return data and envelope meta from one Redis read', async () => {
+  const meta = { fetchedAt: 1, recordCount: 1, sourceVersion: 'v1', schemaVersion: 1, state: 'OK' };
+  mockFetch({ _seed: meta, data: { samples: [1] } });
+  assert.deepEqual(
+    await readSeedSnapshot('rolling:baseline:v1', { strict: true, includeEnvelopeMeta: true }),
+    { data: { samples: [1] }, meta },
+  );
 });
 
 test('readSeedSnapshot: strict mode accepts a valid legacy payload', async () => {
@@ -166,4 +181,18 @@ test('verifySeedKey: truthy semantics hold for presence check', async () => {
   mockFetch({ _seed: { fetchedAt: 1, recordCount: 0, sourceVersion: 'v1', schemaVersion: 1, state: 'OK_ZERO' }, data: {} });
   const value = await verifySeedKey('any:key:v1');
   assert.ok(value); // non-null — runSeed's post-write verify still works
+});
+
+test('readSeedSnapshot: timeoutMs bounds the whole read and defaults to 5s', async () => {
+  const timeouts = [];
+  const originalTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = (ms) => { timeouts.push(ms); return originalTimeout.call(AbortSignal, ms); };
+  try {
+    mockFetch({ ok: 1 });
+    await readSeedSnapshot('economic:bigmac:v1');
+    await readSeedSnapshot('gdelt:bulk:materializer-state:v1', { strict: true, timeoutMs: 30_000 });
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+  assert.deepEqual(timeouts, [5_000, 30_000]);
 });

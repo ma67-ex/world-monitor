@@ -10,16 +10,22 @@
 //      locally instead of whatever the upstream framework emits;
 //   2. tools/call responses carrying a protocol-level code (-32601/-32602)
 //      inside an isError result are lifted into a real JSON-RPC `error`
-//      object, preserving the upstream SSE/JSON framing.
+//      object, preserving the upstream SSE/JSON framing;
+//   3. tools/list descriptions are replaced with compact versions. Mintlify's
+//      filesystem tool alone spends ~7 KB listing every mounted OpenAPI file,
+//      and the whole list cost ~770 tokens per tool (ora.ai asks for <=400).
+//      Names, schemas and annotations pass through unchanged.
 // Genuine tool-execution failures deliberately stay `isError` results — the
 // MCP spec reserves top-level errors for protocol-level failures only.
-import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, getClientIp } from '../server/_shared/rate-limit';
+import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, checkIpScopedEdgeProof, getClientIp, rateLimitKeyForIp } from '../server/_shared/rate-limit';
+import { readBoundedRequestBody, RequestBodyTooLargeError } from './mcp/bounded-body';
+import { MAX_JSON_RPC_BODY_BYTES } from './mcp/body-limits';
+import { safeJsonRpcId } from './mcp/utils';
 
 export const config = { runtime: 'edge' };
 
 const UPSTREAM_URL = 'https://worldmonitor.mintlify.dev/docs/mcp';
 const UPSTREAM_TIMEOUT_MS = 30_000;
-const MAX_REQUEST_BODY_BYTES = 262_144; // mirrors the MCP JMESPath output cap
 const RATE_LIMIT_ERROR_CODE = -32029; // JSON-RPC code mirrored from api/mcp.ts
 
 const RATE_LIMIT_SCOPE = '/api/docs-mcp';
@@ -36,11 +42,13 @@ const RATE_LIMIT_MAX = RATE_LIMIT_POLICY.limit;
 const RATE_LIMIT_WINDOW = RATE_LIMIT_POLICY.window;
 
 // Request headers worth forwarding to the upstream MCP transport. Everything
-// else (cookies, CF headers, x-forwarded-*) stays on our side.
+// else (cookies, CF headers, x-forwarded-*) stays on our side. `authorization`
+// is deliberately absent: the docs MCP is anonymous, and an MCP client that
+// reuses a WorldMonitor bearer for every path on this origin would otherwise
+// hand that credential to the third-party docs host.
 const FORWARDED_REQUEST_HEADERS = [
   'accept',
   'accept-language',
-  'authorization',
   'content-type',
   'last-event-id',
   'mcp-protocol-version',
@@ -50,7 +58,27 @@ const FORWARDED_REQUEST_HEADERS = [
 
 // Hop-by-hop / recomputed response headers that must not be forwarded after
 // fetch has already decoded the body.
-const STRIPPED_RESPONSE_HEADERS = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
+// Hop-by-hop framing, plus every header that can carry a shared-cache policy:
+// the docs MCP surface is no-store end to end (the #4497 class is a shared-cache
+// HIT of an MCP answer), and the upstream does not promise that. Mintlify answers
+// a bare GET with a 405 carrying its default `public, max-age=0, must-revalidate`,
+// which the live sweep (tests/live-api-cache-auth-regression.test.mjs, docs MCP
+// probe) rejects. Vercel reads Vercel-CDN-Cache-Control > CDN-Cache-Control >
+// Cache-Control and Cloudflare reads Cloudflare-CDN-Cache-Control >
+// CDN-Cache-Control > Cache-Control, so a CDN-specific header left in place
+// would silently outrank the `no-store` set below; the list mirrors
+// tests/helpers/shared-cache-policy.mjs, whose CDN_CACHE_HEADERS pins it.
+const STRIPPED_RESPONSE_HEADERS = new Set([
+  'content-encoding',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'cache-control',
+  'cdn-cache-control',
+  'vercel-cdn-cache-control',
+  'cloudflare-cdn-cache-control',
+  'surrogate-control',
+]);
 
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -84,8 +112,7 @@ export function classifyJsonRpcRequest(
   if (Array.isArray(parsed)) return { kind: 'forward' };
   if (parsed === null || typeof parsed !== 'object') return { kind: 'invalid-request', id: null };
   const rpc = parsed as Record<string, unknown>;
-  const id: JsonRpcId =
-    typeof rpc.id === 'string' || typeof rpc.id === 'number' ? (rpc.id as string | number) : null;
+  const id = safeJsonRpcId(rpc.id);
   if (rpc.jsonrpc !== '2.0' || typeof rpc.method !== 'string' || rpc.method.length === 0) {
     return { kind: 'invalid-request', id };
   }
@@ -130,12 +157,43 @@ export function liftProtocolErrorFromToolResult(rpc: unknown): Record<string, un
   return buildJsonRpcError(id, code, message);
 }
 
+// Compact descriptions for the upstream tools, keyed by name prefix (Mintlify
+// suffixes each name with the site, e.g. `search_world_monitor`). An unknown
+// tool keeps its upstream description.
+const DOCS_TOOL_DESCRIPTIONS: ReadonlyArray<readonly [prefix: string, description: string]> = [
+  ['search_', 'Search the World Monitor documentation: guides, API and MCP references, data sources and methodology. Use when you need to answer a question about World Monitor or find the page that covers a feature. Returns matching passages with page titles and links. To read a whole page, pass its path plus `.mdx` to the filesystem tool, e.g. `head -200 /some/page.mdx`.'],
+  ['query_docs_filesystem', 'Run a read-only, stateless shell query over a virtual filesystem holding only the World Monitor docs (`.mdx` pages) and OpenAPI specs; nothing runs on a real machine. Use when you need a whole page, an exact-text match or an OpenAPI spec. Returns the command output as text. Read a page with `cat` or `head` on `/<url-path>.mdx`, search exactly with `rg -il "term" /`, explore with `tree / -L 2` or `ls`. OpenAPI specs are under `/openapi/api/` (`ls /openapi/api`). Supports rg, grep, find, tree, ls, cat, head, tail, wc, sort, uniq, cut, sed, awk and jq. The working directory resets to `/` on every call; chain commands with `&&`. Never guess paths: a missing path means the guess was wrong, not that the topic is undocumented.'],
+  ['submit_feedback', 'Report a problem with a World Monitor documentation page so the docs team can fix it. Use when a page is wrong, outdated, confusing, incomplete or has a broken example. Not for product support or feedback about this tool.'],
+];
+
+export function compactDocsToolList(rpc: unknown): Record<string, unknown> | null {
+  if (rpc === null || typeof rpc !== 'object' || Array.isArray(rpc)) return null;
+  const envelope = rpc as Record<string, unknown>;
+  const result = envelope.result as Record<string, unknown> | undefined;
+  if (!result || typeof result !== 'object' || !Array.isArray(result.tools)) return null;
+  let changed = false;
+  const tools = result.tools.map((tool: unknown) => {
+    if (tool === null || typeof tool !== 'object') return tool;
+    const name = (tool as { name?: unknown }).name;
+    if (typeof name !== 'string') return tool;
+    const match = DOCS_TOOL_DESCRIPTIONS.find(([prefix]) => name.startsWith(prefix));
+    if (!match || (tool as { description?: unknown }).description === match[1]) return tool;
+    changed = true;
+    return { ...(tool as Record<string, unknown>), description: match[1] };
+  });
+  return changed ? { ...envelope, result: { ...result, tools } } : null;
+}
+
 /**
- * Normalize an upstream tools/call response body (SSE or plain JSON). Returns
- * the rewritten body when a protocol-level error was lifted, or null to pass
- * the original bytes through untouched.
+ * Apply `transform` to the single JSON-RPC response in an upstream body (SSE
+ * or plain JSON). Returns the rewritten body, or null to pass the original
+ * bytes through untouched.
  */
-export function normalizeToolCallResponseBody(bodyText: string, contentType: string): string | null {
+function rewriteSingleRpcResponseBody(
+  bodyText: string,
+  contentType: string,
+  transform: (rpc: unknown) => Record<string, unknown> | null,
+): string | null {
   if (contentType.includes('text/event-stream')) {
     const lines = bodyText.split('\n');
     const dataIndexes = lines
@@ -152,9 +210,9 @@ export function normalizeToolCallResponseBody(bodyText: string, contentType: str
     } catch {
       return null;
     }
-    const lifted = liftProtocolErrorFromToolResult(rpc);
-    if (!lifted) return null;
-    lines[dataIndex] = `data: ${JSON.stringify(lifted)}`;
+    const rewritten = transform(rpc);
+    if (!rewritten) return null;
+    lines[dataIndex] = `data: ${JSON.stringify(rewritten)}`;
     return lines.join('\n');
   }
   if (contentType.includes('application/json')) {
@@ -164,10 +222,24 @@ export function normalizeToolCallResponseBody(bodyText: string, contentType: str
     } catch {
       return null;
     }
-    const lifted = liftProtocolErrorFromToolResult(rpc);
-    return lifted ? JSON.stringify(lifted) : null;
+    const rewritten = transform(rpc);
+    return rewritten ? JSON.stringify(rewritten) : null;
   }
   return null;
+}
+
+/**
+ * Normalize an upstream tools/call response body (SSE or plain JSON). Returns
+ * the rewritten body when a protocol-level error was lifted, or null to pass
+ * the original bytes through untouched.
+ */
+export function normalizeToolCallResponseBody(bodyText: string, contentType: string): string | null {
+  return rewriteSingleRpcResponseBody(bodyText, contentType, liftProtocolErrorFromToolResult);
+}
+
+/** Rewrite an upstream tools/list body with the compact descriptions. */
+export function compactToolListResponseBody(bodyText: string, contentType: string): string | null {
+  return rewriteSingleRpcResponseBody(bodyText, contentType, compactDocsToolList);
 }
 
 function withCors(headers: Headers | Record<string, string>): Headers {
@@ -186,6 +258,29 @@ function jsonRpcErrorResponse(status: number, id: JsonRpcId, code: number, messa
   });
 }
 
+async function docsMcpRateLimitResponse(req: Request, id: JsonRpcId): Promise<Response | null> {
+  const proofDenied = checkIpScopedEdgeProof(req, CORS_HEADERS);
+  if (proofDenied) {
+    return jsonRpcErrorResponse(403, id, -32003, 'Cloudflare edge proof required', {
+      'X-RateLimit-Mode': 'edge-proof',
+    });
+  }
+  const ip = getClientIp(req);
+  // Redis-degraded scoped limits intentionally stay availability-first — the
+  // upstream docs MCP is fully public and cheap, so degradation (logged by
+  // checkScopedRateLimit) must not take the docs surface down.
+  const scoped = await checkScopedRateLimit(RATE_LIMIT_SCOPE, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, rateLimitKeyForIp(ip));
+  if (scoped.allowed) return null;
+  const retryAfter = Math.max(1, Math.ceil((scoped.reset - Date.now()) / 1000));
+  return jsonRpcErrorResponse(
+    429,
+    id,
+    RATE_LIMIT_ERROR_CODE,
+    `Rate limit exceeded. Max ${RATE_LIMIT_MAX} requests per ${RATE_LIMIT_WINDOW} per IP.`,
+    { 'Retry-After': String(retryAfter) },
+  );
+}
+
 function upstreamRequestHeaders(req: Request): Headers {
   const headers = new Headers();
   for (const name of FORWARDED_REQUEST_HEADERS) {
@@ -200,6 +295,7 @@ function upstreamResponseHeaders(upstream: Response): Headers {
   upstream.headers.forEach((value, key) => {
     if (!STRIPPED_RESPONSE_HEADERS.has(key.toLowerCase())) headers.set(key, value);
   });
+  headers.set('Cache-Control', 'no-store');
   return withCors(headers);
 }
 
@@ -211,37 +307,43 @@ export default async function handler(req: Request): Promise<Response> {
     return jsonRpcErrorResponse(405, null, -32600, `Method ${req.method} not allowed`, { Allow: 'GET, POST, DELETE, OPTIONS' });
   }
 
-  const ip = getClientIp(req);
-  // Redis-degraded scoped limits intentionally stay availability-first — the
-  // upstream docs MCP is fully public and cheap, so degradation (logged by
-  // checkScopedRateLimit) must not take the docs surface down.
-  const scoped = await checkScopedRateLimit(RATE_LIMIT_SCOPE, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, ip);
-  if (!scoped.allowed) {
-    const retryAfter = Math.max(1, Math.ceil((scoped.reset - Date.now()) / 1000));
-    return jsonRpcErrorResponse(
-      429,
-      null,
-      RATE_LIMIT_ERROR_CODE,
-      `Rate limit exceeded. Max ${RATE_LIMIT_MAX} requests per ${RATE_LIMIT_WINDOW} per IP.`,
-      { 'Retry-After': String(retryAfter) },
-    );
-  }
-
   if (req.method !== 'POST') {
+    const limited = await docsMcpRateLimitResponse(req, null);
+    if (limited) return limited;
     // GET opens the SSE listening stream, DELETE terminates a session — both
     // stream through untouched.
     const upstream = await fetch(UPSTREAM_URL, {
+      // SSE clients reconnect; cap one listening session without applying the
+      // short JSON-RPC budget to an otherwise healthy stream.
+      signal: AbortSignal.any([req.signal, AbortSignal.timeout(req.method === 'GET' ? 300_000 : 15_000)]),
       method: req.method,
       headers: upstreamRequestHeaders(req),
     });
     return new Response(upstream.body, { status: upstream.status, headers: upstreamResponseHeaders(upstream) });
   }
 
-  const bodyText = await req.text();
-  if (bodyText.length > MAX_REQUEST_BODY_BYTES) {
-    return jsonRpcErrorResponse(413, null, -32600, `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes`);
+  // Same shared MCP JSON-RPC body cap as `/api/mcp` (#7406).
+  let bodyBytes: Uint8Array;
+  try {
+    bodyBytes = await readBoundedRequestBody(req, MAX_JSON_RPC_BODY_BYTES);
+  } catch (err) {
+    if (err instanceof RequestBodyTooLargeError) {
+      return jsonRpcErrorResponse(413, null, -32600, err.message);
+    }
+    return jsonRpcErrorResponse(400, null, -32600, 'Invalid request body');
   }
+  const bodyText = new TextDecoder().decode(bodyBytes);
   const classified = classifyJsonRpcRequest(bodyText);
+  // Bounded pre-parse is the explicit abuse/correlation tradeoff for this
+  // anonymous endpoint: the 256 KiB cap rejects before parsing, while an
+  // in-cap body is parsed before the limiter only far enough to recover a
+  // finite numeric or <=256-byte string id. Envelope validation and upstream
+  // work remain behind the unchanged 60/min/IP limiter.
+  const requestId = classified.kind === 'single' || classified.kind === 'invalid-request'
+    ? classified.id
+    : null;
+  const limited = await docsMcpRateLimitResponse(req, requestId);
+  if (limited) return limited;
   if (classified.kind === 'invalid-json') {
     return jsonRpcErrorResponse(400, null, -32700, 'Parse error: request body is not valid JSON');
   }
@@ -261,15 +363,20 @@ export default async function handler(req: Request): Promise<Response> {
     return jsonRpcErrorResponse(502, classified.kind === 'single' ? classified.id : null, -32603, 'Upstream docs MCP server is unreachable');
   }
 
-  const shouldNormalize =
-    upstream.ok && classified.kind === 'single' && classified.method === 'tools/call';
-  if (!shouldNormalize) {
+  const rewrite = !upstream.ok || classified.kind !== 'single'
+    ? null
+    : classified.method === 'tools/call'
+      ? normalizeToolCallResponseBody
+      : classified.method === 'tools/list'
+        ? compactToolListResponseBody
+        : null;
+  if (!rewrite) {
     return new Response(upstream.body, { status: upstream.status, headers: upstreamResponseHeaders(upstream) });
   }
 
   const contentType = upstream.headers.get('content-type') ?? '';
   const upstreamBody = await upstream.text();
-  const normalized = normalizeToolCallResponseBody(upstreamBody, contentType);
+  const normalized = rewrite(upstreamBody, contentType);
   return new Response(normalized ?? upstreamBody, {
     status: upstream.status,
     headers: upstreamResponseHeaders(upstream),

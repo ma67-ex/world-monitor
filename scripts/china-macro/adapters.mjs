@@ -3,6 +3,7 @@ import { decodeHtmlEntities } from '../_html-entities.mjs';
 import { readCanonicalValue } from '../_seed-utils.mjs';
 import {
   CHINA_MACRO_CACHE_KEY,
+  CHINA_MACRO_M2_REPUBLICATION,
   CHINA_MACRO_PROVENANCE_FAMILY,
   CHINA_MACRO_PUBLISHER_IDS,
   CHINA_MACRO_REQUIRED_SERIES,
@@ -30,6 +31,10 @@ import {
   SAFE_LIST_URL,
   SAFE_MAX_REQUESTS_PER_RUN,
   SAFE_ROBOTS_URL,
+  SHANGHAI_M2_DEFINITION,
+  SHANGHAI_M2_LIST_URL,
+  SHANGHAI_M2_MAX_REQUESTS_PER_RUN,
+  SHANGHAI_M2_ROBOTS_URL,
   SOURCE_POLICIES,
   UNAVAILABLE_DEFINITIONS,
 } from './source-contracts.mjs';
@@ -89,8 +94,8 @@ function decodeHtml(value) {
 function stripHtml(value) {
   return decodeHtml(
     String(value)
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script(?:[\t\n\f\r ][^>]*|\/[^>]*)?>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style(?:[\t\n\f\r ][^>]*|\/[^>]*)?>/gi, ' ')
       .replace(/<[^>]+>/g, ' '),
   ).replace(/\s+/g, ' ').trim();
 }
@@ -504,6 +509,100 @@ export function parseSafeReserveRelease(html, options = {}) {
   }, html, options);
 }
 
+export function parseShanghaiM2Release(html, options = {}) {
+  const sourceUrl = new URL(options.sourceUrl || SHANGHAI_M2_LIST_URL);
+  if (sourceUrl.origin !== SOURCE_POLICIES.shanghaiM2.origin
+    || !/^\/SCGK194\/\d{8}\/[a-f0-9]{32}\.html$/.test(sourceUrl.pathname)
+    || sourceUrl.username || sourceUrl.password) {
+    throw new Error('MALFORMED_RELEASE:SHANGHAI_SOURCE_URL');
+  }
+  const releaseTitle = metaContent(html, 'ArticleTitle');
+  const title = requireMatch(releaseTitle, /^(\d{4})年(?:(\d{1,2})月|上半年|前三季度|全年)?金融统计数据报告$/, 'SHANGHAI_M2_TITLE');
+  if (metaContent(html, 'ContentSource') !== '中国人民银行'
+    || metaContent(html, 'SiteIDCode') !== '3100000093') {
+    throw new Error('MALFORMED_RELEASE:SHANGHAI_M2_ATTRIBUTION');
+  }
+  const dateBlock = requireMatch(html, /<h2\b[^>]*id=["']ivs_date["'][^>]*>([\s\S]*?)<\/h2>/i, 'SHANGHAI_PUBLICATION_BLOCK')[1];
+  const date = requireMatch(stripHtml(dateBlock), /发布时间[：:]\s*(\d{4}-\d{2}-\d{2})/, 'SHANGHAI_PUBLICATION_TIME')[1];
+  const metaDate = metaContent(html, 'PubDate').replace(/年|月/g, '-').replace(/日$/, '');
+  const dateMs = Date.parse(`${date}T00:00:00Z`);
+  if (date !== metaDate || !Number.isFinite(dateMs) || new Date(dateMs).toISOString().slice(0, 10) !== date) {
+    throw new Error('MALFORMED_RELEASE:SHANGHAI_PUBLICATION_TIME');
+  }
+  const body = requireMatch(html, /<div\b[^>]*id=["']ivs_content["'][^>]*>([\s\S]*?)<\/div>/i, 'SHANGHAI_M2_BODY')[1];
+  const matches = [...stripHtml(body).matchAll(/(\d{1,2})\s*月末，\s*广义货币\s*[（(]M2[）)]\s*余额\s*[\d.]+\s*万亿元[，,]\s*同比(增长|下降)\s*([+-]?\d+(?:\.\d+)?)\s*%/g)];
+  if (matches.length !== 1) throw new Error('MALFORMED_RELEASE:SHANGHAI_M2_VALUE');
+  const match = matches[0];
+  const month = Number(match[1]);
+  const expectedMonth = title[2] ? Number(title[2]) : releaseTitle.includes('上半年') ? 6 : releaseTitle.includes('前三季度') ? 9 : 12;
+  if (month < 1 || month > 12 || month !== expectedMonth) {
+    throw new Error('MALFORMED_RELEASE:SHANGHAI_M2_PERIOD');
+  }
+  const magnitude = Number(match[3]);
+  if (match[2] === '下降' && magnitude < 0) throw new Error('MALFORMED_RELEASE:SHANGHAI_M2_CONTRADICTORY_SIGN');
+  const value = signedValue(match[2] === '下降' ? 'decreased' : 'increased', magnitude);
+  return baseObservation(SHANGHAI_M2_DEFINITION, {
+    value,
+    comparisonValue: value,
+    comparisonBasis: 'year_over_year_percent_change',
+    directionReason: value > 0 ? 'POSITIVE_YEAR_OVER_YEAR_CHANGE' : value < 0 ? 'NEGATIVE_YEAR_OVER_YEAR_CHANGE' : 'ZERO_YEAR_OVER_YEAR_CHANGE',
+    observationPeriod: `${title[1]}-${String(month).padStart(2, '0')}`,
+    publication: { value: date, precision: 'day' },
+    releaseTitle,
+  }, html, options);
+}
+
+export async function fetchShanghaiM2Observation({ now = Date.now(), fetchFn = globalThis.fetch, previousObservation } = {}) {
+  const checkedAt = new Date(now).toISOString();
+  const deadline = AbortSignal.timeout(15_000);
+  const boundedFetch = (url, init) => fetchFn(url, {
+    ...init, signal: AbortSignal.any([init.signal, deadline]),
+  });
+  const budget = requestBudget(SHANGHAI_M2_MAX_REQUESTS_PER_RUN);
+  let redirectBehavior = 'none';
+  let robotsStatus = 'unknown';
+  const decision = (status, reason) => sourceDecision({
+    publisherId: CHINA_MACRO_M2_REPUBLICATION.publisherId,
+    source: PUBLISHERS.shanghai.name,
+    host: CHINA_MACRO_M2_REPUBLICATION.sourceHost,
+    status, reason, checkedAt, redirectBehavior,
+    requestBudget: SHANGHAI_M2_MAX_REQUESTS_PER_RUN,
+    requestCount: budget.count,
+    robotsStatus,
+    termsStatus: 'reviewed_2026-10-24_facts_only_source_credit_required',
+    sourceUrl: SHANGHAI_M2_LIST_URL,
+  });
+  try {
+    const onRedirect = (state) => { redirectBehavior = state; };
+    const robots = await checkRobots(boundedFetch, SHANGHAI_M2_ROBOTS_URL, {
+      policy: SOURCE_POLICIES.shanghaiRobots, budget, onRedirect,
+      candidatePaths: ['/SCGK194/'],
+    });
+    robotsStatus = robots.status;
+    const options = {
+      policy: SOURCE_POLICIES.shanghaiM2, budget, onRedirect,
+      assertTargetAllowed: (url) => assertRobotsAllowed(robots.text, [url.pathname]),
+    };
+    const listing = await fetchText(boundedFetch, SHANGHAI_M2_LIST_URL, options);
+    const sourceUrl = findReleaseUrl(listing.text, SHANGHAI_M2_LIST_URL,
+      /\d{4}年(?:(?:\d{1,2}月|上半年|前三季度|全年))?金融统计数据报告/, 'SHANGHAI_M2', SOURCE_POLICIES.shanghaiM2);
+    const page = await fetchText(boundedFetch, sourceUrl, options);
+    const observation = parseShanghaiM2Release(page.text, { sourceUrl: page.url, retrievalTime: checkedAt, previousObservation });
+    return { observation, decision: decision('accepted', 'OK') };
+  } catch (error) {
+    const reason = reasonFor(error);
+    if (reason === 'ROBOTS_DISALLOW') robotsStatus = 'disallow_candidate_paths';
+    else if (robotsStatus === 'unknown') robotsStatus = 'unavailable';
+    const canRetain = Number.isFinite(previousObservation?.value)
+      && previousObservation.source === SHANGHAI_M2_DEFINITION.source
+      && previousObservation.provenance?.claims?.publisher?.value?.id === CHINA_MACRO_M2_REPUBLICATION.publisherId;
+    const observation = canRetain
+      ? markRetainedTransport(previousObservation, checkedAt, { state: 'error', failureReason: reason })
+      : unavailableObservation(SHANGHAI_M2_DEFINITION, reason);
+    return { observation, decision: decision('blocked', reason) };
+  }
+}
+
 export function parseSafeSettlementRelease(html, options = {}) {
   const releaseTitle = metaContent(html, 'ArticleTitle');
   const description = metaContent(html, 'Description');
@@ -647,6 +746,8 @@ function sourceDecision({
   robotsStatus,
   termsStatus,
   sourceUrl,
+  proxyFallbacks,
+  proxyDirectReason,
 }) {
   return {
     publisherId,
@@ -661,6 +762,9 @@ function sourceDecision({
     robotsStatus,
     termsStatus,
     sourceUrl,
+    ...(proxyFallbacks > 0
+      ? { proxyFallbacks, proxyDirectReason }
+      : {}),
   };
 }
 
@@ -674,6 +778,14 @@ function requiredSourceError(source, error) {
 export async function fetchChinaMacroSnapshot({
   now = Date.now(),
   fetchFn = globalThis.fetch,
+  // NBS only, and only as a fallback after a connection-level failure. Railway's
+  // egress cannot open a connection to www.stats.gov.cn while the same declared
+  // client succeeds from a laptop, which froze
+  // seed-meta:economic:china-macro-transport at 2026-08-14 with all three
+  // required NBS series on preserved values. Unset PROXY_URL keeps the direct
+  // path byte-for-byte unchanged.
+  proxyUrl = process.env.PROXY_URL || null,
+  proxyFetchFn,
   readCachedFn = readCanonicalValue,
   onDecision = (entry) => console.log(JSON.stringify({
     event: 'china_macro_source_preflight',
@@ -719,13 +831,25 @@ export async function fetchChinaMacroSnapshot({
   const nbsBudget = requestBudget(NBS_MAX_REQUESTS_PER_RUN);
   let nbsRedirectBehavior = 'none';
   let nbsRobotsStatus = 'unknown';
+  // Recorded on the decision entry so a run that only succeeded via the proxy
+  // is distinguishable from one that never needed it. Without this the audit
+  // trail would show a plain 'accepted' and the egress block would look solved
+  // rather than routed around.
+  let nbsProxyFallbacks = 0;
+  let nbsProxyDirectReason = null;
   let nbsError = null;
+  const nbsProxy = {
+    proxyUrl,
+    onProxyFallback: (entry) => { nbsProxyFallbacks += 1; nbsProxyDirectReason = entry.directReason; },
+    ...(proxyFetchFn ? { proxyFetchFn } : {}),
+  };
   try {
     const robots = await checkRobots(fetchFn, NBS_ROBOTS_URL, {
       policy: SOURCE_POLICIES.nbsRobots,
       budget: nbsBudget,
       candidatePaths: [new URL(NBS_LIST_URL).pathname],
       onRedirect: (state) => { nbsRedirectBehavior = state; },
+      ...nbsProxy,
     });
     nbsRobotsStatus = robots.status;
     const listing = await fetchText(fetchFn, NBS_LIST_URL, {
@@ -733,6 +857,7 @@ export async function fetchChinaMacroSnapshot({
       budget: nbsBudget,
       assertTargetAllowed: (url) => assertRobotsAllowed(robots.text, [url.pathname]),
       onRedirect: (state) => { nbsRedirectBehavior = state; },
+      ...nbsProxy,
     });
     const industrialUrl = findReleaseUrl(
       listing.text,
@@ -765,6 +890,7 @@ export async function fetchChinaMacroSnapshot({
         budget: nbsBudget,
         assertTargetAllowed: (target) => assertRobotsAllowed(robots.text, [target.pathname]),
         onRedirect: (state) => { nbsRedirectBehavior = state; },
+        ...nbsProxy,
       });
       pages.push(page);
     }
@@ -793,6 +919,12 @@ export async function fetchChinaMacroSnapshot({
       redirectBehavior: nbsRedirectBehavior,
       requestCount: nbsBudget.count,
       sourceUrl: listing.url,
+      // Present only when the direct route failed and the proxy carried it.
+      // A run that needed no fallback records neither field, so the audit trail
+      // never claims a hop that did not happen.
+      ...(nbsProxyFallbacks > 0
+        ? { proxyFallbacks: nbsProxyFallbacks, proxyDirectReason: nbsProxyDirectReason }
+        : {}),
     }));
   } catch (error) {
     nbsError = error;
@@ -923,8 +1055,15 @@ export async function fetchChinaMacroSnapshot({
   observations.push(
     ...UNAVAILABLE_DEFINITIONS
       .filter((definition) => definition.seriesId.startsWith('pboc_'))
+      .filter((definition) => definition.seriesId !== 'pboc_m2_yoy')
       .map((definition) => unavailableObservation(definition, pbocReason)),
   );
+
+  const shanghaiM2 = await fetchShanghaiM2Observation({
+    now, fetchFn, previousObservation: previousById.get('pboc_m2_yoy'),
+  });
+  observations.push(shanghaiM2.observation);
+  record(shanghaiM2.decision);
 
   let gaccReason = 'SOURCE_CONTRACT_NOT_LAUNCHED';
   let gaccRobotsStatus = 'unknown';

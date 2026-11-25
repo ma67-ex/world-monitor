@@ -12,12 +12,16 @@ import {
 } from '../server/worldmonitor/wildfire/v1/list-fire-detections.ts';
 import { resolveFireDetectionTotalCount } from '../src/services/wildfires/payload.ts';
 import {
+  WILDFIRE_BOOTSTRAP_CWFIS_RESERVED,
   WILDFIRE_CANONICAL_DETECTION_LIMIT,
+  WILDFIRE_CWFIS_SOURCE,
   compactWildfireDashboardPayload,
 } from '../scripts/_wildfire-dashboard.mjs';
+import { assembleBootstrapTierPayload } from '../scripts/publish-bootstrap-tiers.mjs';
 import { MAX_PAYLOAD_BYTES, runSeed } from '../scripts/_seed-utils.mjs';
 import { buildEnvelope, unwrapEnvelope } from '../scripts/_seed-envelope-source.mjs';
 import type { FireDetection } from '../src/generated/server/worldmonitor/wildfire/v1/service_server';
+import { withSeedLockFence } from './helpers/seed-lock-fence.mjs';
 
 const REGIONS = ['Ukraine', 'Russia', 'Iran', 'Israel/Gaza', 'Syria', 'Taiwan', 'North Korea', 'Saudi Arabia', 'Turkey'];
 const SATELLITES = ['VIIRS_SNPP_NRT', 'VIIRS_NOAA20_NRT', 'VIIRS_NOAA21_NRT'];
@@ -52,7 +56,7 @@ describe('wildfire dashboard payload cap', () => {
 
     process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
     process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
-    globalThis.fetch = async (input) => {
+    globalThis.fetch = withSeedLockFence(async (input) => {
       const key = decodeURIComponent(new URL(String(input)).pathname.replace('/get/', ''));
       requestedKeys.push(key);
       const value = key === 'wildfire:fires-bootstrap:v1'
@@ -61,7 +65,7 @@ describe('wildfire dashboard payload cap', () => {
           ? { fetchedAt: 1_783_500_000_000 }
           : null;
       return Response.json({ result: value == null ? null : JSON.stringify(value) });
-    };
+    });
 
     try {
       const response = await listFireDetections({} as never, {});
@@ -95,7 +99,7 @@ describe('wildfire dashboard payload cap', () => {
 
     process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
     process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
-    globalThis.fetch = async (input) => {
+    globalThis.fetch = withSeedLockFence(async (input) => {
       const key = decodeURIComponent(new URL(String(input)).pathname.replace('/get/', ''));
       requestedKeys.push(key);
       const value = key === 'wildfire:fires:v1'
@@ -104,7 +108,7 @@ describe('wildfire dashboard payload cap', () => {
           ? { fetchedAt: 1_783_600_000_000 }
           : null;
       return Response.json({ result: value == null ? null : JSON.stringify(value) });
-    };
+    });
 
     try {
       const response = await listFireDetections({} as never, {});
@@ -191,6 +195,38 @@ describe('wildfire dashboard payload cap', () => {
     assert.equal(payload.fireDetections.length, WILDFIRE_DASHBOARD_DETECTION_LIMIT + 1);
   });
 
+  it('preserves valid totals and floors invalid totals at the input count on repeated compaction', () => {
+    const fireDetections = [fireDetection(1), fireDetection(2)];
+    for (const [totalCount, expected] of [
+      [undefined, 2], [null, 2], [-1, 2], [1, 2], [NaN, 2], [Infinity, 2],
+      ['invalid', 2], [2, 2], [20_442, 20_442], ['20442', 20_442],
+    ]) {
+      const payload = { fireDetections, pagination: { nextCursor: '', totalCount } };
+      for (const compact of [compactWildfireDashboardPayload, compactWildfireBootstrapPayload]) {
+        const first = compact(payload);
+        const second = compact(first);
+        assert.equal(first.pagination.totalCount, expected);
+        assert.deepEqual(second, first);
+        assert.equal(payload.pagination.totalCount, totalCount);
+      }
+    }
+  });
+
+  it('measures the preserved total when trimming an already compacted payload to a byte budget', () => {
+    const payload = {
+      fireDetections: [fireDetection(1), fireDetection(2)],
+      pagination: { nextCursor: '', totalCount: 20_442 },
+    };
+    const measureBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+    const maxBytes = measureBytes(payload) - 1;
+    for (const compact of [compactWildfireDashboardPayload, compactWildfireBootstrapPayload]) {
+      const compacted = compact(payload, WILDFIRE_DASHBOARD_DETECTION_LIMIT, { maxBytes, measureBytes });
+      assert.equal(compacted.fireDetections.length, 1);
+      assert.equal(compacted.pagination.totalCount, 20_442);
+      assert.ok(measureBytes(compacted) <= maxBytes);
+    }
+  });
+
   it('keeps bootstrap and RPC caps in ranking parity', () => {
     const fireDetections = Array.from({ length: WILDFIRE_DASHBOARD_DETECTION_LIMIT + 50 }, (_, index) => fireDetection(index));
 
@@ -251,7 +287,6 @@ describe('wildfire dashboard payload cap', () => {
     assert.ok(gzipSync(compacted).byteLength < 20_000, `gzip payload is too large: ${gzipSync(compacted).byteLength} bytes`);
   });
 });
-
 // The volume of the run that crashed seed-fire-detections (Railway deployment 8008ae7a,
 // 2026-07-30): 20,442 deduped VIIRS detections across 3 sources x 9 regions, every upstream
 // fetch OK. atomicPublish threw `Payload too large: 5.2MB > 5MB limit`, main().catch printed
@@ -318,7 +353,7 @@ function canonicalEnvelopeBytes(data: { fireDetections: FireDetection[] }): numb
   return Buffer.byteLength(JSON.stringify(buildEnvelope({
     fetchedAt: 1_785_416_460_000,
     recordCount: data.fireDetections.length,
-    sourceVersion: 'VIIRS_SNPP_NRT+VIIRS_NOAA20_NRT+VIIRS_NOAA21_NRT',
+    sourceVersion: 'VIIRS_SNPP_NRT+VIIRS_NOAA20_NRT+VIIRS_NOAA21_NRT+cwfis-wfs-v1',
     schemaVersion: 1,
     state: 'OK',
     data,
@@ -365,6 +400,7 @@ describe('canonical wildfire payload cap (#5866)', () => {
     assert.ok(CANONICAL_PAYLOAD_BYTE_BUDGET < MAX_PAYLOAD_BYTES, 'budget must leave headroom under the hard cap');
   });
 
+
   it('leaves the bootstrap top-500 identical to the uncapped selection', () => {
     const capped = compactWildfireDashboardPayload(
       { fireDetections: peakDetections, pagination: undefined },
@@ -391,7 +427,7 @@ describe('canonical wildfire payload cap (#5866)', () => {
 
     process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
     process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
-    globalThis.fetch = async (input) => {
+    globalThis.fetch = withSeedLockFence(async (input) => {
       const key = decodeURIComponent(new URL(String(input)).pathname.replace('/get/', ''));
       const value = key === 'wildfire:fires:v1'
         ? { ...canonical, dataAvailable: true }
@@ -399,7 +435,7 @@ describe('canonical wildfire payload cap (#5866)', () => {
           ? { fetchedAt: 1_785_416_460_000 }
           : null;
       return Response.json({ result: value == null ? null : JSON.stringify(value) });
-    };
+    });
 
     try {
       const response = await listFireDetections({} as never, {});
@@ -424,6 +460,8 @@ describe('canonical wildfire payload cap (#5866)', () => {
     // transforms the RAW fetcher output, so capping there keeps the bootstrap top-500 intact.
     assert.match(seeder, /publishTransform\s*:/);
     assert.match(seeder, /WILDFIRE_CANONICAL_DETECTION_LIMIT/);
+    assert.match(seeder, /MAX_PAYLOAD_BYTES/);
+    assert.match(seeder, /measureCanonicalPublishBytes|measureBytes/);
   });
 
   it('executes the runSeed publish seam with capped canonical and raw bootstrap inputs', async () => {
@@ -438,7 +476,7 @@ describe('canonical wildfire payload cap (#5866)', () => {
 
     process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
     process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
-    globalThis.fetch = async (input, init) => {
+    globalThis.fetch = withSeedLockFence(async (input, init) => {
       const url = String(input);
       const body = init?.body == null ? null : JSON.parse(String(init.body));
       calls.push({ url, body });
@@ -455,7 +493,7 @@ describe('canonical wildfire payload cap (#5866)', () => {
         if (body[0] === 'DEL' && typeof body[1] === 'string') values.delete(body[1]);
       }
       return Response.json({ result: 'OK' });
-    };
+    });
     process.exit = ((code = 0) => {
       const error = new Error(`__test_exit__:${code}`) as Error & { exitCode: number };
       error.exitCode = code;
@@ -473,7 +511,10 @@ describe('canonical wildfire payload cap (#5866)', () => {
           {
             validateFn: (data) => Array.isArray(data?.fireDetections) && data.fireDetections.length > 0,
             ttlSeconds: 3600,
-            publishTransform: (data) => compactWildfireDashboardPayload(data, WILDFIRE_CANONICAL_DETECTION_LIMIT),
+            publishTransform: (data) => compactWildfireDashboardPayload(data, WILDFIRE_CANONICAL_DETECTION_LIMIT, {
+              maxBytes: MAX_PAYLOAD_BYTES,
+              measureBytes: (candidate) => canonicalEnvelopeBytes(candidate),
+            }),
             extraKeys: [{ key: bootstrapKey, transform: compactWildfireDashboardPayload }],
             declareRecords: (data) => data.fireDetections.length,
             sourceVersion: 'wildfire-test',
@@ -508,12 +549,324 @@ describe('canonical wildfire payload cap (#5866)', () => {
       assert.deepEqual(canonical.pagination, { nextCursor: '', totalCount: FIRMS_PEAK_DETECTIONS });
       assert.equal(bootstrap.fireDetections.length, WILDFIRE_DASHBOARD_DETECTION_LIMIT);
       assert.deepEqual(bootstrap.pagination, { nextCursor: '', totalCount: FIRMS_PEAK_DETECTIONS });
+      const published = await assembleBootstrapTierPayload({ wildfires: bootstrapKey }, {
+        env: { UPSTASH_REDIS_REST_URL: 'https://redis.test', UPSTASH_REDIS_REST_TOKEN: 'test-token' },
+        fetchFn: async (_input, init) => {
+          assert.deepEqual(JSON.parse(String(init.body)), [['GET', bootstrapKey]]);
+          return Response.json([{ result: JSON.stringify(bootstrapEnvelope) }]);
+        },
+      });
+      const redisFallback = compactWildfireBootstrapPayload(bootstrap);
+      for (const response of [published.data.wildfires, redisFallback]) {
+        assert.deepEqual(response.fireDetections, bootstrap.fireDetections);
+        assert.equal(response.pagination.totalCount, FIRMS_PEAK_DETECTIONS);
+        assert.equal(resolveFireDetectionTotalCount(response), FIRMS_PEAK_DETECTIONS);
+      }
+      assert.deepEqual(published.missing, []);
       assert.equal(canonicalEnvelope._seed.recordCount, WILDFIRE_CANONICAL_DETECTION_LIMIT);
       assert.equal(bootstrapEnvelope._seed.recordCount, WILDFIRE_DASHBOARD_DETECTION_LIMIT);
       assert.ok(
         Buffer.byteLength(JSON.stringify(canonicalEnvelope), 'utf8') <= CANONICAL_PAYLOAD_BYTE_BUDGET,
         'the real canonical publish must stay under the byte budget',
       );
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.exit = originalExit;
+      if (originalUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+      else process.env.UPSTASH_REDIS_REST_URL = originalUrl;
+      if (originalToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      else process.env.UPSTASH_REDIS_REST_TOKEN = originalToken;
+    }
+  });
+});
+
+type TaggedFireDetection = FireDetection & {
+  source?: string;
+  kind?: string;
+  emergency?: boolean;
+  nationalFireId?: string;
+  agencyFireId?: string;
+  agencyCode?: string;
+  stageOfControl?: string;
+  fireSize?: number;
+  fireWasPrescribed?: number;
+  situationReportDate?: string;
+  statusDate?: string;
+  recordStart?: string;
+  recordEnd?: string;
+  regionCode?: string;
+  nationalFireCause?: string;
+  responseType?: string;
+  fireTypeIcs?: number;
+  percentContained?: number;
+  agencyName?: string;
+};
+
+function tagFirmsDetection(detection: FireDetection): TaggedFireDetection {
+  return { ...detection, source: 'firms', kind: 'active', emergency: true };
+}
+
+/** Live-width CWFIS row: production fields plus the WFS dates that fatten a peak-day mix to ~5.11MB. */
+function liveWidthCwfisDetection(index: number): TaggedFireDetection {
+  const nid = `2026_NL_2026-XX${String(100000 + index)}`;
+  return {
+    id: `cwfis:${nid}`,
+    location: { latitude: 49.89345, longitude: -121.45475 },
+    brightness: 0,
+    frp: 0,
+    confidence: 'FIRE_CONFIDENCE_HIGH',
+    satellite: 'CWFIS',
+    detectedAt: 1_785_416_460_000 + index * 1000,
+    region: 'Newfoundland and Labrador',
+    dayNight: '',
+    possibleExplosion: false,
+    source: WILDFIRE_CWFIS_SOURCE,
+    kind: 'active',
+    emergency: true,
+    nationalFireId: nid,
+    agencyFireId: `2026-XX${100000 + index}`,
+    agencyCode: 'NL',
+    stageOfControl: 'OC',
+    fireSize: 123456.789 - index,
+    fireWasPrescribed: 0,
+    situationReportDate: '2026-07-02T12:21:00Z',
+    statusDate: '2026-08-13T11:30:00Z',
+    recordStart: '2026-08-13T20:45:00Z',
+    recordEnd: '2026-12-31T23:59:59.999Z',
+    regionCode: 'NL-EAST-COAST-DISTRICT',
+    nationalFireCause: 'human-caused',
+    responseType: 'MONITORED',
+    fireTypeIcs: -1,
+    percentContained: -1,
+    agencyName: 'Newfoundland and Labrador Forest Service',
+  };
+}
+
+function prescribedCwfisDetection(index: number, fireSize = 999_999 - index): TaggedFireDetection {
+  const nid = `2026_EX_${String(100000 + index)}`;
+  return {
+    ...liveWidthCwfisDetection(index),
+    id: `cwfis:prescribed:${nid}`,
+    kind: 'prescribed',
+    emergency: false,
+    fireWasPrescribed: 1,
+    stageOfControl: 'EX',
+    fireSize,
+    nationalFireId: nid,
+    confidence: 'FIRE_CONFIDENCE_UNSPECIFIED',
+  };
+}
+
+const TAGGED_PEAK_FIRMS = 14_416;
+const TAGGED_PEAK_CWFIS = 584;
+
+function taggedPeakMix(): TaggedFireDetection[] {
+  return [
+    ...Array.from({ length: TAGGED_PEAK_FIRMS }, (_, index) => tagFirmsDetection(widestFirmsDetection(index))),
+    ...Array.from({ length: TAGGED_PEAK_CWFIS }, (_, index) => liveWidthCwfisDetection(index)),
+  ];
+}
+
+function capTaggedCanonical(data: { fireDetections: TaggedFireDetection[] }) {
+  return compactWildfireDashboardPayload(data, WILDFIRE_CANONICAL_DETECTION_LIMIT, {
+    maxBytes: MAX_PAYLOAD_BYTES,
+    measureBytes: (candidate) => canonicalEnvelopeBytes(candidate as { fireDetections: FireDetection[] }),
+  });
+}
+
+describe('tagged FIRMS+CWFIS payload cap', () => {
+  const taggedMix = taggedPeakMix();
+
+  it('reproduces the tagged peak: 14,416 widest FIRMS + 584 CWFIS exceed the 5MB atomicPublish cap', () => {
+    const uncapped = canonicalEnvelopeBytes({ fireDetections: taggedMix as FireDetection[] });
+    assert.ok(
+      uncapped > MAX_PAYLOAD_BYTES,
+      `tagged+CWFIS fixture must exceed 5MB (review: 5.11MB), got ${(uncapped / 1024 / 1024).toFixed(2)}MB`,
+    );
+    assert.ok(
+      uncapped > 5.05 * 1024 * 1024,
+      `fixture should be the ~5.11MB tagged peak, got ${(uncapped / 1024 / 1024).toFixed(2)}MB`,
+    );
+  });
+
+  it('trims the tagged+CWFIS mix so publish stays under 5MB and does not FATAL', () => {
+    const capped = capTaggedCanonical({ fireDetections: taggedMix });
+    const bytes = canonicalEnvelopeBytes(capped as { fireDetections: FireDetection[] });
+    assert.ok(capped.fireDetections.length < taggedMix.length, 'byte trim must drop the ranked tail');
+    assert.ok(
+      bytes <= MAX_PAYLOAD_BYTES,
+      `capped tagged+CWFIS payload ${(bytes / 1024 / 1024).toFixed(2)}MB exceeds the 5MB atomicPublish limit`,
+    );
+    assert.deepEqual(capped.pagination, { nextCursor: '', totalCount: taggedMix.length });
+  });
+
+  it('measures tagged widest 15k (not the untagged proto width) and still publishes under 5MB', () => {
+    const widestTagged = Array.from({ length: WILDFIRE_CANONICAL_DETECTION_LIMIT }, (_, index) =>
+      tagFirmsDetection(widestFirmsDetection(index)));
+    const untrimmed = canonicalEnvelopeBytes({ fireDetections: widestTagged as FireDetection[] });
+    assert.ok(
+      untrimmed > CANONICAL_PAYLOAD_BYTE_BUDGET,
+      `tagged widest 15k must be wider than the untagged 90% budget (got ${(untrimmed / 1024 / 1024).toFixed(2)}MB)`,
+    );
+    const capped = capTaggedCanonical({ fireDetections: widestTagged });
+    const bytes = canonicalEnvelopeBytes(capped as { fireDetections: FireDetection[] });
+    assert.ok(bytes <= MAX_PAYLOAD_BYTES, `tagged widest publish ${(bytes / 1024 / 1024).toFixed(2)}MB exceeds 5MB`);
+  });
+
+  it('reserves bootstrap slots so source=cwfis survives 20k FIRMS + 584 CWFIS', () => {
+    assert.equal(WILDFIRE_BOOTSTRAP_CWFIS_RESERVED, 50);
+    const firms = Array.from({ length: FIRMS_PEAK_DETECTIONS }, (_, index) =>
+      tagFirmsDetection(firmsDetection(index)));
+    const cwfis = Array.from({ length: TAGGED_PEAK_CWFIS }, (_, index) => liveWidthCwfisDetection(index));
+    const bootstrap = compactWildfireDashboardPayload({ fireDetections: [...firms, ...cwfis] });
+    assert.equal(bootstrap.fireDetections.length, WILDFIRE_DASHBOARD_DETECTION_LIMIT);
+    const keptCwfis = bootstrap.fireDetections.filter((row: TaggedFireDetection) => row.source === WILDFIRE_CWFIS_SOURCE);
+    assert.equal(keptCwfis.length, WILDFIRE_BOOTSTRAP_CWFIS_RESERVED);
+    assert.ok(keptCwfis.every((row: TaggedFireDetection) => row.source === 'cwfis'));
+    const rpcIds = limitFireDetectionsForDashboard([...firms, ...cwfis] as FireDetection[]).map((row) => row.id);
+    assert.deepEqual(bootstrap.fireDetections.map((row: FireDetection) => row.id), rpcIds);
+  });
+
+  it('drops prescribed / emergency:false fires from the 500-record dashboard picker', () => {
+    const firms = Array.from({ length: 480 }, (_, index) => tagFirmsDetection(firmsDetection(index)));
+    const prescribed = prescribedCwfisDetection(0, 1_000_000);
+    const emergencyFalseOnly = {
+      ...liveWidthCwfisDetection(1),
+      id: 'cwfis:emergency-false-only',
+      emergency: false,
+      kind: 'active',
+      fireWasPrescribed: 0,
+    };
+    const active = liveWidthCwfisDetection(2);
+    const limited = limitFireDetectionsForDashboard(
+      [...firms, prescribed, emergencyFalseOnly, active] as FireDetection[],
+    );
+    assert.equal(limited.some((row: TaggedFireDetection) => row.id === prescribed.id), false);
+    assert.equal(limited.some((row: TaggedFireDetection) => row.id === emergencyFalseOnly.id), false);
+    assert.equal(limited.some((row: TaggedFireDetection) => row.kind === 'prescribed'), false);
+    assert.equal(limited.some((row: TaggedFireDetection) => row.emergency === false), false);
+    assert.ok(limited.some((row) => row.id === active.id));
+  });
+
+  it('does not let a large prescribed EX fire consume a CWFIS bootstrap slot', () => {
+    const firms = Array.from({ length: FIRMS_PEAK_DETECTIONS }, (_, index) =>
+      tagFirmsDetection(firmsDetection(index)));
+    const prescribed = Array.from({ length: 22 }, (_, index) => prescribedCwfisDetection(index, 2_000_000 - index));
+    const active = Array.from({ length: 80 }, (_, index) => liveWidthCwfisDetection(index + 200));
+    const mix = [...firms, ...prescribed, ...active];
+    const bootstrap = compactWildfireDashboardPayload({ fireDetections: mix });
+    const keptCwfis = bootstrap.fireDetections.filter((row: TaggedFireDetection) => row.source === WILDFIRE_CWFIS_SOURCE);
+    assert.equal(bootstrap.fireDetections.length, WILDFIRE_DASHBOARD_DETECTION_LIMIT);
+    assert.equal(keptCwfis.length, WILDFIRE_BOOTSTRAP_CWFIS_RESERVED);
+    assert.ok(keptCwfis.every((row: TaggedFireDetection) => row.kind !== 'prescribed'));
+    assert.ok(keptCwfis.every((row: TaggedFireDetection) => row.emergency !== false));
+    assert.ok(keptCwfis.every((row: TaggedFireDetection) => row.fireWasPrescribed !== 1));
+    assert.equal(bootstrap.fireDetections.some((row: TaggedFireDetection) => row.kind === 'prescribed'), false);
+    const rpc = limitFireDetectionsForDashboard(mix as FireDetection[]);
+    assert.deepEqual(bootstrap.fireDetections.map((row: FireDetection) => row.id), rpc.map((row) => row.id));
+    assert.ok(rpc.every((row: TaggedFireDetection) => row.kind !== 'prescribed' && row.emergency !== false));
+  });
+
+  it('still reserves 50 bootstrap slots for active non-prescribed CWFIS', () => {
+    const firms = Array.from({ length: FIRMS_PEAK_DETECTIONS }, (_, index) =>
+      tagFirmsDetection(firmsDetection(index)));
+    const prescribed = Array.from({ length: 22 }, (_, index) => prescribedCwfisDetection(index, 9_000_000));
+    const active = Array.from({ length: 60 }, (_, index) => liveWidthCwfisDetection(index + 400));
+    const bootstrap = compactWildfireDashboardPayload({ fireDetections: [...firms, ...prescribed, ...active] });
+    const keptActive = bootstrap.fireDetections.filter((row: TaggedFireDetection) =>
+      row.source === WILDFIRE_CWFIS_SOURCE && row.kind === 'active' && row.emergency !== false);
+    assert.equal(keptActive.length, WILDFIRE_BOOTSTRAP_CWFIS_RESERVED);
+    assert.ok(keptActive.every((row: TaggedFireDetection) => String(row.id).startsWith('cwfis:')));
+    assert.equal(keptActive.some((row: TaggedFireDetection) => String(row.id).includes('prescribed')), false);
+  });
+
+  it('drops prescribed EX burns on a quiet ≤500 dashboard mix', () => {
+    const active = Array.from({ length: 400 }, (_, index) => liveWidthCwfisDetection(index));
+    const prescribed = Array.from({ length: 22 }, (_, index) => prescribedCwfisDetection(index + 400, 2_000_000 - index));
+    const mix = [...active, ...prescribed];
+    assert.equal(mix.length, 422);
+    assert.ok(mix.length <= WILDFIRE_DASHBOARD_DETECTION_LIMIT);
+
+    const bootstrap = compactWildfireDashboardPayload({ fireDetections: mix });
+    assert.equal(bootstrap.fireDetections.length, 400);
+    assert.equal(bootstrap.fireDetections.some((row: TaggedFireDetection) => row.kind === 'prescribed'), false);
+    assert.equal(bootstrap.fireDetections.some((row: TaggedFireDetection) => row.emergency === false), false);
+    assert.equal(bootstrap.fireDetections.some((row: TaggedFireDetection) => row.fireWasPrescribed === 1), false);
+    assert.equal(bootstrap.fireDetections.some((row: TaggedFireDetection) => row.stageOfControl === 'EX'), false);
+    assert.ok(bootstrap.fireDetections.every((row: TaggedFireDetection) => row.kind === 'active' && row.emergency !== false));
+
+    const rpc = limitFireDetectionsForDashboard(mix as FireDetection[]);
+    assert.deepEqual(bootstrap.fireDetections.map((row: FireDetection) => row.id), rpc.map((row) => row.id));
+    assert.ok(rpc.every((row: TaggedFireDetection) => row.kind !== 'prescribed' && row.emergency !== false));
+  });
+
+  it('publishes the tagged 5.11MB mix through runSeed without FATAL', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalExit = process.exit;
+    const originalUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const originalToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const values = new Map<string, string>();
+    const canonicalKey = 'test:wildfire:tagged-cap:v1';
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    globalThis.fetch = withSeedLockFence(async (input, init) => {
+      const url = String(input);
+      const body = init?.body == null ? null : JSON.parse(String(init.body));
+      calls.push({ url, body });
+      if (url.endsWith('/pipeline')) {
+        return Response.json(Array.isArray(body) ? body.map(() => ({ result: 1 })) : []);
+      }
+      if (url.includes('/get/')) {
+        const key = decodeURIComponent(url.slice(url.indexOf('/get/') + 5));
+        return Response.json({ result: values.get(key) ?? null });
+      }
+      if (Array.isArray(body)) {
+        if (body[0] === 'SET' && typeof body[1] === 'string') values.set(body[1], body[2]);
+        if (body[0] === 'DEL' && typeof body[1] === 'string') values.delete(body[1]);
+      }
+      return Response.json({ result: 'OK' });
+    });
+    process.exit = ((code = 0) => {
+      const error = new Error(`__test_exit__:${code}`) as Error & { exitCode: number };
+      error.exitCode = code;
+      throw error;
+    }) as typeof process.exit;
+
+    try {
+      let exitCode: number | null = null;
+      try {
+        await runSeed(
+          'test',
+          'wildfire-tagged-cap',
+          canonicalKey,
+          async () => ({ fireDetections: taggedMix, pagination: undefined, dataAvailable: true }),
+          {
+            validateFn: (data) => Array.isArray(data?.fireDetections) && data.fireDetections.length > 0,
+            ttlSeconds: 3600,
+            publishTransform: (data) => capTaggedCanonical(data),
+            declareRecords: (data) => data.fireDetections.length,
+            sourceVersion: 'VIIRS_SNPP_NRT+VIIRS_NOAA20_NRT+VIIRS_NOAA21_NRT+cwfis-wfs-v1',
+            schemaVersion: 1,
+            maxStaleMin: 1440,
+          },
+        );
+      } catch (error) {
+        if (String((error as Error).message).startsWith('__test_exit__:')) {
+          exitCode = (error as Error & { exitCode: number }).exitCode;
+        } else {
+          throw error;
+        }
+      }
+      assert.equal(exitCode, 0, 'runSeed must not FATAL on the tagged 5.11MB mix');
+      const matching = calls.filter((call) => {
+        const body = call.body;
+        return Array.isArray(body) && body[0] === 'SET' && body[1] === canonicalKey;
+      });
+      assert.ok(matching.length > 0, 'expected a SET for the canonical key');
+      const published = String((matching.at(-1)!.body as unknown[])[2]);
+      assert.ok(Buffer.byteLength(published, 'utf8') <= MAX_PAYLOAD_BYTES);
     } finally {
       globalThis.fetch = originalFetch;
       process.exit = originalExit;

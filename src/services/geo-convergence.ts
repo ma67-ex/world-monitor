@@ -1,5 +1,6 @@
 import type { SocialUnrestEvent, MilitaryFlight, MilitaryVessel } from '@/types';
 import type { Earthquake } from '@/services/earthquakes';
+import { usableCoord } from '../../shared/analysis-adapter-guards';
 import { generateSignalId } from '@/utils/analysis-constants';
 import type { CorrelationSignalCore } from './analysis-core';
 import { INTEL_HOTSPOTS, CONFLICT_ZONES, STRATEGIC_WATERWAYS } from '@/config/geo';
@@ -8,7 +9,7 @@ import {
   geoConvergenceToSignal as toSignal,
   getLocationName as reverseGeocode,
   type GeoConvergenceAlert,
-  type GeoEventType,
+  type GeoEventInput,
   type GeoPlaceDatasets,
 } from '../../shared/analysis-geo-convergence';
 
@@ -33,42 +34,27 @@ function toEpochMs(value: Date | undefined): number | undefined {
   return value ? value.getTime() : undefined;
 }
 
-export function ingestGeoEvent(
-  lat: number,
-  lon: number,
-  type: GeoEventType,
-  timestamp: Date = new Date()
-): void {
-  engine.ingest(lat, lon, type, timestamp.getTime());
-}
-
 export function ingestProtests(events: SocialUnrestEvent[]): void {
-  for (const e of events) {
-    engine.ingest(e.lat, e.lon, 'protest', toEpochMs(e.time));
-  }
+  engine.ingestEvents(events.map(e => ({ lat: e.lat, lon: e.lon, time: toEpochMs(e.time) })), 'protest');
 }
 
 export function ingestFlights(flights: MilitaryFlight[]): void {
-  for (const f of flights) {
-    engine.ingest(f.lat, f.lon, 'military_flight', toEpochMs(f.lastSeen));
-  }
+  engine.ingestEvents(flights.map(f => ({ lat: f.lat, lon: f.lon, time: toEpochMs(f.lastSeen) })), 'military_flight');
 }
 
 export function ingestVessels(vessels: MilitaryVessel[]): void {
-  for (const v of vessels) {
-    engine.ingest(v.lat, v.lon, 'military_vessel', toEpochMs(v.lastAisUpdate));
-  }
+  engine.ingestEvents(vessels.map(v => ({ lat: v.lat, lon: v.lon, time: toEpochMs(v.lastAisUpdate) })), 'military_vessel');
 }
 
 export function ingestEarthquakes(quakes: Earthquake[]): void {
+  const events: GeoEventInput[] = [];
   for (const q of quakes) {
-    engine.ingest(
-      q.location?.latitude ?? 0,
-      q.location?.longitude ?? 0,
-      'earthquake',
-      new Date(q.occurredAt).getTime()
-    );
+    const lat = q.location?.latitude ?? null;
+    const lon = q.location?.longitude ?? null;
+    if (!usableCoord(lat, lon) || lon === null) continue;
+    events.push({ lat, lon, time: new Date(q.occurredAt).getTime() });
   }
+  engine.ingestEvents(events, 'earthquake');
 }
 
 export function detectGeoConvergence(seenAlerts: Set<string>): GeoConvergenceAlert[] {
@@ -94,21 +80,6 @@ export function clearCells(): void {
 
 export function getCellCount(): number {
   return engine.cellCount();
-}
-
-export function debugGetCells(): Map<string, unknown> {
-  return new Map(
-    engine.snapshot().map(cell => [
-      cell.id,
-      {
-        id: cell.id,
-        lat: cell.lat,
-        lon: cell.lon,
-        events: new Map(cell.events.map(e => [e.type, { count: e.count, lastSeen: new Date(e.lastSeen) }])),
-        firstSeen: new Date(cell.firstSeen),
-      },
-    ])
-  );
 }
 
 export function getAlertsNearLocation(lat: number, lon: number, radiusKm: number): { score: number; types: number } | null {

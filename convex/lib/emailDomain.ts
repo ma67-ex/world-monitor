@@ -14,7 +14,7 @@ export { extractDomain };
 // handler already enforces (`server/worldmonitor/leads/v1/submit-contact.ts`,
 // FREE_EMAIL_DOMAINS). The two are NOT wired to a single import on purpose:
 // that handler is bundled for the edge/gateway (esbuild via
-// scripts/build-sidecar-sebuf.mjs) and must NOT pull in `mailchecker`'s ~1MB
+// scripts/build-sidecar-handlers.mjs) and must NOT pull in `mailchecker`'s ~1MB
 // disposable-domain list, which this module depends on. See the U1 report note.
 export const FREE_EMAIL_DOMAINS = new Set<string>([
   "gmail.com", "googlemail.com", "yahoo.com", "yahoo.fr", "yahoo.co.uk", "yahoo.co.jp",
@@ -42,9 +42,8 @@ export function sameDomain(a: string, b: string): boolean {
 /**
  * True only when `email` is well-formed AND its domain is a real corporate
  * domain: not a free/consumer provider, not disposable/temporary, and it
- * contains a dot. This is the gate that makes "same company email" mean a
- * company — used to decide whether a Business owner may invite teammates and
- * whether an invitee's address is acceptable.
+ * contains a dot. This keeps Business seat invitations limited to corporate
+ * addresses: both the owner and each invitee must pass it.
  */
 export function isCorporateDomain(email: string): boolean {
   const domain = extractDomain(email);

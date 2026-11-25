@@ -1,5 +1,5 @@
 import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
-import { formatIntelBrief } from '@/utils/format-intel-brief';
+import { formatIntelBrief, renderBriefEvidenceFooter, type IntelBriefEvidence } from '@/utils/format-intel-brief';
 import { collectBriefSources, renderBriefSourcesFooter, type BriefSource } from '@/utils/brief-sources';
 import { t } from '@/services/i18n';
 import { getCSSColor, showToast } from '@/utils';
@@ -17,6 +17,7 @@ import type { CountryBriefExport, CountryEvidenceBundleInput } from '@/utils/exp
 import { ME_STRIKE_BOUNDS } from '@/services/country-geometry';
 import { toFlagEmoji } from '@/utils/country-flag';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { copyText } from '@/utils/copy-text';
 import { getAuthState } from '@/services/auth-state';
 import { hasPremiumAccess } from '@/services/panel-gating';
 import {
@@ -82,6 +83,12 @@ export class CountryBriefPage implements CountryBriefPanel {
   constructor() {
     this.overlay = document.createElement('div');
     this.overlay.className = 'country-brief-overlay';
+    // Deliberately carries no `role="dialog"` / `aria-modal`. Adding either
+    // would make the reload guard see it (`src/utils/open-modal.ts`), and this
+    // element is appended once and hides via `opacity: 0` rather than leaving
+    // layout, so `checkVisibility()` would report it visible for the whole
+    // session and stop every automatic reload. Give it a dialog role only
+    // together with a `display`-based hidden state and a `declareOverlay` call.
     document.body.appendChild(this.overlay);
 
     // Single delegated click handler for all interactive elements.
@@ -105,12 +112,13 @@ export class CountryBriefPage implements CountryBriefPanel {
       const linkShareBtn = target.closest('.cb-link-share-btn') as HTMLButtonElement | null;
       if (linkShareBtn) {
         if (!this.currentCode || !this.currentName) return;
-        const url = `${window.location.origin}/?c=${this.currentCode}`;
-        navigator.clipboard.writeText(url).then(() => {
+        const url = `${window.location.origin}/dashboard?c=${this.currentCode}`;
+        void copyText(url).then((copied) => {
+          if (!copied) return;
           const orig = linkShareBtn.innerHTML;
           setTrustedHtml(linkShareBtn, trustedHtml('<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>', "legacy direct innerHTML migration"));
           setTimeout(() => { setTrustedHtml(linkShareBtn, trustedHtml(orig, "legacy direct innerHTML migration")); }, 1500);
-        }).catch(() => {});
+        });
         return;
       }
 
@@ -267,7 +275,8 @@ export class CountryBriefPage implements CountryBriefPanel {
     if (signals.aisDisruptions > 0) chips.push(`<span class="signal-chip outage">🚢 ${signals.aisDisruptions} AIS Disruptions</span>`);
     if (signals.satelliteFires > 0) chips.push(`<span class="signal-chip climate">🔥 ${signals.satelliteFires} Satellite Fires</span>`);
     if (signals.radiationAnomalies > 0) chips.push(`<span class="signal-chip outage">☢️ ${signals.radiationAnomalies} Radiation Anomalies</span>`);
-    if (signals.temporalAnomalies > 0) chips.push(`<span class="signal-chip outage">⏱️ ${signals.temporalAnomalies} Temporal Anomalies</span>`);
+    if (signals.temporalAnomalies === null) chips.push(`<span class="signal-chip outage">⏱️ ${t('countryBrief.chips.temporalUnavailable')}</span>`);
+    else if (signals.temporalAnomalies > 0) chips.push(`<span class="signal-chip outage">⏱️ ${signals.temporalAnomalies} Temporal Anomalies</span>`);
     if (signals.cyberThreats > 0) chips.push(`<span class="signal-chip conflict">🛡️ ${signals.cyberThreats} Cyber Threats</span>`);
     if (signals.earthquakes > 0) chips.push(`<span class="signal-chip quake">🌍 ${signals.earthquakes} ${t('modals.countryBrief.signals.earthquakes')}</span>`);
     if (signals.displacementOutflow > 0) {
@@ -285,6 +294,7 @@ export class CountryBriefPage implements CountryBriefPanel {
         : 'military';
       const advisoryLabel = signals.travelAdvisoryMaxLevel === 'do-not-travel' ? 'Do Not Travel'
         : signals.travelAdvisoryMaxLevel === 'reconsider' ? 'Reconsider Travel'
+        : signals.travelAdvisoryMaxLevel === 'normal' ? t('countryBrief.chips.normalPrecautions')
         : 'Exercise Caution';
       chips.push(`<span class="signal-chip ${advisoryClass}">\u26A0\uFE0F ${signals.travelAdvisories} Advisory: ${advisoryLabel}</span>`);
     }
@@ -298,10 +308,6 @@ export class CountryBriefPage implements CountryBriefPanel {
 
   public setShareStoryHandler(handler: (code: string, name: string) => void): void {
     this.onShareStory = handler;
-  }
-
-  public setExportImageHandler(handler: (code: string, name: string) => void): void {
-    this.onExportImage = handler;
   }
 
   public showLoading(): void {
@@ -527,11 +533,13 @@ export class CountryBriefPage implements CountryBriefPanel {
     this.currentBriefGeneratedAt = data.generatedAt ?? null;
     this.currentBriefCached = data.cached === true;
     const briefSources = collectBriefSources(data.sources ?? [], 6);
-    const formatted = this.formatBrief(data.brief, briefSources, this.currentHeadlineCount);
+    const formatted = this.formatBrief(data.brief, briefSources, this.currentHeadlineCount, data.evidence);
     const sourcesFooter = renderBriefSourcesFooter(briefSources, { className: 'cb-brief-sources' });
+    const evidenceFooter = renderBriefEvidenceFooter(data.evidence, { className: 'cb-brief-sources cb-brief-evidence' });
     setTrustedHtml(section, trustedHtml(`
       <div class="cb-brief-text">${formatted}</div>
       ${sourcesFooter}
+      ${evidenceFooter}
       <div class="cb-brief-footer">
         ${data.cached ? `<span class="intel-cached">📋 ${t('modals.countryBrief.cached')}</span>` : `<span class="intel-fresh">✨ ${t('modals.countryBrief.fresh')}</span>`}
         <span class="intel-timestamp">${data.generatedAt ? new Date(data.generatedAt).toLocaleTimeString() : ''}</span>
@@ -551,11 +559,14 @@ export class CountryBriefPage implements CountryBriefPanel {
       const pct = Math.round(m.yesPrice);
       const noPct = 100 - pct;
       const vol = m.volume ? `$${(m.volume / 1000).toFixed(0)}k vol` : '';
+      const source = m.source === 'kalshi' ? 'Kalshi' : 'Polymarket';
+      const sourceKey = m.source === 'kalshi' ? 'kalshi' : 'polymarket';
       const safeUrl = sanitizeUrl(m.url || '');
       const link = safeUrl ? ` <a href="${safeUrl}" target="_blank" rel="noopener" class="cb-market-link">↗</a>` : '';
       return `
         <div class="cb-market-item">
           <div class="cb-market-title">${escapeHtml(m.title.slice(0, 100))}${link}</div>
+          <span class="prediction-source" data-source="${sourceKey}">${source}</span>
           <div class="market-bar">
             <div class="market-yes" style="width:${pct}%">${pct}%</div>
             <div class="market-no" style="width:${noPct}%">${noPct > 15 ? noPct + '%' : ''}</div>
@@ -684,7 +695,7 @@ export class CountryBriefPage implements CountryBriefPanel {
     return t('modals.countryBrief.timeAgo.d', { count: Math.floor(hours / 24) });
   }
 
-  private formatBrief(text: string, sources: BriefSource[] = [], headlineCount = 0): string {
+  private formatBrief(text: string, sources: BriefSource[] = [], headlineCount = 0, evidence?: IntelBriefEvidence[]): string {
     return formatIntelBrief(
       text,
       sources.length > 0
@@ -692,6 +703,8 @@ export class CountryBriefPage implements CountryBriefPanel {
         : headlineCount > 0
           ? { count: headlineCount, hrefPrefix: '#cb-news-' }
           : undefined,
+      this.currentName ?? undefined,
+      evidence,
     );
   }
 
@@ -723,6 +736,7 @@ export class CountryBriefPage implements CountryBriefPanel {
         satelliteFires: this.currentSignals.satelliteFires,
         radiationAnomalies: this.currentSignals.radiationAnomalies,
         temporalAnomalies: this.currentSignals.temporalAnomalies,
+        globalTemporalAnomalies: this.currentSignals.globalTemporalAnomalies ?? null,
         cyberThreats: this.currentSignals.cyberThreats,
         earthquakes: this.currentSignals.earthquakes,
         displacementOutflow: this.currentSignals.displacementOutflow,

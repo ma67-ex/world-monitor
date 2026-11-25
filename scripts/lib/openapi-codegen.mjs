@@ -422,11 +422,22 @@ export function provenanceValueSchema(dimension, provenanceContract) {
 // TypeScript so the published auth contract can never drift from runtime. Each
 // throws on a full parse miss or empty set — a rename can't silently mislabel
 // auth (the caller adds a further non-empty guard on the union).
+
+/**
+ * The quoted string literals in a Set/array source block, with full-line `//`
+ * comments removed first: an apostrophe in a comment ("the handler's ...") would
+ * otherwise pair with the next quote and swallow the entries that follow.
+ */
+function quotedLiterals(block) {
+  const code = block.replace(/^[ \t]*\/\/.*$/gm, '');
+  return [...code.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+}
+
 export function readPublicNoAuthPaths() {
   const src = readFileSync(resolve(root, 'server/gateway.ts'), 'utf8');
   const block = src.match(/PUBLIC_NO_AUTH_RPC_PATHS\s*=\s*new Set<string>\(\[([\s\S]*?)\]\)/);
   if (!block) throw new Error('could not locate PUBLIC_NO_AUTH_RPC_PATHS in server/gateway.ts');
-  const paths = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const paths = quotedLiterals(block[1]);
   if (paths.length === 0) throw new Error('PUBLIC_NO_AUTH_RPC_PATHS parsed as empty — refusing to run');
   return new Set(paths);
 }
@@ -444,7 +455,7 @@ export function readPremiumRpcPaths() {
   const src = readFileSync(resolve(root, 'src/shared/premium-paths.ts'), 'utf8');
   const block = src.match(/PREMIUM_RPC_PATHS\s*=\s*new Set<string>\(\[([\s\S]*?)\]\)/);
   if (!block) throw new Error('could not locate PREMIUM_RPC_PATHS in src/shared/premium-paths.ts');
-  return [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  return quotedLiterals(block[1]);
 }
 
 // ── Billing-verification wire contract (#5447) ──────────────────────────────
@@ -452,7 +463,8 @@ export function readPremiumRpcPaths() {
 // billing-verification contract: a retryable 503 (Retry-After 1-60s +
 // X-Billing-Verification header + {error, code} body) while a renewal is being
 // re-confirmed or the entitlement backend is unreachable, and a hard 403 whose
-// body carries code `subscription_lapsed` once the lapse is provider-confirmed.
+// body carries a terminal code (`subscription_lapsed`, `payment_failed`) once
+// the provider has confirmed the state.
 // The status union is parsed from the exported BillingVerificationStatus type
 // so the published enum can never drift from runtime (fail-closed like the
 // parsers above).
@@ -465,9 +477,19 @@ export function readBillingVerificationStatuses() {
   return statuses;
 }
 
-// The provider-confirmed lapse is the one union member answered with a 403
-// instead of the retryable 503 (entitlement-check.ts getBillingVerificationDenial).
-export const LAPSED_BILLING_STATUS = 'subscription_lapsed';
+// The provider-confirmed members answered with a 403 instead of the retryable
+// 503, read from the same array entitlement-check.ts classifies with.
+export function readTerminalBillingStatuses() {
+  const src = readFileSync(resolve(root, 'server/_shared/entitlement-coverage.ts'), 'utf8');
+  const statuses = readConstStringArray(src, 'TERMINAL_BILLING_STATUSES');
+  if (statuses.length === 0) throw new Error('TERMINAL_BILLING_STATUSES parsed as empty — refusing to run');
+  const union = readBillingVerificationStatuses();
+  const unknown = statuses.filter((s) => !union.includes(s));
+  if (unknown.length > 0) {
+    throw new Error(`TERMINAL_BILLING_STATUSES names ${unknown.join(', ')} outside BillingVerificationStatus — the 403/503 split needs review`);
+  }
+  return statuses;
+}
 
 // Transient backend-unreachable denials reuse the same wire shape but their
 // code is not part of the persisted status union — assert it still exists in
@@ -482,13 +504,10 @@ export function readEntitlementUnavailableCode() {
 }
 
 // Retryable-503 code enum, derived: every union status except the hard-403
-// lapse, plus the transient backend-unreachable code.
+// terminal ones, plus the transient backend-unreachable code.
 export function readRetryableBillingCodes() {
-  const statuses = readBillingVerificationStatuses();
-  if (!statuses.includes(LAPSED_BILLING_STATUS)) {
-    throw new Error(`BillingVerificationStatus no longer contains ${LAPSED_BILLING_STATUS} — the 403/503 split needs review`);
-  }
-  return [...statuses.filter((s) => s !== LAPSED_BILLING_STATUS), readEntitlementUnavailableCode()];
+  const terminal = new Set(readTerminalBillingStatuses());
+  return [...readBillingVerificationStatuses().filter((s) => !terminal.has(s)), readEntitlementUnavailableCode()];
 }
 
 /**
@@ -507,7 +526,7 @@ export function readIdempotencyExemptPaths() {
   if (!block) {
     throw new Error('could not locate IDEMPOTENCY_EXEMPT_RPC_PATHS in server/_shared/idempotency.ts');
   }
-  return new Set([...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]));
+  return new Set(quotedLiterals(block[1]));
 }
 
 function readConstStringArray(src, name) {
@@ -1013,4 +1032,16 @@ export const PUBLIC_FORBIDDEN_GATES = new Map([
       },
     },
   }],
+]);
+
+// ── Operator review key (#9192) ──────────────────────────────────────────────
+// Routes the gateway lets through without an API key (they are in
+// PUBLIC_NO_AUTH_RPC_PATHS) whose handler then requires X-Trust-Review-Key to
+// match TRUST_REVIEW_SECRET (isTrustReviewer, server/_shared/error-reports.ts)
+// and answers 401 `{ message: 'Unauthorized' }` without it. A WorldMonitor API
+// key alone authorizes neither, so the spec declares the review key instead of
+// `security: []`.
+export const TRUST_REVIEW_KEY_PATHS = new Set([
+  '/api/news/v1/list-error-reports',
+  '/api/news/v1/review-error-report',
 ]);

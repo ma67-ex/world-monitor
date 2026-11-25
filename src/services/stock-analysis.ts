@@ -65,10 +65,6 @@ export async function fetchStockAnalysesForTargets(targets: StockAnalysisTarget[
   });
 }
 
-export async function fetchStockAnalyses(limitOverride?: number): Promise<StockAnalysisResult[]> {
-  return fetchStockAnalysesForTargets(getStockAnalysisTargets(limitOverride));
-}
-
 // BYOK results are tagged with this provider so StockAnalysisPanel's
 // renderCard can skip the technical-indicator grid (MA/RSI/volume/trend)
 // instead of showing fabricated zeros for numbers no free source provides.

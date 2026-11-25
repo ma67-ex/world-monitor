@@ -47,6 +47,31 @@ describe('buildUsageIdentity — plan_key attribution (#4572)', () => {
   });
 });
 
+describe('buildUsageIdentity — Enterprise contract account attribution', () => {
+  test('a pooled user API key carries account_id and overage', () => {
+    const ident = buildUsageIdentity(baseInput({
+      isUserApiKey: true,
+      sessionUserId: 'u',
+      planKey: 'enterprise',
+      accountId: 'acct_1',
+      overage: true,
+    }));
+    expect(ident).toMatchObject({ auth_kind: 'user_api_key', account_id: 'acct_1', overage: true });
+  });
+
+  test('every other identity reports null, even with stale account input', () => {
+    for (const input of [
+      baseInput({ sessionUserId: 'u', accountId: 'acct_1', overage: false }),
+      baseInput({ enterpriseApiKey: 'wm_ent_x', accountId: 'acct_1', overage: true }),
+      baseInput({ accountId: 'acct_1' }),
+      baseInput({ isUserApiKey: true, sessionUserId: 'u' }),
+    ]) {
+      const ident = buildUsageIdentity(input);
+      expect([ident.account_id, ident.overage]).toEqual([null, null]);
+    }
+  });
+});
+
 describe('buildUsageIdentity — auth_kind branches', () => {
   test('user_api_key takes precedence over every other signal', () => {
     const ident = buildUsageIdentity(baseInput({
@@ -105,12 +130,12 @@ describe('buildUsageIdentity — auth_kind branches', () => {
     expect(ident.tier).toBe(3);
   });
 
-  test('widget_key: customer_id is the widget key itself, principal_id is hashed', () => {
+  test('widget_key: customer_id is a static label, principal_id is hashed', () => {
     const ident = buildUsageIdentity(baseInput({
       widgetKey: 'widget_pub_xyz',
     }));
     expect(ident.auth_kind).toBe('widget_key');
-    expect(ident.customer_id).toBe('widget_pub_xyz');
+    expect(ident.customer_id).toBe('widget');
     expect(ident.principal_id).not.toBe('widget_pub_xyz');
     expect(ident.principal_id).toMatch(/^[0-9a-z]+$/);
     expect(ident.tier).toBe(0);
@@ -157,10 +182,9 @@ describe('buildUsageIdentity — secret handling', () => {
     expect(JSON.stringify(ident)).not.toContain(secret);
   });
 
-  test('widget key appears as customer_id (intentional — widget keys are public)', () => {
-    // Widget keys are embeds installed on third-party sites; treating them as
-    // customer attribution is the contract documented in usage-identity.ts:73-79.
-    const ident = buildUsageIdentity(baseInput({ widgetKey: 'widget_public_xyz' }));
-    expect(ident.customer_id).toBe('widget_public_xyz');
+  test('widget relay credential never appears verbatim in any output field', () => {
+    const secret = 'synthetic-widget-relay-secret';
+    const ident = buildUsageIdentity(baseInput({ widgetKey: secret }));
+    expect(JSON.stringify(ident)).not.toContain(secret);
   });
 });

@@ -13,16 +13,12 @@ import { t } from '@/services/i18n';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import { escapeHtml } from '@/utils/sanitize';
 import { type ConfirmDialogOptions, resolveConfirmLabels } from '@/components/confirm-dialog-labels';
+import { declareOverlay } from '@/utils/open-modal';
 
 export type { ConfirmDialogOptions, ResolvedConfirmLabels } from '@/components/confirm-dialog-labels';
 export { resolveConfirmLabels } from '@/components/confirm-dialog-labels';
 
 let activeOverlay: HTMLElement | null = null;
-
-/** Whether a confirm dialog is currently on screen (callers can avoid re-opening). */
-export function isConfirmDialogOpen(): boolean {
-  return activeOverlay !== null;
-}
 
 /**
  * Show a non-blocking confirm dialog. Single-instance: a call made while one is
@@ -46,6 +42,7 @@ export function confirmDialog(opts: ConfirmDialogOptions): Promise<boolean> {
     overlay.className = 'confirm-dialog-overlay';
     overlay.setAttribute('role', 'dialog');
     overlay.setAttribute('aria-modal', 'true');
+    declareOverlay(overlay, { reload: 'blocking' });
     // Single-instance (guarded below), so the fixed message id is unique.
     overlay.setAttribute('aria-labelledby', 'confirm-dialog-message');
     setTrustedHtml(

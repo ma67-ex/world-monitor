@@ -22,6 +22,12 @@ const bundlePath = resolve(apiDir, 'worldmonitor.openapi.yaml');
 const protoWorldmonitorDir = resolve(root, 'proto/worldmonitor');
 const CHECK = process.argv.includes('--check');
 const HTTP_METHODS = new Set(['get', 'post', 'put', 'delete', 'patch', 'options', 'head']);
+// sebuf v0.11.1 places repeated bounds on the item schema. Move the new
+// country-headline contract's bounds to its arrays until the generator fixes this.
+const COUNTRY_HEADLINE_ARRAY_FIELDS = [
+  ['ListCountryHeadlinesRequest', 'countryCodes'],
+  ['CountryHeadlineBucket', 'items'],
+];
 
 // Fields that are required in the public OpenAPI request contract but are not
 // safe to express as buf.validate.required because runtime code has a
@@ -39,6 +45,218 @@ const OPENAPI_ONLY_REQUIRED_FIELDS = new Map([
     ],
   ],
 ]);
+
+// Response fields that the scorecard handlers always materialize. The proto3
+// generator cannot infer JSON requiredness from scalar defaults, so keep this
+// explicit until sebuf can express response-shape invariants directly.
+const OPENAPI_REQUIRED_SCHEMA_FIELDS = new Map([
+  ['GetFiveFactorScorecardResponse', ['unavailable', 'unavailableReason']],
+  ['GetBlocScorecardResponse', ['unavailable', 'unavailableReason']],
+  ['ListFiveFactorScorecardsResponse', ['scorecards', 'unavailable', 'unavailableReason', 'methodologyVersion', 'computedAt']],
+  ['FiveFactorCountryScorecard', ['countryCode', 'methodologyVersion', 'computedAt', 'pillars']],
+  ['FiveFactorBlocScorecard', ['id', 'label', 'methodologyVersion', 'computedAt', 'members', 'includedMembers', 'excludedMembers', 'pillars']],
+  ['FiveFactorPillar', ['pillar', 'hasScore', 'score', 'subScore', 'band', 'inputCoverage', 'aggregationMethod', 'inputs', 'insufficientReasons', 'includedMembers', 'excludedMembers', 'memberWeights']],
+  ['ScorecardEvidence', ['inputId', 'available', 'value', 'hasValue', 'year', 'unit', 'source', 'sourceKey', 'unavailableReason', 'quality', 'observations', 'countryCode']],
+  ['ScorecardObservation', ['name', 'value', 'year', 'unit', 'source', 'indicatorCode']],
+  ['ExcludedBlocMember', ['countryCode', 'reason']],
+  ['ScorecardMemberWeight', ['countryCode', 'populationMillions', 'hasPopulation']],
+  ['FiveFactorCountryScorecardSummary', ['countryCode', 'pillars']],
+  ['FiveFactorPillarSummary', ['pillar', 'hasScore', 'score', 'subScore', 'band', 'inputCoverage', 'insufficientReasons']],
+]);
+
+const SCORECARD_REASON_PATTERN = '^(?:source-unavailable|country-unavailable|invalid-value|stale|coverage-below-floor|required-group-missing|missing-population|redistribution-blocked)$';
+const ISO2_PATTERN = '^[A-Z]{2}$';
+const PHYSICAL_METAL_PATTERN = '^(?:gold|silver)$';
+const PHYSICAL_METALS_DESCRIPTION = 'Accepted values are "gold" and "silver". Empty returns both metals.';
+// protoc-gen-openapiv3 drops the items pattern and copies repeated rules onto
+// the item schema, so both metal-filtered market RPCs get their contract here.
+const PHYSICAL_METAL_RPCS = [
+  {
+    requestSchema: 'GetPhysicalDivergenceIndexRequest',
+    operationId: 'GetPhysicalDivergenceIndex',
+    path: '/api/market/v1/get-physical-divergence-index',
+  },
+  {
+    requestSchema: 'GetPhysicalPremiumsRequest',
+    operationId: 'GetPhysicalPremiums',
+    path: '/api/market/v1/get-physical-premiums',
+  },
+];
+// GetMonthlySitcTrade: the generator drops the sections item pattern, copies
+// the repeated max_items onto the item schema, and emits neither bound on the
+// GET query parameters. Restore the proto contract on all three.
+const SITC_SECTION_PATTERN = '^([0-9]|overall)$';
+const SITC_MAX_SECTIONS = 11;
+const SITC_MAX_MONTHS = 480;
+const SITC_RPC = {
+  requestSchema: 'GetMonthlySitcTradeRequest',
+  operationId: 'GetMonthlySitcTrade',
+  path: '/api/trade/v1/get-monthly-sitc-trade',
+};
+const BASELINE_REGION_DESCRIPTION = 'Only the global baseline is defined. Omitted or empty defaults to global.';
+
+function scorecardResponseOneOf(unavailableReasons) {
+  return [
+    {
+      required: ['scorecard'],
+      properties: { unavailable: { const: false }, unavailableReason: { const: '' } },
+    },
+    {
+      not: { required: ['scorecard'] },
+      properties: { unavailable: { const: true }, unavailableReason: { enum: unavailableReasons } },
+    },
+  ];
+}
+
+function injectScorecardJsonContracts(spec) {
+  const schemas = spec.components?.schemas;
+  if (!schemas?.GetBlocScorecardRequest) return false;
+  let changed = false;
+  const set = (target, key, value) => {
+    if (!eq(target?.[key], value)) {
+      target[key] = value;
+      changed = true;
+    }
+  };
+
+  const blocRequest = schemas.GetBlocScorecardRequest;
+  set(blocRequest.properties, 'members', {
+    type: 'array',
+    items: { type: 'string', pattern: ISO2_PATTERN },
+    minItems: 2,
+    maxItems: 30,
+    uniqueItems: true,
+    description: 'Custom list of 2-30 unique uppercase ISO 3166-1 alpha-2 members. Provide either preset or members; do not provide both.',
+  });
+  set(blocRequest, 'oneOf', [
+    { required: ['preset'], not: { required: ['members'] } },
+    { required: ['members'], not: { required: ['preset'] } },
+  ]);
+
+  const repeatedStringContracts = [
+    ['FiveFactorPillar', 'insufficientReasons', SCORECARD_REASON_PATTERN],
+    ['FiveFactorPillar', 'includedMembers', ISO2_PATTERN],
+    ['FiveFactorPillarSummary', 'insufficientReasons', SCORECARD_REASON_PATTERN],
+    ['FiveFactorBlocScorecard', 'members', ISO2_PATTERN],
+    ['FiveFactorBlocScorecard', 'includedMembers', ISO2_PATTERN],
+  ];
+  for (const [schemaName, field, pattern] of repeatedStringContracts) {
+    if (schemas[schemaName]?.properties?.[field]) {
+      set(schemas[schemaName].properties[field], 'items', { type: 'string', pattern });
+    }
+  }
+
+  set(schemas.GetFiveFactorScorecardResponse, 'oneOf', scorecardResponseOneOf([
+    'country-unavailable',
+    'scorecard-snapshot-unavailable',
+  ]));
+  set(schemas.GetBlocScorecardResponse, 'oneOf', scorecardResponseOneOf([
+    'bloc-members-unavailable',
+    'scorecard-snapshot-unavailable',
+  ]));
+  set(schemas.ListFiveFactorScorecardsResponse, 'oneOf', [
+    {
+      properties: {
+        unavailable: { const: false },
+        unavailableReason: { const: '' },
+        methodologyVersion: { const: '1.0.0' },
+      },
+    },
+    {
+      properties: {
+        unavailable: { const: true },
+        unavailableReason: { const: 'scorecard-snapshot-unavailable' },
+        methodologyVersion: { const: '' },
+        computedAt: { const: '' },
+        scorecards: { maxItems: 0 },
+      },
+    },
+  ]);
+
+  const operation = spec.paths?.['/api/scorecard/v1/get-bloc-scorecard']?.get;
+  const membersParam = operation?.parameters?.find((param) => param?.in === 'query' && param.name === 'members');
+  if (membersParam) {
+    set(membersParam, 'schema', {
+      type: 'array',
+      items: { type: 'string', pattern: ISO2_PATTERN },
+      minItems: 2,
+      maxItems: 30,
+      uniqueItems: true,
+    });
+    set(operation, 'x-worldmonitor-selector-one-of', ['preset', 'members']);
+  }
+  return changed;
+}
+
+function injectPhysicalMetalJsonContracts(spec) {
+  let changed = false;
+  for (const rpc of PHYSICAL_METAL_RPCS) {
+    if (injectPhysicalMetalJsonContract(spec, rpc)) changed = true;
+  }
+  return changed;
+}
+
+function injectPhysicalMetalJsonContract(spec, { requestSchema, path }) {
+  const schemas = spec.components?.schemas;
+  const request = schemas?.[requestSchema];
+  if (!request?.properties?.metals) return false;
+  let changed = false;
+  const expected = {
+    type: 'array',
+    items: { type: 'string', pattern: PHYSICAL_METAL_PATTERN },
+    maxItems: 2,
+    uniqueItems: true,
+    description: PHYSICAL_METALS_DESCRIPTION,
+  };
+  if (!eq(request.properties.metals, expected)) {
+    request.properties.metals = expected;
+    changed = true;
+  }
+  const operation = spec.paths?.[path]?.get;
+  const parameter = operation?.parameters?.find((candidate) => (
+    candidate?.in === 'query' && candidate.name === 'metals'
+  ));
+  const parameterSchema = {
+    type: 'array',
+    items: { type: 'string', pattern: PHYSICAL_METAL_PATTERN },
+    maxItems: 2,
+    uniqueItems: true,
+  };
+  if (parameter && !eq(parameter.schema, parameterSchema)) {
+    parameter.schema = parameterSchema;
+    changed = true;
+  }
+  return changed;
+}
+
+function injectSitcJsonContract(spec) {
+  const sections = spec.components?.schemas?.[SITC_RPC.requestSchema]?.properties?.sections;
+  if (!sections) return false;
+  let changed = false;
+  const items = sections.items ?? {};
+  if (items.pattern !== SITC_SECTION_PATTERN || 'maxItems' in items || sections.maxItems !== SITC_MAX_SECTIONS) {
+    delete items.maxItems;
+    items.pattern = SITC_SECTION_PATTERN;
+    sections.items = items;
+    sections.maxItems = SITC_MAX_SECTIONS;
+    changed = true;
+  }
+  const parameters = spec.paths?.[SITC_RPC.path]?.get?.parameters ?? [];
+  for (const parameter of parameters) {
+    if (parameter?.in !== 'query') continue;
+    const schema = parameter.schema ?? {};
+    if (parameter.name === 'sections'
+      && (schema.items?.pattern !== SITC_SECTION_PATTERN || schema.maxItems !== SITC_MAX_SECTIONS)) {
+      parameter.schema = { ...schema, items: { ...schema.items, pattern: SITC_SECTION_PATTERN }, maxItems: SITC_MAX_SECTIONS };
+      changed = true;
+    }
+    if (parameter.name === 'months' && (schema.minimum !== 0 || schema.maximum !== SITC_MAX_MONTHS)) {
+      parameter.schema = { ...schema, minimum: 0, maximum: SITC_MAX_MONTHS };
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 const sortRec = (x) =>
   Array.isArray(x)
@@ -149,6 +367,9 @@ function requiredFieldsForSchema(schemaName, schema) {
       }
     }
   }
+  for (const field of OPENAPI_REQUIRED_SCHEMA_FIELDS.get(schemaName) ?? []) {
+    if (Object.prototype.hasOwnProperty.call(schema?.properties ?? {}, field)) required.add(field);
+  }
   return required;
 }
 
@@ -180,11 +401,30 @@ function queryNamesForRequiredFields(schemaName, schema) {
 }
 
 function injectJson(spec) {
-  let changed = false;
+  let changed = injectScorecardJsonContracts(spec);
+  if (injectPhysicalMetalJsonContracts(spec)) changed = true;
+  if (injectSitcJsonContract(spec)) changed = true;
   const schemas = spec.components?.schemas ?? {};
+  // The generator emits const but does not account for IGNORE_IF_ZERO_VALUE.
+  const baselineRegion = schemas.GetTemporalBaselineRequest?.properties?.region;
+  if (baselineRegion && (baselineRegion.const !== undefined || !eq(baselineRegion.enum, ['global', '']))) {
+    delete baselineRegion.const;
+    baselineRegion.enum = ['global', ''];
+    changed = true;
+  }
+
+  for (const [schemaName, field] of COUNTRY_HEADLINE_ARRAY_FIELDS) {
+    const property = schemas[schemaName]?.properties?.[field];
+    for (const bound of ['minItems', 'maxItems']) {
+      if (typeof property?.items?.[bound] !== 'number') continue;
+      property[bound] = property.items[bound];
+      delete property.items[bound];
+      changed = true;
+    }
+  }
 
   for (const [schemaName, schema] of Object.entries(schemas)) {
-    if (!schemaName.endsWith('Request') || !schema || typeof schema !== 'object') continue;
+    if ((!schemaName.endsWith('Request') && !OPENAPI_REQUIRED_SCHEMA_FIELDS.has(schemaName)) || !schema || typeof schema !== 'object') continue;
     const required = requiredFieldsForSchema(schemaName, schema);
     if (required.size === 0) continue;
     const next = orderedRequired(schema, required);
@@ -324,7 +564,7 @@ function requiredYamlContractsForSpec(spec) {
   const params = [];
   const schemas = new Map();
   for (const [schemaName, schema] of Object.entries(spec.components?.schemas ?? {})) {
-    if (!schemaName.endsWith('Request') || !Array.isArray(schema.required) || schema.required.length === 0) continue;
+    if (!Array.isArray(schema.required) || schema.required.length === 0) continue;
     schemas.set(schemaName, schema.required);
   }
   for (const ops of Object.values(spec.paths ?? {})) {
@@ -340,9 +580,454 @@ function requiredYamlContractsForSpec(spec) {
   return { params, schemas };
 }
 
+function replaceYamlSchemaProperty(lines, schemaName, fieldName, render) {
+  let changed = false;
+  for (const block of [...yamlSchemaBlocks(lines, schemaName)].reverse()) {
+    const schemaIndent = leadingSpaces(lines[block.start]);
+    const propertyIndent = schemaIndent + 8;
+    let fieldIndex = -1;
+    for (let i = block.start + 1; i < block.end; i++) {
+      if (leadingSpaces(lines[i]) === propertyIndent && lines[i].trim() === `${fieldName}:`) {
+        fieldIndex = i;
+        break;
+      }
+    }
+    if (fieldIndex === -1) continue;
+
+    let fieldEnd = fieldIndex + 1;
+    while (fieldEnd < block.end) {
+      const line = lines[fieldEnd];
+      if (line.trim() && leadingSpaces(line) <= propertyIndent) break;
+      fieldEnd++;
+    }
+    const expected = render(' '.repeat(propertyIndent));
+    if (!eq(lines.slice(fieldIndex, fieldEnd), expected)) {
+      lines.splice(fieldIndex, fieldEnd - fieldIndex, ...expected);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function setYamlSchemaChild(lines, schemaName, childName, render) {
+  let changed = false;
+  for (const block of [...yamlSchemaBlocks(lines, schemaName)].reverse()) {
+    const schemaIndent = leadingSpaces(lines[block.start]);
+    const childIndent = schemaIndent + 4;
+    let childIndex = -1;
+    for (let i = block.start + 1; i < block.end; i++) {
+      if (leadingSpaces(lines[i]) === childIndent && lines[i].trim() === `${childName}:`) {
+        childIndex = i;
+        break;
+      }
+    }
+
+    let childEnd = childIndex + 1;
+    if (childIndex !== -1) {
+      while (childEnd < block.end) {
+        const line = lines[childEnd];
+        if (line.trim() && leadingSpaces(line) <= childIndent) break;
+        childEnd++;
+      }
+    }
+    const expected = render(' '.repeat(childIndent));
+    if (childIndex !== -1) {
+      if (!eq(lines.slice(childIndex, childEnd), expected)) {
+        lines.splice(childIndex, childEnd - childIndex, ...expected);
+        changed = true;
+      }
+      continue;
+    }
+
+    let insertAt = block.end;
+    for (let i = block.start + 1; i < block.end; i++) {
+      if (leadingSpaces(lines[i]) === childIndent && lines[i].trim() === 'required:') {
+        insertAt = i;
+        break;
+      }
+    }
+    lines.splice(insertAt, 0, ...expected);
+    changed = true;
+  }
+  return changed;
+}
+
+function setYamlScorecardMembersParameter(lines) {
+  let changed = false;
+  for (const block of [...yamlOperationBlocks(lines, 'GetBlocScorecard')].reverse()) {
+    for (let i = block.start + 1; i < block.end; i++) {
+      if (lines[i].trim() !== '- name: members') continue;
+      const indent = leadingSpaces(lines[i]);
+      let end = i + 1;
+      while (end < block.end) {
+        const line = lines[end];
+        if (line.trim() && leadingSpaces(line) <= indent) break;
+        end++;
+      }
+      const pad = ' '.repeat(indent);
+      const expected = [
+        `${pad}- name: members`,
+        `${pad}  in: query`,
+        `${pad}  description: Custom list of 2-30 unique uppercase ISO 3166-1 alpha-2 members. Provide either preset or members; do not provide both.`,
+        `${pad}  required: false`,
+        `${pad}  style: form`,
+        `${pad}  explode: true`,
+        `${pad}  schema:`,
+        `${pad}    type: array`,
+        `${pad}    items:`,
+        `${pad}        type: string`,
+        `${pad}        pattern: ^[A-Z]{2}$`,
+        `${pad}    minItems: 2`,
+        `${pad}    maxItems: 30`,
+        `${pad}    uniqueItems: true`,
+      ];
+      if (!eq(lines.slice(i, end), expected)) {
+        lines.splice(i, end - i, ...expected);
+        changed = true;
+      }
+      break;
+    }
+  }
+  return changed;
+}
+
+function setYamlScorecardSelectorExtension(lines) {
+  let changed = false;
+  for (const block of [...yamlOperationBlocks(lines, 'GetBlocScorecard')].reverse()) {
+    const operationIndent = leadingSpaces(lines[block.start]);
+    let extensionIndex = -1;
+    for (let i = block.start + 1; i < block.end; i++) {
+      if (leadingSpaces(lines[i]) === operationIndent && lines[i].trim() === 'x-worldmonitor-selector-one-of:') {
+        extensionIndex = i;
+        break;
+      }
+    }
+    const pad = ' '.repeat(operationIndent);
+    const expected = [
+      `${pad}x-worldmonitor-selector-one-of:`,
+      `${pad}    - preset`,
+      `${pad}    - members`,
+    ];
+    let responsesIndex = -1;
+    for (let i = block.start + 1; i < block.end; i++) {
+      if (leadingSpaces(lines[i]) === operationIndent && lines[i].trim() === 'responses:') {
+        responsesIndex = i;
+        break;
+      }
+    }
+    if (responsesIndex === -1) continue;
+    if (extensionIndex === responsesIndex - expected.length
+        && eq(lines.slice(extensionIndex, responsesIndex), expected)) continue;
+
+    if (extensionIndex !== -1) {
+      const removable = lines.slice(extensionIndex, extensionIndex + expected.length);
+      if (!eq(removable, expected)) {
+        throw new Error('unexpected GetBlocScorecard selector extension shape');
+      }
+      lines.splice(extensionIndex, expected.length);
+      if (extensionIndex < responsesIndex) responsesIndex -= expected.length;
+    }
+    lines.splice(responsesIndex, 0, ...expected);
+    changed = true;
+  }
+  return changed;
+}
+
+function injectYamlScorecardContracts(lines) {
+  if (yamlSchemaBlocks(lines, 'GetBlocScorecardRequest').length === 0) return false;
+  let changed = false;
+  const arrayProperty = (fieldName, pattern, extra = []) => (pad) => [
+    `${pad}${fieldName}:`,
+    `${pad}    type: array`,
+    `${pad}    items:`,
+    `${pad}        type: string`,
+    `${pad}        pattern: ${pattern}`,
+    ...extra.map((line) => `${pad}    ${line}`),
+  ];
+  const responseOneOf = (reasons) => (pad) => [
+    `${pad}oneOf:`,
+    `${pad}    - required:`,
+    `${pad}        - scorecard`,
+    `${pad}      properties:`,
+    `${pad}        unavailable:`,
+    `${pad}            const: false`,
+    `${pad}        unavailableReason:`,
+    `${pad}            const: ''`,
+    `${pad}    - not:`,
+    `${pad}        required:`,
+    `${pad}            - scorecard`,
+    `${pad}      properties:`,
+    `${pad}        unavailable:`,
+    `${pad}            const: true`,
+    `${pad}        unavailableReason:`,
+    `${pad}            enum:`,
+    ...reasons.map((reason) => `${pad}                - ${reason}`),
+  ];
+
+  if (replaceYamlSchemaProperty(lines, 'GetBlocScorecardRequest', 'members', arrayProperty('members', ISO2_PATTERN, [
+    'minItems: 2',
+    'maxItems: 30',
+    'uniqueItems: true',
+    'description: Custom list of 2-30 unique uppercase ISO 3166-1 alpha-2 members. Provide either preset or members; do not provide both.',
+  ]))) changed = true;
+  if (setYamlSchemaChild(lines, 'GetBlocScorecardRequest', 'oneOf', (pad) => [
+    `${pad}oneOf:`,
+    `${pad}    - required:`,
+    `${pad}        - preset`,
+    `${pad}      not:`,
+    `${pad}        required:`,
+    `${pad}            - members`,
+    `${pad}    - required:`,
+    `${pad}        - members`,
+    `${pad}      not:`,
+    `${pad}        required:`,
+    `${pad}            - preset`,
+  ])) changed = true;
+
+  for (const [schemaName, fieldName, pattern] of [
+    ['FiveFactorPillar', 'insufficientReasons', SCORECARD_REASON_PATTERN],
+    ['FiveFactorPillar', 'includedMembers', ISO2_PATTERN],
+    ['FiveFactorPillarSummary', 'insufficientReasons', SCORECARD_REASON_PATTERN],
+    ['FiveFactorBlocScorecard', 'members', ISO2_PATTERN],
+    ['FiveFactorBlocScorecard', 'includedMembers', ISO2_PATTERN],
+  ]) {
+    if (replaceYamlSchemaProperty(lines, schemaName, fieldName, arrayProperty(fieldName, pattern))) changed = true;
+  }
+
+  if (setYamlSchemaChild(lines, 'GetFiveFactorScorecardResponse', 'oneOf', responseOneOf([
+    'country-unavailable',
+    'scorecard-snapshot-unavailable',
+  ]))) changed = true;
+  if (setYamlSchemaChild(lines, 'GetBlocScorecardResponse', 'oneOf', responseOneOf([
+    'bloc-members-unavailable',
+    'scorecard-snapshot-unavailable',
+  ]))) changed = true;
+  if (setYamlSchemaChild(lines, 'ListFiveFactorScorecardsResponse', 'oneOf', (pad) => [
+    `${pad}oneOf:`,
+    `${pad}    - properties:`,
+    `${pad}        unavailable:`,
+    `${pad}            const: false`,
+    `${pad}        unavailableReason:`,
+    `${pad}            const: ''`,
+    `${pad}        methodologyVersion:`,
+    `${pad}            const: 1.0.0`,
+    `${pad}    - properties:`,
+    `${pad}        unavailable:`,
+    `${pad}            const: true`,
+    `${pad}        unavailableReason:`,
+    `${pad}            const: scorecard-snapshot-unavailable`,
+    `${pad}        methodologyVersion:`,
+    `${pad}            const: ''`,
+    `${pad}        computedAt:`,
+    `${pad}            const: ''`,
+    `${pad}        scorecards:`,
+    `${pad}            maxItems: 0`,
+  ])) changed = true;
+  if (setYamlScorecardMembersParameter(lines)) changed = true;
+  if (setYamlScorecardSelectorExtension(lines)) changed = true;
+  return changed;
+}
+
+function injectYamlPhysicalMetalContracts(lines) {
+  let changed = false;
+  for (const rpc of PHYSICAL_METAL_RPCS) {
+    if (injectYamlPhysicalMetalContract(lines, rpc)) changed = true;
+  }
+  return changed;
+}
+
+function injectYamlPhysicalMetalContract(lines, { requestSchema, operationId }) {
+  if (yamlSchemaBlocks(lines, requestSchema).length === 0) return false;
+  let changed = replaceYamlSchemaProperty(
+    lines,
+    requestSchema,
+    'metals',
+    (pad) => [
+      `${pad}metals:`,
+      `${pad}    type: array`,
+      `${pad}    items:`,
+      `${pad}        type: string`,
+      `${pad}        pattern: ${PHYSICAL_METAL_PATTERN}`,
+      `${pad}    maxItems: 2`,
+      `${pad}    uniqueItems: true`,
+      `${pad}    description: ${PHYSICAL_METALS_DESCRIPTION}`,
+    ],
+  );
+  for (const block of [...yamlOperationBlocks(lines, operationId)].reverse()) {
+    for (let index = block.start + 1; index < block.end; index++) {
+      if (lines[index].trim() !== '- name: metals') continue;
+      const indent = leadingSpaces(lines[index]);
+      let end = index + 1;
+      while (end < block.end) {
+        if (lines[end].trim() && leadingSpaces(lines[end]) <= indent) break;
+        end++;
+      }
+      const pad = ' '.repeat(indent);
+      const expected = [
+        `${pad}- name: metals`,
+        `${pad}  in: query`,
+        `${pad}  description: ${PHYSICAL_METALS_DESCRIPTION}`,
+        `${pad}  required: false`,
+        `${pad}  style: form`,
+        `${pad}  explode: true`,
+        `${pad}  example:`,
+        `${pad}      - "gold"`,
+        `${pad}  schema:`,
+        `${pad}    type: array`,
+        `${pad}    items:`,
+        `${pad}        type: string`,
+        `${pad}        pattern: ${PHYSICAL_METAL_PATTERN}`,
+        `${pad}    maxItems: 2`,
+        `${pad}    uniqueItems: true`,
+      ];
+      if (!eq(lines.slice(index, end), expected)) {
+        lines.splice(index, end - index, ...expected);
+        changed = true;
+      }
+      break;
+    }
+  }
+  return changed;
+}
+
+function yamlChildEnd(lines, start, limit) {
+  const indent = leadingSpaces(lines[start]);
+  let end = start + 1;
+  while (end < limit && (!lines[end].trim() || leadingSpaces(lines[end]) > indent)) end++;
+  return end;
+}
+
+// Generated YAML indents parameter schemas by 2 and component schemas by 4, so
+// read the child column from the first child line.
+function yamlChildIndent(lines, start, end) {
+  for (let i = start + 1; i < end; i++) {
+    if (lines[i].trim()) return leadingSpaces(lines[i]);
+  }
+  return leadingSpaces(lines[start]) + 4;
+}
+
+function yamlChildIndex(lines, start, end, key) {
+  const indent = yamlChildIndent(lines, start, end);
+  for (let i = start + 1; i < end; i++) {
+    if (leadingSpaces(lines[i]) === indent && lines[i].trim().split(':')[0] === key) return i;
+  }
+  return -1;
+}
+
+// Within an `items:` block, drop a copied maxItems and ensure the pattern line.
+function setYamlItemsPattern(lines, itemsIndex, limit) {
+  let changed = false;
+  let end = yamlChildEnd(lines, itemsIndex, limit);
+  const copied = yamlChildIndex(lines, itemsIndex, end, 'maxItems');
+  if (copied !== -1) {
+    lines.splice(copied, 1);
+    end--;
+    changed = true;
+  }
+  const pad = ' '.repeat(yamlChildIndent(lines, itemsIndex, end));
+  const expected = `${pad}pattern: '${SITC_SECTION_PATTERN}'`;
+  const existing = yamlChildIndex(lines, itemsIndex, end, 'pattern');
+  if (existing === -1) {
+    const type = yamlChildIndex(lines, itemsIndex, end, 'type');
+    lines.splice(type === -1 ? itemsIndex + 1 : type + 1, 0, expected);
+    changed = true;
+  } else if (lines[existing] !== expected) {
+    lines[existing] = expected;
+    changed = true;
+  }
+  return changed;
+}
+
+// Ensure `key: value` is a direct child of the mapping that starts at `start`.
+function setYamlChild(lines, start, limit, key, value) {
+  const end = yamlChildEnd(lines, start, limit);
+  const expected = `${' '.repeat(yamlChildIndent(lines, start, end))}${key}: ${value}`;
+  const existing = yamlChildIndex(lines, start, end, key);
+  if (existing === -1) {
+    lines.splice(end, 0, expected);
+    return true;
+  }
+  if (lines[existing] === expected) return false;
+  lines[existing] = expected;
+  return true;
+}
+
+function injectYamlSitcContract(lines) {
+  let changed = false;
+  for (const block of yamlSchemaBlocks(lines, SITC_RPC.requestSchema)) {
+    const properties = yamlChildIndex(lines, block.start, block.end, 'properties');
+    if (properties === -1) continue;
+    const propertiesEnd = yamlChildEnd(lines, properties, block.end);
+    const sections = yamlChildIndex(lines, properties, propertiesEnd, 'sections');
+    if (sections === -1) continue;
+    const sectionsEnd = yamlChildEnd(lines, sections, propertiesEnd);
+    const items = yamlChildIndex(lines, sections, sectionsEnd, 'items');
+    if (items !== -1 && setYamlItemsPattern(lines, items, sectionsEnd)) changed = true;
+  }
+  for (const block of yamlOperationBlocks(lines, SITC_RPC.operationId)) {
+    for (let index = block.start + 1; index < block.end; index++) {
+      const name = lines[index].trim();
+      if (name !== '- name: sections' && name !== '- name: months') continue;
+      // Parameter children sit two columns right of the list dash.
+      const childIndent = leadingSpaces(lines[index]) + 2;
+      let paramEnd = index + 1;
+      while (paramEnd < block.end && (!lines[paramEnd].trim() || leadingSpaces(lines[paramEnd]) >= childIndent)) paramEnd++;
+      let schema = -1;
+      for (let i = index + 1; i < paramEnd; i++) {
+        if (leadingSpaces(lines[i]) === childIndent && lines[i].trim() === 'schema:') schema = i;
+      }
+      if (schema === -1) continue;
+      if (name === '- name: sections') {
+        const schemaEnd = yamlChildEnd(lines, schema, paramEnd);
+        const items = yamlChildIndex(lines, schema, schemaEnd, 'items');
+        if (items !== -1 && setYamlItemsPattern(lines, items, schemaEnd)) changed = true;
+        if (setYamlChild(lines, schema, block.end, 'maxItems', String(SITC_MAX_SECTIONS))) changed = true;
+      } else {
+        if (setYamlChild(lines, schema, block.end, 'minimum', '0')) changed = true;
+        if (setYamlChild(lines, schema, block.end, 'maximum', String(SITC_MAX_MONTHS))) changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 function injectYaml(text, contracts) {
   const lines = text.split('\n');
-  let changed = false;
+  let changed = injectYamlScorecardContracts(lines);
+  if (injectYamlPhysicalMetalContracts(lines)) changed = true;
+  if (injectYamlSitcContract(lines)) changed = true;
+  for (const [schemaName, field] of COUNTRY_HEADLINE_ARRAY_FIELDS) {
+    for (const block of [...yamlSchemaBlocks(lines, schemaName)].reverse()) {
+      const indent = leadingSpaces(lines[block.start]) + 8;
+      const start = lines.findIndex((line, i) => i > block.start && i < block.end
+        && leadingSpaces(line) === indent && line.trim() === `${field}:`);
+      if (start === -1) continue;
+      let end = start + 1;
+      while (end < block.end && (!lines[end].trim() || leadingSpaces(lines[end]) > indent)) end++;
+      const existing = new Set(lines.slice(start + 1, end)
+        .filter(line => leadingSpaces(line) === indent + 4)
+        .map(line => line.trim().split(':')[0]));
+      const bounds = [];
+      for (let i = end - 1; i > start; i--) {
+        if (leadingSpaces(lines[i]) !== indent + 8 || !/^(?:minItems|maxItems): \d+$/.test(lines[i].trim())) continue;
+        if (!existing.has(lines[i].trim().split(':')[0])) bounds.unshift(`${' '.repeat(indent + 4)}${lines[i].trim()}`);
+        lines.splice(i, 1);
+        changed = true;
+      }
+      if (bounds.length) {
+        lines.splice(start + 1, 0, ...bounds);
+        changed = true;
+      }
+    }
+  }
+  if (replaceYamlSchemaProperty(lines, 'GetTemporalBaselineRequest', 'region', (pad) => [
+    `${pad}region:`,
+    `${pad}    type: string`,
+    `${pad}    description: ${BASELINE_REGION_DESCRIPTION}`,
+    `${pad}    enum:`,
+    `${pad}        - 'global'`,
+    `${pad}        - ''`,
+  ])) changed = true;
   for (const { operationId, paramName } of contracts.params) {
     if (operationId && setYamlOperationParamRequired(lines, operationId, paramName)) changed = true;
   }

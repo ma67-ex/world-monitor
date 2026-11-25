@@ -1,11 +1,9 @@
 /**
  * RPC: submitContact -- Stores an enterprise contact submission and emails ops.
  * Port from api/contact.js
- * Sources: Convex contactMessages:submit mutation + Resend notification email
+ * Sources: authenticated Convex contact HTTP route + Resend notification email
  */
 
-import { ConvexHttpClient } from 'convex/browser';
-import { ConvexError } from 'convex/values';
 import type {
   ServerContext,
   SubmitContactRequest,
@@ -13,16 +11,15 @@ import type {
 } from '../../../../src/generated/server/worldmonitor/leads/v1/service_server';
 import { ApiError, ValidationError } from '../../../../src/generated/server/worldmonitor/leads/v1/service_server';
 import { getClientIp, verifyTurnstile } from '../../../_shared/turnstile';
+import { EMAIL_ACCENT, emailCard, emailFactRow, emailFacts, emailFrame, emailHeading } from '../../../../shared/email-frame';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// RFC 5321 path limit. Checked before EMAIL_RE, which backtracks
+// super-linearly on long '@'-free runs.
+const MAX_EMAIL = 254;
 const PHONE_RE = /^[+(]?\d[\d\s()./-]{4,23}\d$/;
 const MAX_FIELD = 500;
 const MAX_MESSAGE = 2000;
-
-type ConvexPolicyErrorData = {
-  kind?: string;
-  message?: string;
-};
 
 export const FREE_EMAIL_DOMAINS = new Set<string>([
   'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.fr', 'yahoo.co.uk', 'yahoo.co.jp',
@@ -49,30 +46,45 @@ function sanitizeForSubject(str: string, maxLen = 50): string {
   return str.replace(/[\r\n\0]/g, '').slice(0, maxLen);
 }
 
-function getConvexPolicyErrorData(error: { data: unknown }): ConvexPolicyErrorData | null {
-  const rawData = error.data;
-  if (rawData && typeof rawData === 'object') {
-    return rawData as ConvexPolicyErrorData;
-  }
-  if (typeof rawData !== 'string') {
-    return null;
-  }
-
-  try {
-    const parsed: unknown = JSON.parse(rawData);
-    return parsed && typeof parsed === 'object'
-      ? parsed as ConvexPolicyErrorData
-      : null;
-  } catch {
-    return null;
-  }
+/** The ops notification for one enterprise contact. Exported for tests. */
+export function contactNotificationHtml(f: {
+  name: string;
+  email: string;
+  emailDomain: string;
+  organization: string;
+  phone: string | undefined;
+  message: string | undefined;
+  ip: string;
+  country: string | null;
+}): string {
+  const email = escapeHtml(f.email);
+  const domain = escapeHtml(f.emailDomain);
+  const link = (href: string, text: string) => `<a href="${href}" style="color: ${EMAIL_ACCENT}; text-decoration: none;">${text}</a>`;
+  const rows = [
+    emailFactRow('Name', escapeHtml(f.name)),
+    emailFactRow('Email', link(`mailto:${email}`, email)),
+    emailFactRow('Domain', link(`https://${domain}`, domain)),
+    emailFactRow('Company', escapeHtml(f.organization)),
+    f.phone ? emailFactRow('Phone', link(`tel:${escapeHtml(f.phone)}`, escapeHtml(f.phone))) : '',
+    emailFactRow('IP', `<span style="font-family: monospace;">${escapeHtml(f.ip || 'unknown')}</span>`),
+    f.country ? emailFactRow('Country', escapeHtml(f.country)) : '',
+  ].join('');
+  const message = `<div style="font-size: 14px; color: #ccc; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">${escapeHtml(f.message || 'N/A')}</div>`;
+  return emailFrame({
+    preheader: `${f.name} from ${f.organization}`,
+    kicker: 'Enterprise lead',
+    bodyHtml: `${emailHeading('New Enterprise Contact', `${escapeHtml(f.name)} from ${escapeHtml(f.organization)}`)}
+      ${emailCard(emailFacts(rows), { label: 'Contact' })}
+      ${emailCard(message, { label: 'Message' })}`,
+    footerNote: 'Sent from the worldmonitor.app enterprise contact form.',
+  });
 }
 
 async function sendNotificationEmail(
   name: string,
   email: string,
   organization: string,
-  phone: string,
+  phone: string | undefined,
   message: string | undefined,
   ip: string,
   country: string | null,
@@ -86,30 +98,18 @@ async function sendNotificationEmail(
   const emailDomain = (email.split('@')[1] || '').toLowerCase();
   try {
     const res = await fetch('https://api.resend.com/emails', {
+      signal: AbortSignal.timeout(10_000),
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'User-Agent': 'worldmonitor-leads/1.0',
         'Authorization': `Bearer ${resendKey}`,
       },
       body: JSON.stringify({
         from: 'World Monitor <noreply@worldmonitor.app>',
         to: [notifyEmail],
         subject: `[WM Enterprise] ${sanitizeForSubject(name)} from ${sanitizeForSubject(organization)}`,
-        html: `
-          <div style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #4ade80;">New Enterprise Contact</h2>
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">Name</td><td style="padding: 8px;">${escapeHtml(name)}</td></tr>
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">Email</td><td style="padding: 8px;"><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">Domain</td><td style="padding: 8px;"><a href="https://${escapeHtml(emailDomain)}" target="_blank">${escapeHtml(emailDomain)}</a></td></tr>
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">Company</td><td style="padding: 8px;">${escapeHtml(organization)}</td></tr>
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">Phone</td><td style="padding: 8px;"><a href="tel:${escapeHtml(phone)}">${escapeHtml(phone)}</a></td></tr>
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">Message</td><td style="padding: 8px;">${escapeHtml(message || 'N/A')}</td></tr>
-              <tr><td style="padding: 8px; font-weight: bold; color: #666;">IP</td><td style="padding: 8px; font-family: monospace;">${escapeHtml(ip || 'unknown')}</td></tr>
-              ${country ? `<tr><td style="padding: 8px; font-weight: bold; color: #666;">Country</td><td style="padding: 8px;">${escapeHtml(country)}</td></tr>` : ''}
-            </table>
-            <p style="color: #999; font-size: 12px; margin-top: 24px;">Sent from worldmonitor.app enterprise contact form</p>
-          </div>`,
+        html: contactNotificationHtml({ name, email, emailDomain, organization, phone, message, ip, country }),
       }),
     });
     if (!res.ok) {
@@ -148,7 +148,7 @@ export async function submitContact(
 
   const { email, name, organization, phone, message, source } = req;
 
-  if (!email || !EMAIL_RE.test(email)) {
+  if (!email || email.length > MAX_EMAIL || !EMAIL_RE.test(email)) {
     throw new ValidationError([{ field: 'email', description: 'Invalid email' }]);
   }
 
@@ -163,45 +163,59 @@ export async function submitContact(
   if (!organization || organization.trim().length === 0) {
     throw new ValidationError([{ field: 'organization', description: 'Company is required' }]);
   }
-  if (!phone || !PHONE_RE.test(phone.trim())) {
-    throw new ValidationError([{ field: 'phone', description: 'Valid phone number is required' }]);
+  // Phone is optional. When given, it must still look like a phone number.
+  const trimmedPhone = (phone ?? '').trim();
+  if (trimmedPhone && !PHONE_RE.test(trimmedPhone)) {
+    throw new ValidationError([{ field: 'phone', description: 'Invalid phone number' }]);
   }
 
   const safeName = name.slice(0, MAX_FIELD);
   const safeOrg = organization.slice(0, MAX_FIELD);
-  const safePhone = phone.trim().slice(0, 30);
+  const safePhone = trimmedPhone ? trimmedPhone.slice(0, 30) : undefined;
   const safeMsg = message ? message.slice(0, MAX_MESSAGE) : undefined;
   const safeSource = source ? source.slice(0, 100) : 'enterprise-contact';
 
-  const convexUrl = process.env.CONVEX_URL;
-  if (!convexUrl) {
+  const convexUrl = (process.env.CONVEX_SITE_URL
+    ?? (process.env.CONVEX_URL ?? '').replace('.convex.cloud', '.convex.site')).replace(/\/$/, '');
+  const secret = process.env.CONVEX_SERVER_SHARED_SECRET;
+  if (!convexUrl || !secret) {
     throw new ApiError(503, 'Service unavailable', '');
   }
 
-  const client = new ConvexHttpClient(convexUrl);
+  let response: Response;
   try {
-    await client.mutation('contactMessages:submit' as any, {
-      name: safeName,
-      email: email.trim(),
-      organization: safeOrg,
-      phone: safePhone,
-      message: safeMsg,
-      source: safeSource,
+    response = await fetch(`${convexUrl}/leads/submit-contact`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'worldmonitor-leads/1.0',
+        'x-convex-shared-secret': secret,
+      },
+      body: JSON.stringify({
+        name: safeName,
+        email: email.trim(),
+        organization: safeOrg,
+        phone: safePhone,
+        message: safeMsg,
+        source: safeSource,
+      }),
+      signal: AbortSignal.timeout(10_000),
     });
-  } catch (err) {
-    // Preserve policy failures from direct Convex enforcement at the HTTP seam
-    // instead of turning expected client errors into opaque 500 responses.
-    // Convex serializes ConvexError payloads onto err.data.
-    if (err instanceof ConvexError) {
-      const data = getConvexPolicyErrorData(err);
-      if (data?.kind === 'rate_limited') {
-        throw new ApiError(429, data.message || 'Too many requests', '');
-      }
-      if (data?.kind === 'FREE_EMAIL_NOT_ALLOWED') {
-        throw new ApiError(422, data.message || 'Please use your work email address', '');
-      }
-    }
-    throw err;
+  } catch {
+    throw new ApiError(503, 'Service unavailable', '');
+  }
+  if (response.status === 429) {
+    throw new ApiError(429, 'Too many recent submissions for this email; try again later.', '');
+  }
+  if (response.status === 422) {
+    throw new ApiError(422, 'Please use a corporate email address.', '');
+  }
+  if (!response.ok) {
+    throw new ApiError(503, 'Service unavailable', '');
+  }
+  const result: unknown = await response.json().catch(() => null);
+  if (!result || typeof result !== 'object' || !('status' in result) || result.status !== 'sent') {
+    throw new ApiError(503, 'Service unavailable', '');
   }
 
   const emailSent = await sendNotificationEmail(

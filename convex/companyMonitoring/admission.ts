@@ -12,7 +12,9 @@ import {
   evaluateCompanyMonitoringClassifierTransportFailure,
   evaluateCompanyMonitoringClassification,
 } from "../../scripts/lib/company-monitoring-classification.mjs";
+import { resolveAiRoutingPolicy } from "../lib/enterpriseAccounts";
 import { fingerprint, randomFence } from "./_shared";
+import { assertValidCandidateState } from "./validators";
 import {
   companyMonitoringCandidateEvidenceSnapshotDigest as candidateEvidenceSnapshotDigest,
   companyMonitoringEvidenceShape as evidenceShape,
@@ -240,6 +242,33 @@ async function admissionScopeIsActive(
   );
 }
 
+// The admission classifier reaches its model only through OpenRouter
+// (scripts/lib/company-monitoring-classifier-client.mjs), under the frozen
+// evaluation route in docs/internal/company-monitoring/provider-policy.md.
+// Rerouting it per account would invalidate that evaluation, so an owner whose
+// AI routing policy excludes OpenRouter has the candidate rejected before any
+// evidence is sent (docs/internal/ai-routing-policy.md).
+export const COMPANY_MONITORING_CLASSIFIER_PROVIDER = "openrouter";
+
+async function admissionBlockedByAiRoutingPolicy(
+  ctx: MutationCtx,
+  candidate: Doc<"companyMonitoringCandidates">,
+) {
+  const account = await ctx.db
+    .query("companyMonitoringAccounts")
+    .withIndex("by_logicalAccountId", (q) =>
+      q.eq("logicalAccountId", candidate.ownerAccountId),
+    )
+    .unique();
+  // No owner user means no policy can apply; admissionScopeIsActive already
+  // rejects accounts that are not entitled.
+  if (!account?.ownerUserId) return false;
+  // The shared resolver, so an Enterprise member's inherited account policy
+  // blocks exactly like a per-user row.
+  const policy = await resolveAiRoutingPolicy(ctx, account.ownerUserId);
+  return Boolean(policy && !policy.allowedProviders.includes(COMPANY_MONITORING_CLASSIFIER_PROVIDER));
+}
+
 export async function terminalizeSystemDecision(
   ctx: MutationCtx,
   candidate: Doc<"companyMonitoringCandidates">,
@@ -249,8 +278,10 @@ export async function terminalizeSystemDecision(
     "evidence_expired" | "authority_lost" | "evidence_unavailable",
   now: number,
 ) {
+  assertValidCandidateState(candidate);
   if (candidate.state === "terminal") return candidate.lastAdmissionDecisionId;
   const decisionId = await appendSystemDecision(ctx, candidate, decision, reasonCode, now);
+  assertValidCandidateState({ state: "terminal", holdUntil: undefined, terminalReason });
   await ctx.db.patch(candidate._id, {
     state: "terminal",
     terminalReason,
@@ -287,12 +318,24 @@ export async function claimNextAdmissionCandidateHandler(
     .withIndex("by_state_updatedAt", (q) => q.eq("state", "pending_classification"))
     .take(32);
   for (const candidate of candidates) {
+    assertValidCandidateState(candidate);
     if (!await admissionScopeIsActive(ctx, candidate)) {
       await terminalizeSystemDecision(
         ctx,
         candidate,
         "reject",
         "candidate_owner_inactive",
+        "rejected",
+        now,
+      );
+      continue;
+    }
+    if (await admissionBlockedByAiRoutingPolicy(ctx, candidate)) {
+      await terminalizeSystemDecision(
+        ctx,
+        candidate,
+        "reject",
+        "ai_routing_policy_excludes_classifier",
         "rejected",
         now,
       );
@@ -512,6 +555,7 @@ async function persistAdmissionResult(
   now: number,
   requestedModelVersion?: string,
 ) {
+  assertValidCandidateState(candidate);
   const derivedQueryVersions = [...new Set(evidence.map((row) => row.queryVersion!))].sort();
   if (
     result.queryVersions.length !== derivedQueryVersions.length ||
@@ -563,6 +607,11 @@ async function persistAdmissionResult(
     ) {
       throw new ConvexError("COMPANY_MONITORING_CANDIDATE_HOLD_INVALID");
     }
+    assertValidCandidateState({
+      state: "held",
+      holdUntil: result.retryAt,
+      terminalReason: undefined,
+    });
     await ctx.db.patch(candidate._id, {
       state: "held",
       holdUntil: result.retryAt,
@@ -589,6 +638,11 @@ async function persistAdmissionResult(
       },
     );
   } else {
+    assertValidCandidateState({
+      state: "terminal",
+      holdUntil: undefined,
+      terminalReason: admissionTerminalReason(result.decision),
+    });
     await ctx.db.patch(candidate._id, {
       state: "terminal",
       holdUntil: undefined,
@@ -733,6 +787,11 @@ export const releaseHeldAdmissionCandidate = internalMutation({
       );
       return { status: "expired" as const };
     }
+    assertValidCandidateState({
+      state: "pending_classification",
+      holdUntil: undefined,
+      terminalReason: candidate.terminalReason,
+    });
     await ctx.db.patch(candidate._id, {
       state: "pending_classification",
       holdUntil: undefined,

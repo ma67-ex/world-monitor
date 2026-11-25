@@ -152,11 +152,11 @@ function renderPlatforms(data: GivingSummary, translate: GivingTranslate): strin
   }).join('');
 
   return `
-    <table class="giving-table">
+    <table class="wm-table giving-table">
       <thead>
         <tr>
-          <th>${escapeHtml(translate('components.giving.platform'))}</th>
-          <th>${escapeHtml(translate('components.giving.benchmark'))}</th>
+          <th scope="col">${escapeHtml(translate('components.giving.platform'))}</th>
+          <th scope="col">${escapeHtml(translate('components.giving.benchmark'))}</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -186,7 +186,7 @@ function renderCategories(
     </tr>`;
   }).join('');
 
-  return `<table class="giving-table giving-cat-table"><tbody>${rows}</tbody></table>`;
+  return `<table class="wm-table giving-table giving-cat-table"><tbody>${rows}</tbody></table>`;
 }
 
 function renderInstitutionalMetric(

@@ -70,7 +70,7 @@ function harness(responses: Array<() => Response | Promise<Response>>): Harness 
 // legacy-bearer gate still 503s (3 events / 30d — all `user_api_key`, so those
 // particular callers never reach this wrapper; see the header).
 const NON_PREMIUM_TARGET = 'https://api.worldmonitor.app/api/conflict/v1/list-ucdp-events';
-const PREMIUM_TARGET = 'https://api.worldmonitor.app/api/sanctions/v1/list-sanctions-pressure';
+const PREMIUM_TARGET = 'https://api.worldmonitor.app/api/economic/v1/list-global-tenders';
 
 describe('withBillingVerificationRetry', () => {
   it('retries an unverifiable-entitlement 503 once and returns the recovered response', async () => {
@@ -83,6 +83,18 @@ describe('withBillingVerificationRetry', () => {
     assert.equal(res.status, 200, 'caller sees the recovered response, not the blip');
     assert.equal(h.calls(), 2, 'exactly one retry');
     assert.deepEqual(h.slept, [5000], 'waited exactly the Retry-After the server asked for');
+  });
+
+  for (const status of [403, 503]) it(`never retries a payment_failed ${status}: the card has to be updated first`, async () => {
+    const h = harness([
+      () => billingRes(status, 'payment_failed', null),
+      () => fakeRes(200),
+    ]);
+
+    const res = await h.fetch(PREMIUM_TARGET);
+    assert.equal(res.status, status);
+    assert.equal(h.calls(), 1);
+    assert.deepEqual(h.slept, []);
   });
 
   it('is route-agnostic — a non-premium path retries too', async () => {

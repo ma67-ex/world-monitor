@@ -24,13 +24,18 @@ export const config = { runtime: 'edge' };
 import { getCorsHeaders, isDisallowedOrigin } from '../../_cors.js';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../../_sentry-edge.js';
-import { renderBriefMagazine } from '../../../server/_shared/brief-render.js';
+import { assertBriefEnvelope, renderBriefMagazine, selectBriefEnvelope } from '../../../server/_shared/brief-render.js';
+import { briefLocalizedKey } from '../../../shared/brief-envelope.js';
+import { briefFontPlatform } from '../../../server/_shared/brief-font-platform.js';
 import { readRawJsonFromUpstash, redisPipeline } from '../../_upstash-json.js';
 import { verifyBriefToken, BriefUrlError } from '../../../server/_shared/brief-url';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from '../../_rate-limit.js';
 import {
   BRIEF_PUBLIC_POINTER_PREFIX,
   buildPublicBriefUrl,
   encodePublicPointer,
+  publicBaseUrl,
 } from '../../../server/_shared/brief-share-url';
 
 const HTML_HEADERS = {
@@ -113,7 +118,7 @@ async function fetchFollowedCountriesEdge(
   const convexSiteUrl =
     process.env.CONVEX_SITE_URL
     ?? (process.env.CONVEX_URL ?? '').replace('.convex.cloud', '.convex.site');
-  const relaySecret = process.env.RELAY_SHARED_SECRET ?? '';
+  const relaySecret = process.env.CONVEX_TENANT_RELAY_SECRET ?? '';
   if (!convexSiteUrl || !relaySecret) return [];
   if (typeof userId !== 'string' || userId.length === 0) return [];
   try {
@@ -132,6 +137,7 @@ async function fetchFollowedCountriesEdge(
       console.warn('[api/brief] followed-countries relay auth failed');
       captureSilentError(err, {
         tags: { route: 'api/brief', step: 'followed-countries-relay', status: '401' },
+        fingerprint: ['api/brief', 'followed-countries-relay', err instanceof Error ? err.name : 'Error'],
         ctx,
       });
       return [];
@@ -163,7 +169,7 @@ export default async function handler(
     return new Response(null, { status: 204, headers: cors });
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    return new Response('Method not allowed', { status: 405, headers: cors });
+    return new Response('Method not allowed', { status: 405, headers: { ...cors, Allow: 'GET, HEAD, OPTIONS' } });
   }
 
   const secret = process.env.BRIEF_URL_SIGNING_SECRET ?? '';
@@ -183,8 +189,15 @@ export default async function handler(
   if (parts.length !== 4 || root !== 'api' || route !== 'brief' || !rawUserId || !rawIssueDate) {
     return htmlResponse(req, 404, EXPIRED_PAGE);
   }
-  const userId = decodeURIComponent(rawUserId);
-  const issueDate = decodeURIComponent(rawIssueDate);
+  // A malformed percent-escape is a bad link, not a server fault.
+  let userId: string;
+  let issueDate: string;
+  try {
+    userId = decodeURIComponent(rawUserId);
+    issueDate = decodeURIComponent(rawIssueDate);
+  } catch {
+    return htmlResponse(req, 404, EXPIRED_PAGE);
+  }
   const token = url.searchParams.get('t') ?? '';
 
   let verified: boolean;
@@ -201,6 +214,16 @@ export default async function handler(
     return htmlResponse(req, 403, FORBIDDEN_PAGE);
   }
 
+  // The token never expires within the envelope's week and the page is not
+  // cached, so bound the renders per issue, as the carousel does.
+  const limited = await checkRateLimit(req, {}, {
+    scope: 'brief-magazine', identifier: `${userId}:${issueDate}`, limit: 60, window: '10 m',
+  });
+  if (limited) {
+    const retryAfter = limited.headers.get('Retry-After');
+    return htmlResponse(req, limited.status, UNAVAILABLE_PAGE, { 'Cache-Control': 'no-store', ...(retryAfter ? { 'Retry-After': retryAfter } : {}) });
+  }
+
   // U11: start the telemetry-only watchlist lookup before the Redis
   // envelope read so relay latency overlaps the required brief fetch.
   // The promise never rejects and is bounded by FOLLOWED_COUNTRIES_TIMEOUT_MS.
@@ -211,12 +234,18 @@ export default async function handler(
   // distinguish those two — a reader with a valid brief deserves a
   // "service unavailable" state during outages, not a misleading
   // "expired" page.
+  // The localized sibling is optional: a failed or empty read falls back
+  // to the canonical English envelope and never fails the request.
+  const siblingPromise = readRawJsonFromUpstash(briefLocalizedKey(userId, issueDate), 3_000, true)
+    .catch(() => null);
   let envelope: unknown;
   try {
-    envelope = await readRawJsonFromUpstash(`brief:${userId}:${issueDate}`);
+    // Seeder-owned envelope (#7674): the Railway digest composer writes the
+    // per-user brief envelope key bare — read it raw in every environment.
+    envelope = await readRawJsonFromUpstash(`brief:${userId}:${issueDate}`, 3_000, true);
   } catch (err) {
     console.error('[api/brief] Upstash read failed:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/brief', step: 'envelope-read' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/brief', step: 'envelope-read' }, fingerprint: ['api/brief', 'envelope-read', err instanceof Error ? err.name : 'Error'], ctx });
     ctx?.waitUntil(followedCountriesPromise);
     return htmlResponse(req, 503, UNAVAILABLE_PAGE);
   }
@@ -242,7 +271,7 @@ export default async function handler(
       const built = await buildPublicBriefUrl({
         userId,
         issueDate,
-        baseUrl: new URL(req.url).origin,
+        baseUrl: publicBaseUrl(req),
         secret: shareSecret,
       });
       // Idempotent pointer write: same hash every call, so SET just
@@ -261,7 +290,7 @@ export default async function handler(
       }
     } catch (err) {
       console.warn('[api/brief] share URL derive failed:', (err as Error).message);
-      captureSilentError(err, { tags: { route: 'api/brief', step: 'share-url-derive', severity: 'warn' }, ctx });
+      captureSilentError(err, { level: 'warning', tags: { route: 'api/brief', step: 'share-url-derive', severity: 'warn' }, fingerprint: ['api/brief', 'share-url-derive', err instanceof Error ? err.name : 'Error'], ctx });
     }
   }
 
@@ -271,15 +300,20 @@ export default async function handler(
   // empty watchlist yields an empty list, so all stories stamp
   // `followed=false`. Visible content and story order are unchanged.
   const followedCountries = await followedCountriesPromise;
+  const sibling = await siblingPromise;
 
   // Cast to BriefEnvelope; renderBriefMagazine runs its own
   // assertBriefEnvelope at the top and will throw on any shape
   // mismatch, which we catch below.
   let html: string;
   try {
+    // Validate canonical first so a malformed canonical stays a 404 even
+    // when a matching sibling would render.
+    assertBriefEnvelope(envelope);
+    const selectedEnvelope = selectBriefEnvelope(envelope, sibling);
     html = renderBriefMagazine(
-      envelope as Parameters<typeof renderBriefMagazine>[0],
-      { shareUrl, followedCountries },
+      selectedEnvelope as Parameters<typeof renderBriefMagazine>[0],
+      { shareUrl, followedCountries, fontPlatform: briefFontPlatform(req.headers.get('user-agent') ?? '') },
     );
   } catch (err) {
     // Malformed envelope in Redis (composer bug, version drift, etc.)
@@ -287,11 +321,12 @@ export default async function handler(
     // and log the details server-side. The renderer's assertion
     // message is safe to log (no secrets, no user content).
     console.error('[api/brief] malformed envelope for brief:*:*:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/brief', step: 'malformed-envelope' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/brief', step: 'malformed-envelope' }, fingerprint: ['api/brief', 'malformed-envelope', err instanceof Error ? err.name : 'Error'], ctx });
     // Distinct log tag so ops can grep composer-bug vs Redis-miss. User
     // still sees the neutral "expired" page.
     return htmlResponse(req, 404, EXPIRED_PAGE);
   }
 
-  return htmlResponse(req, 200, html);
+  // The page links a different font file set per platform (brief-font-platform.js).
+  return htmlResponse(req, 200, html, { Vary: 'User-Agent' });
 }

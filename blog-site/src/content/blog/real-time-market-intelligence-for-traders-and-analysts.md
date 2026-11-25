@@ -1,6 +1,6 @@
 ---
 title: "Real-Time Market Intelligence with World Monitor Finance"
-description: "Monitor 29 stock exchanges, 14 central banks, commodities, and macro signals in one free dashboard. World Monitor Finance gives traders the geopolitical edge."
+description: "Monitor stock exchanges, central banks, commodities, and macro signals in one free dashboard. World Monitor Finance gives traders the geopolitical edge."
 metaTitle: "Real-Time Market Intelligence for Traders | World Monitor"
 keywords: "real-time market intelligence, stock market dashboard free, financial intelligence platform, macro trading signals, market monitoring tool"
 audience: "Retail and professional traders, financial analysts, macro investors, fintech enthusiasts"
@@ -38,7 +38,7 @@ The radar doesn't tell you what to buy. It tells you whether the macro environme
 
 ## 14 Central Bank and Institution Trackers
 
-Interest rates drive everything. World Monitor tracks policy and systemic indicators from 14 central banks and institutions, including:
+Interest rates drive everything. World Monitor tracks policy and systemic indicators from central banks and institutions, including:
 
 - Federal Reserve (Fed)
 - European Central Bank (ECB)
@@ -96,7 +96,7 @@ Prediction markets are consistently among the best forecasting tools available. 
 
 Here's what makes World Monitor different from every other financial dashboard: the geopolitical layer.
 
-When you see oil prices spiking, you can toggle the military layer and check if there's unusual naval activity in the Strait of Hormuz. When a currency drops, you can check if the country's CII (Country Instability Index) has been rising. When equities sell off, you can look at the Strategic Theater Posture to see if a military theater has escalated.
+When you see oil prices spiking, you can toggle the military layer and check if there's unusual naval activity in the Strait of Hormuz. When a currency drops, you can check if the country's CII (Country [Instability Index](/blog/posts/country-instability-index-methodology-explained/)) has been rising. When equities sell off, you can look at the Strategic Theater Posture to see if a military theater has escalated.
 
 This cross-domain intelligence used to be the province of hedge fund research desks with million-dollar budgets. World Monitor puts it in your browser for free. See how it [compares to traditional intelligence tools](/blog/posts/worldmonitor-vs-traditional-intelligence-tools/).
 
@@ -151,4 +151,4 @@ Market data refreshes in real time during trading hours. Central bank trackers, 
 
 ---
 
-**Open Finance Monitor at [finance.worldmonitor.app](https://finance.worldmonitor.app). Your geopolitical edge starts here.**
+**Open Finance Monitor at [finance.worldmonitor.app](https://finance.worldmonitor.app/dashboard). Your geopolitical edge starts here.**

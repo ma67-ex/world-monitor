@@ -2,9 +2,12 @@ import type { IntelligenceServiceHandler } from '../../../../src/generated/serve
 
 import { getRiskScores } from './get-risk-scores';
 import { getCountryRisk } from './get-country-risk';
+import { getCountryHistory } from './get-country-history';
+import { getCountrySignalObservations } from './get-country-signal-observations';
 import { getPizzintStatus } from './get-pizzint-status';
 import { classifyEvent } from './classify-event';
 import { getCountryIntelBrief } from './get-country-intel-brief';
+import { getCountryCoverage } from './get-country-coverage';
 import { searchGdeltDocuments } from './search-gdelt-documents';
 import { deductSituation } from './deduct-situation';
 import { getCountryFacts } from './get-country-facts';
@@ -13,6 +16,7 @@ import { listSatellites } from './list-satellites';
 import { listGpsInterference } from './list-gps-interference';
 import { listOrefAlerts } from './list-oref-alerts';
 import { listTelegramFeed } from './list-telegram-feed';
+import { listXFeed } from './list-x-feed';
 import { getCompanyEnrichment } from './get-company-enrichment';
 import { listCompanySignals } from './list-company-signals';
 import { searchSecFilings } from './search-sec-filings';
@@ -20,6 +24,7 @@ import { listMaterialEvents } from './list-material-events';
 import { getGdeltTopicTimeline } from './get-gdelt-topic-timeline';
 import { listCrossSourceSignals } from './list-cross-source-signals';
 import { listMarketImplications } from './list-market-implications';
+import { listWsbTickers } from './list-wsb-tickers';
 import { getSocialVelocity } from './get-social-velocity';
 import { getCountryEnergyProfile } from './get-country-energy-profile';
 import { computeEnergyShockScenario } from './compute-energy-shock';
@@ -33,11 +38,14 @@ import { getIntelTimeline } from './get-intel-timeline';
 import { getSimilarEvents } from './get-similar-events';
 
 export const intelligenceHandler: IntelligenceServiceHandler = {
+  getCountrySignalObservations,
+  getCountryHistory,
   getRiskScores,
   getCountryRisk,
   getPizzintStatus,
   classifyEvent,
   getCountryIntelBrief,
+  getCountryCoverage,
   searchGdeltDocuments,
   deductSituation,
   getCountryFacts,
@@ -46,6 +54,7 @@ export const intelligenceHandler: IntelligenceServiceHandler = {
   listGpsInterference,
   listOrefAlerts,
   listTelegramFeed,
+  listXFeed,
   getCompanyEnrichment,
   listCompanySignals,
   searchSecFilings,
@@ -54,6 +63,7 @@ export const intelligenceHandler: IntelligenceServiceHandler = {
   listCrossSourceSignals,
   listMarketImplications,
   getSocialVelocity,
+  listWsbTickers,
   getCountryEnergyProfile,
   computeEnergyShockScenario,
   getCountryPortActivity,

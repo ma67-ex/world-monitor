@@ -1,24 +1,29 @@
 /**
  * API Business domain-gated Pro-seat invites (#4634/#4635).
  *
- * An active `api_business` subscriber on a corporate email domain may invite up
- * to 4 same-domain teammates. Each accepted invitee resolves to a full Pro
- * entitlement (minus billing/account management) via the grant row in
+ * An active API Business subscriber on a corporate email domain may invite up
+ * to 4 teammates at any corporate email domain. Each accepted invitee resolves
+ * to a full Pro entitlement (minus billing/account management) via the grant row in
  * `businessProGrants`. Grants are auto-revoked when the Business subscription
  * stops covering.
  */
 
+import { assertAccountWritable } from "../accountDeletion/guard";
 import { ConvexError, v } from "convex/values";
 import {
   internalAction,
+  internalMutation,
   mutation,
   query,
+  type ActionCtx,
   type MutationCtx,
   type QueryCtx,
 } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { USER_AGENT } from "../broadcast/_resendContacts";
+import { ResendSendError, sendResendEmail } from "../lib/resendEmail";
 import { requireUserId, resolveUserIdentity } from "../lib/auth";
+import { EMAIL_RED, emailButton, emailCard, emailFrame, emailHeading, emailNote, emailParagraph, escapeEmailHtml } from "../../shared/email-frame";
 import {
   extractDomain,
   isCorporateDomain,
@@ -28,19 +33,25 @@ import {
   signBusinessInviteToken,
   verifyBusinessInviteToken,
 } from "../lib/identitySigning";
-import { isCoveringAt } from "./subscriptionHelpers";
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+import { hasAccessAt, isBusinessPlan, isCoveringAt } from "./subscriptionHelpers";
 
 const MAX_SEATS = 4;
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+/** Each extension adds at most 14 days to the later of the current expiry and now. */
+const MAX_EXTENSION_HOURS = INVITE_TTL_MS / HOUR_MS;
+
+/** "7 November 2026 at 08:22 UTC" — unambiguous across the invitee's locale. */
+export function formatInviteExpiry(expiresAt: number): string {
+  const d = new Date(expiresAt);
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${d.getUTCDate()} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()} at ${hh}:${mm} UTC`;
+}
 const RESEND_FETCH_TIMEOUT_MS = 10_000;
 
 /**
@@ -72,8 +83,7 @@ async function touchBusinessSeatLock(
 }
 
 /**
- * Returns true when the caller owns an active/covering `api_business`
- * subscription.
+ * Returns the caller's covering monthly or annual API Business subscription.
  */
 async function getCoveringBusinessSubscription(
   ctx: MutationCtx | QueryCtx,
@@ -84,9 +94,10 @@ async function getCoveringBusinessSubscription(
     .query("subscriptions")
     .withIndex("by_userId", (q) => q.eq("userId", userId))
     .collect();
-  return subs.find(
-    (s) => s.planKey === "api_business" && isCoveringAt(s, at),
-  ) ?? null;
+  // Prefer a row that grants access: a failed renewal past its access grace
+  // still covers for billing and must not hide another, live Business row.
+  const business = subs.filter((s) => isBusinessPlan(s.planKey) && isCoveringAt(s, at));
+  return business.find((s) => hasAccessAt(s, at)) ?? business[0] ?? null;
 }
 
 /**
@@ -113,13 +124,14 @@ async function countActiveOrPendingGrants(
 }
 
 /**
- * Owner invites up to 4 same-domain teammates. Pending invites count against
- * the cap; each gets a single-use HMAC token emailed via Resend.
+ * Owner invites up to 4 teammates at any corporate email domain. Pending
+ * invites count against the cap; each gets a single-use HMAC token emailed via Resend.
  */
 export const inviteSeats = mutation({
   args: { emails: v.array(v.string()) },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, userId);
     const identity = await resolveUserIdentity(ctx);
     const ownerEmail = identity?.email?.trim();
     if (!ownerEmail) {
@@ -128,7 +140,10 @@ export const inviteSeats = mutation({
 
     const now = Date.now();
     const businessSub = await getCoveringBusinessSubscription(ctx, userId, now);
-    if (!businessSub) {
+    // A failed renewal past its access grace still covers for billing, but
+    // its seats would grant nothing (pickBestAcceptedBusinessGrant reads
+    // hasAccessAt), so new invites wait until the owner fixes payment.
+    if (!businessSub || !hasAccessAt(businessSub, now)) {
       throw new ConvexError({ kind: "OWNER_NOT_BUSINESS" });
     }
 
@@ -184,9 +199,6 @@ export const inviteSeats = mutation({
       if (!isCorporateDomain(email)) {
         throw new ConvexError({ kind: "INVITEE_DOMAIN_NOT_CORPORATE" });
       }
-      if (!sameDomain(ownerEmail, email)) {
-        throw new ConvexError({ kind: "INVITEE_DOMAIN_MISMATCH" });
-      }
 
       const existing = existingByEmail.get(email);
       if (existing) {
@@ -237,10 +249,12 @@ export const inviteSeats = mutation({
 
 /**
  * Shared Resend send + error-handling for both business-seat email actions.
+ * Routed through the shared helper so the local suppression table is checked
+ * (seat mail used to skip it) and replies reach support@ instead of noreply@.
  * `skipLogContext` names what's being skipped when RESEND_API_KEY is unset;
  * `failureLabel` names the operation in the thrown error on a non-2xx.
  */
-async function sendResendEmail(opts: {
+async function sendSeatEmail(ctx: Pick<ActionCtx, "runQuery">, opts: {
   to: string;
   subject: string;
   html: string;
@@ -254,28 +268,59 @@ async function sendResendEmail(opts: {
     return;
   }
 
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "User-Agent": USER_AGENT,
-    },
-    body: JSON.stringify({
+  let result;
+  try {
+    result = await sendResendEmail(ctx, {
+      apiKey,
       from: "World Monitor <noreply@worldmonitor.app>",
-      to: [opts.to],
+      to: opts.to,
       subject: opts.subject,
       html: opts.html,
-    }),
-    signal: AbortSignal.timeout(RESEND_FETCH_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`[businessSeats] Resend ${res.status}: ${body}`);
-    throw new Error(`Resend ${opts.failureLabel} failed: ${res.status}`);
+      purpose: "transactional",
+      userAgent: USER_AGENT,
+      timeoutMs: RESEND_FETCH_TIMEOUT_MS,
+    });
+  } catch (err) {
+    if (err instanceof ResendSendError) {
+      console.error(`[businessSeats] Resend ${err.status}: ${err.body}`);
+      throw new Error(`Resend ${opts.failureLabel} failed: ${err.status}`);
+    }
+    throw err;
+  }
+  if (!result.sent) {
+    console.log(`[businessSeats] Skipped ${opts.skipLogContext}: recipient is suppressed`);
+    return;
   }
   console.log(opts.successLog);
+}
+
+const SEAT_SUPPORT_NOTE = 'Questions? Reply to this email or contact <a href="mailto:support@worldmonitor.app" style="color: #4ade80;">support@worldmonitor.app</a>.';
+
+/** The team-access-ended email body. Exported for tests. */
+export function teamAccessEndedEmailHtml(): string {
+  return emailFrame({
+    preheader: "Your WorldMonitor Pro seat has ended and your account is back on the free tier.",
+    kicker: "Team access",
+    accent: EMAIL_RED,
+    bodyHtml: `${emailHeading("Team access ended")}
+      ${emailCard(emailParagraph("Your WorldMonitor Pro seat on a team Business plan has ended because the plan is no longer active. Your account has returned to the free tier."), { color: EMAIL_RED })}
+      ${emailButton("https://worldmonitor.app/pro", "View plans", EMAIL_RED)}
+      ${emailNote(SEAT_SUPPORT_NOTE)}`,
+    footerNote: "You're receiving this because you held a seat on a WorldMonitor team plan.",
+  });
+}
+
+/** The Business seat invite email body. Exported for tests. */
+export function businessInviteEmailHtml(args: { ownerEmail: string; acceptUrl: string; expiryNote: string }): string {
+  return emailFrame({
+    preheader: `${args.ownerEmail} invited you to a WorldMonitor Pro seat.`,
+    kicker: "Team invite",
+    bodyHtml: `${emailHeading("You're invited to WorldMonitor Pro")}
+      ${emailCard(emailParagraph(`${escapeEmailHtml(args.ownerEmail)} has invited you to a Pro seat on their WorldMonitor API Business plan. Accept the invite to unlock all Pro features, with no billing setup required.`))}
+      ${emailButton(args.acceptUrl, "Accept invite")}
+      ${emailNote(`${escapeEmailHtml(args.expiryNote)} If you didn't expect this email, you can ignore it.`)}`,
+    footerNote: "You're receiving this because a WorldMonitor Business plan owner invited this address.",
+  });
 }
 
 /**
@@ -284,26 +329,10 @@ async function sendResendEmail(opts: {
  */
 export const sendTeamAccessEndedEmail = internalAction({
   args: { inviteeEmail: v.string() },
-  handler: async (_ctx, args) => {
-    const html = `
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; background: #0a0a0a; color: #e0e0e0;">
-  <div style="background: #ef4444; height: 4px;"></div>
-  <div style="padding: 40px 32px;">
-    <p style="font-size: 22px; font-weight: 700; color: #fff; margin: 0 0 12px;">Team access ended</p>
-    <p style="font-size: 14px; color: #999; line-height: 1.5; margin: 0 0 24px;">
-      Your WorldMonitor Pro seat on a team Business plan has ended because the plan is no longer active.
-      Your account has returned to the free tier.
-    </p>
-    <div style="text-align: center;">
-      <a href="https://worldmonitor.app/pro" style="display: inline-block; background: #ef4444; color: #fff; padding: 14px 36px; text-decoration: none; font-weight: 800; font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px; border-radius: 2px;">View Plans</a>
-    </div>
-    <p style="font-size: 11px; color: #666; text-align: center; margin: 24px 0 0;">
-      Questions? Reply to this email or contact support@worldmonitor.app.
-    </p>
-  </div>
-</div>`;
+  handler: async (ctx, args) => {
+    const html = teamAccessEndedEmailHtml();
 
-    await sendResendEmail({
+    await sendSeatEmail(ctx, {
       to: args.inviteeEmail,
       subject: "Your WorldMonitor team access has ended",
       html,
@@ -324,28 +353,17 @@ export const sendBusinessInviteEmail = internalAction({
     ownerEmail: v.string(),
     grantId: v.string(),
     token: v.string(),
+    // Set when an extended invite is re-sent; the default copy assumes 14 days.
+    expiresAt: v.optional(v.number()),
   },
-  handler: async (_ctx, args) => {
-    const acceptUrl = `https://worldmonitor.app/settings?accept-business-invite=${encodeURIComponent(args.grantId)}&token=${encodeURIComponent(args.token)}`;
-    const html = `
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; background: #0a0a0a; color: #e0e0e0;">
-  <div style="background: #4ade80; height: 4px;"></div>
-  <div style="padding: 40px 32px;">
-    <p style="font-size: 22px; font-weight: 700; color: #fff; margin: 0 0 12px;">You're invited to WorldMonitor Pro</p>
-    <p style="font-size: 14px; color: #999; line-height: 1.5; margin: 0 0 24px;">
-      ${escapeHtml(args.ownerEmail)} has invited you to a Pro seat on their WorldMonitor API Business plan.
-      Accept the invite to unlock all Pro features — no billing setup required.
-    </p>
-    <div style="text-align: center;">
-      <a href="${acceptUrl}" style="display: inline-block; background: #4ade80; color: #0a0a0a; padding: 14px 36px; text-decoration: none; font-weight: 800; font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px; border-radius: 2px;">Accept Invite</a>
-    </div>
-    <p style="font-size: 11px; color: #666; text-align: center; margin: 24px 0 0;">
-      This invite expires in 14 days. If you didn't expect this email, you can ignore it.
-    </p>
-  </div>
-</div>`;
+  handler: async (ctx, args) => {
+    const expiryNote = args.expiresAt === undefined
+      ? "This invite expires in 14 days."
+      : `This invite expires on ${formatInviteExpiry(args.expiresAt)}.`;
+    const acceptUrl = `https://www.worldmonitor.app/dashboard?accept-business-invite=${encodeURIComponent(args.grantId)}&token=${encodeURIComponent(args.token)}`;
+    const html = businessInviteEmailHtml({ ownerEmail: args.ownerEmail, acceptUrl, expiryNote });
 
-    await sendResendEmail({
+    await sendSeatEmail(ctx, {
       to: args.inviteeEmail,
       subject: "You've been invited to WorldMonitor Pro",
       html,
@@ -445,7 +463,7 @@ export const removeSeat = mutation({
 
 /**
  * Invitee redeems an HMAC token to accept a Business Pro seat invite. Verifies
- * the token, matches the signed-in Clerk email against the invited address,
+ * the token, matches the signed-in verified Clerk email against the invited address,
  * checks the underlying Business subscription is still covering, flips the
  * grant to `accepted`, stamps `inviteeUserId`, and recomputes the invitee's
  * entitlement. Single-use: accepted/revoked/expired tokens are rejected.
@@ -454,16 +472,21 @@ export const acceptBusinessInvite = mutation({
   args: { grantId: v.id("businessProGrants"), token: v.string() },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    await assertAccountWritable(ctx, userId);
     const identity = await resolveUserIdentity(ctx);
     const inviteeEmail = identity?.email?.trim().toLowerCase();
     if (!inviteeEmail) {
       throw new ConvexError({ kind: "INVITEE_EMAIL_UNAVAILABLE" });
+    }
+    if (identity?.emailVerified !== true) {
+      throw new ConvexError({ kind: "INVITEE_EMAIL_UNVERIFIED" });
     }
 
     const grant = await ctx.db.get(args.grantId);
     if (!grant) {
       throw new ConvexError({ kind: "GRANT_NOT_FOUND" });
     }
+    await assertAccountWritable(ctx, grant.ownerUserId);
     if (grant.status !== "pending") {
       throw new ConvexError({ kind: "INVITE_ALREADY_USED" });
     }
@@ -490,7 +513,7 @@ export const acceptBusinessInvite = mutation({
         q.eq("dodoSubscriptionId", grant.businessSubscriptionId),
       )
       .unique();
-    if (!businessSub || businessSub.planKey !== "api_business" || !isCoveringAt(businessSub, now)) {
+    if (!businessSub || !isBusinessPlan(businessSub.planKey) || !hasAccessAt(businessSub, now)) {
       throw new ConvexError({ kind: "BUSINESS_NOT_ACTIVE" });
     }
 
@@ -506,5 +529,101 @@ export const acceptBusinessInvite = mutation({
     );
 
     return { ok: true as const };
+  },
+});
+
+/**
+ * Support tool: extend a pending invite by `hours` and re-send it.
+ *
+ * The emailed token embeds its own expiry, so moving `expiresAt` alone would
+ * leave the invitee's link dead at the old time. This signs a new token for the
+ * new expiry and emails it; the old link keeps its original expiry. The
+ * extension counts from the later of the current expiry and now, so a lapsed
+ * invite can be revived. Run from the CLI:
+ *
+ *   npx convex run payments/businessSeats:extendBusinessInvite '{"grantId":"…","hours":24}'
+ *
+ * Every run with `hours` > 0 extends again. To retry a failed email without
+ * extending, pass `"hours":0`: it re-sends a link for the current expiry and
+ * refuses an invite that has already lapsed.
+ */
+export const extendBusinessInvite = internalMutation({
+  args: { grantId: v.id("businessProGrants"), hours: v.number() },
+  handler: async (ctx, args) => {
+    if (!Number.isInteger(args.hours) || args.hours < 0 || args.hours > MAX_EXTENSION_HOURS) {
+      throw new ConvexError({ kind: "INVALID_EXTENSION_HOURS" });
+    }
+    const grant = await ctx.db.get(args.grantId);
+    if (!grant) {
+      throw new ConvexError({ kind: "GRANT_NOT_FOUND" });
+    }
+    // An owner whose account is being deleted cannot have invites accepted,
+    // so do not change or re-send them.
+    await assertAccountWritable(ctx, grant.ownerUserId);
+    if (grant.status !== "pending") {
+      throw new ConvexError({ kind: "INVITE_NOT_PENDING" });
+    }
+    const now = Date.now();
+    if (args.hours === 0 && grant.expiresAt <= now) {
+      throw new ConvexError({ kind: "INVITE_EXPIRED" });
+    }
+    const businessSub = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_dodoSubscriptionId", (q) =>
+        q.eq("dodoSubscriptionId", grant.businessSubscriptionId),
+      )
+      .unique();
+    if (!businessSub || !isBusinessPlan(businessSub.planKey) || !hasAccessAt(businessSub, now)) {
+      throw new ConvexError({ kind: "BUSINESS_NOT_ACTIVE" });
+    }
+    // The owner may have re-invited the same address after this invite lapsed.
+    // Two usable grants for one person would hold two seats.
+    const siblings = await ctx.db
+      .query("businessProGrants")
+      .withIndex("by_businessSubscriptionId", (q) =>
+        q.eq("businessSubscriptionId", grant.businessSubscriptionId),
+      )
+      .collect();
+    const inviteeEmail = grant.inviteeEmail.trim().toLowerCase();
+    const duplicate = siblings.some((g) =>
+      g._id !== grant._id
+      && g.inviteeEmail.trim().toLowerCase() === inviteeEmail
+      && (g.status === "accepted" || (g.status === "pending" && g.expiresAt > now)),
+    );
+    if (duplicate) {
+      throw new ConvexError({ kind: "DUPLICATE_INVITE" });
+    }
+    // A lapsed invite has freed its seat; reviving it must not exceed the cap.
+    if (grant.expiresAt <= now) {
+      const activeOrPending = await countActiveOrPendingGrants(ctx, grant.businessSubscriptionId, now);
+      if (activeOrPending >= MAX_SEATS) {
+        throw new ConvexError({ kind: "SEAT_CAP_REACHED" });
+      }
+    }
+    const owner = await ctx.db
+      .query("customers")
+      .withIndex("by_userId", (q) => q.eq("userId", grant.ownerUserId))
+      .first();
+    const ownerEmail = owner?.email?.trim();
+    if (!ownerEmail) {
+      throw new ConvexError({ kind: "OWNER_EMAIL_UNAVAILABLE" });
+    }
+
+    const expiresAt = args.hours === 0
+      ? grant.expiresAt
+      : Math.max(grant.expiresAt, now) + args.hours * HOUR_MS;
+    if (expiresAt !== grant.expiresAt) {
+      await ctx.db.patch(args.grantId, { expiresAt });
+    }
+    const token = await signBusinessInviteToken(args.grantId, expiresAt);
+    await ctx.scheduler.runAfter(
+      0,
+      internal.payments.businessSeats.sendBusinessInviteEmail,
+      { inviteeEmail: grant.inviteeEmail, ownerEmail, grantId: args.grantId, token, expiresAt },
+    );
+    console.log(
+      `[businessSeats] Extended invite ${args.grantId.slice(0, 8)}... by ${args.hours}h to ${new Date(expiresAt).toISOString()}`,
+    );
+    return { grantId: args.grantId, expiresAt };
   },
 });

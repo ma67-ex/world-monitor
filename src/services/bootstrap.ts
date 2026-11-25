@@ -1,12 +1,17 @@
 import { getPersistentCache, setPersistentCache } from '@/services/persistent-cache';
 import { isDesktopRuntime, toApiUrl } from '@/services/runtime';
+import { combineAbortSignals, createTimeoutSignal } from '@/services/timeout-signal';
+import { adoptPrimedBootstrapTier, primedBootstrapTierBudgetUsedMs, resetPrimedBootstrapTierForTests } from '@/services/bootstrap-prefetch';
 import {
-  buildBootstrapR2RumSample,
-  selectBootstrapR2RumTier,
-  type BootstrapR2RumOutcome,
-  type BootstrapR2RumTier,
-} from '@/bootstrap/bootstrap-r2-rum';
-import { reportBootstrapR2Rum } from '@/bootstrap/debugbear-rum';
+  buildBootstrapTransferRumSample,
+  readBootstrapEncodedBodySize,
+  selectBootstrapTransferRumTier,
+  utf8TextBytes,
+  type BootstrapTransferRumOutcome,
+  type BootstrapTransferRumSample,
+  type BootstrapTransferRumTier,
+} from '@/bootstrap/bootstrap-transfer-rum';
+import { isDebugBearRumActive, reportBootstrapTransferRum } from '@/bootstrap/debugbear-rum';
 import { getWebVitalsFormFactor } from '@/bootstrap/web-vitals-utils';
 import { bootstrapTierKeyNames } from '../../shared/bootstrap-tier-keys.js';
 
@@ -31,6 +36,26 @@ export interface BootstrapHydrationState {
 }
 
 const EMPTY_TIER_STATE: BootstrapTierHydrationState = { source: 'none', updatedAt: null };
+
+/**
+ * Abort budgets per tier and runtime. Named and exported so the budget is
+ * assertable directly — it was previously pinned by regex-scanning this file
+ * for bare numeric literals, which matched any number in the module.
+ *
+ * The web numbers are load-bearing: the fast tier sits on the first-paint
+ * critical path, and the slow tier was raised 1.8s → 3.0s to stop a hydration
+ * cascade where aborted tier fetches left panels in empty-state. Desktop gets
+ * longer budgets for different network and dependency-loading constraints.
+ * Do not move these without RUM / Sentry evidence.
+ *
+ * The exact web budgets are pinned by tests/bootstrap-payload-budget.test.mjs;
+ * the browser abort fixture withholds headers until the application aborts.
+ */
+export const BOOTSTRAP_TIER_TIMEOUT_MS = {
+  web: { fast: 1_200, slow: 3_000 },
+  desktop: { fast: 5_000, slow: 8_000 },
+} as const;
+
 let lastHydrationState: BootstrapHydrationState = {
   source: 'none',
   tiers: {
@@ -41,28 +66,63 @@ let lastHydrationState: BootstrapHydrationState = {
 let bootstrapGeneration = 0;
 let activeSlowCtrl: AbortController | null = null;
 let slowTierSettled: Promise<void> | null = null;
-let bootstrapR2RumTier: BootstrapR2RumTier | null = null;
+/**
+ * Resolver for the slow-tier reservation held across a bootstrap. Non-null only
+ * while a bootstrap is in flight and has not yet handed its checkpoint over to
+ * the real scheduled fetch. Every exit path from fetchBootstrapData must call
+ * it, or awaiters of the reservation hang forever.
+ */
+let releaseReservedSlowTier: (() => void) | null = null;
+let bootstrapTransferRumTier: BootstrapTransferRumTier | null = null;
+let bootstrapTransferRumReported = false;
+let bootstrapTransferRumReporter = reportBootstrapTransferRum;
+let bootstrapTransferRumEnabled = isDebugBearRumActive;
+let encodedBodySizeResolver = readBootstrapEncodedBodySize;
 
-function selectedBootstrapR2RumTier(): BootstrapR2RumTier {
-  bootstrapR2RumTier ??= selectBootstrapR2RumTier();
-  return bootstrapR2RumTier;
+function selectedBootstrapTransferRumTier(): BootstrapTransferRumTier {
+  bootstrapTransferRumTier ??= selectBootstrapTransferRumTier();
+  return bootstrapTransferRumTier;
 }
 
-function maybeReportBootstrapR2Rum(
-  tier: BootstrapR2RumTier,
-  outcome: BootstrapR2RumOutcome,
+function maybeReportBootstrapTransferRum(
+  tier: BootstrapTransferRumTier,
+  outcome: BootstrapTransferRumOutcome,
   startedAt: number,
-  response: Response,
+  decodedBytes = -1,
+  encodedBytes = -1,
+  shouldCommit: CommitGuard,
 ): void {
-  if (selectedBootstrapR2RumTier() !== tier) return;
-  const result = buildBootstrapR2RumSample(
+  if (
+    !shouldCommit()
+    || bootstrapTransferRumReported
+    || !bootstrapTransferRumEnabled()
+    || selectedBootstrapTransferRumTier() !== tier
+  ) return;
+  const result = buildBootstrapTransferRumSample({
     tier,
     outcome,
-    Math.max(0, performance.now() - startedAt),
-    response.headers,
-    getWebVitalsFormFactor(),
-  );
-  if (result.accepted) reportBootstrapR2Rum(result.sample);
+    durationMs: Math.max(0, performance.now() - startedAt),
+    decodedBytes,
+    encodedBytes,
+    deviceClass: getWebVitalsFormFactor(),
+  });
+  if (!result.accepted) return;
+  bootstrapTransferRumReported = true;
+  try {
+    bootstrapTransferRumReporter(result.sample);
+  } catch {
+    // Telemetry must never affect bootstrap hydration or recovery.
+  }
+}
+
+function shouldMeasureBootstrapTransferRum(
+  tier: BootstrapTransferRumTier,
+  shouldCommit: CommitGuard,
+): boolean {
+  return shouldCommit()
+    && !bootstrapTransferRumReported
+    && bootstrapTransferRumEnabled()
+    && selectedBootstrapTransferRumTier() === tier;
 }
 
 export function getHydratedData(key: string): unknown | undefined {
@@ -73,7 +133,12 @@ export function getHydratedData(key: string): unknown | undefined {
 
 // In-flight coalescing for on-demand keys: a panel and a map layer can both ask
 // for the same key in the same tick, and we want one request, not two.
-const onDemandInflight = new Map<string, Promise<unknown | undefined>>();
+interface OnDemandInflightEntry {
+  promise: Promise<unknown | undefined>;
+  controller: AbortController;
+  waiters: number;
+}
+const onDemandInflight = new Map<string, OnDemandInflightEntry>();
 
 // The on-demand keys `/api/bootstrap?keys=<name>&public=1` will serve without
 // credentials. The ON-DEMAND PORTION cannot drift: this set, the server's
@@ -103,7 +168,9 @@ const PUBLIC_ON_DEMAND_BOOTSTRAP_KEYS = new Set(bootstrapTierKeyNames('on-demand
  * #5287. Callers keep their existing RPC fallback for the failure case; this
  * simply gives them a cached path to try first.
  */
-export async function ensureHydrated(key: string): Promise<unknown | undefined> {
+export async function ensureHydrated(key: string, signal?: AbortSignal): Promise<unknown | undefined> {
+  if (signal?.aborted) return undefined;
+
   const hydrated = getHydratedData(key);
   if (hydrated !== undefined) return hydrated;
 
@@ -123,27 +190,73 @@ export async function ensureHydrated(key: string): Promise<unknown | undefined> 
   // fallback", which is exactly what the 401 produced.
   if (!PUBLIC_ON_DEMAND_BOOTSTRAP_KEYS.has(key)) return undefined;
 
-  const existing = onDemandInflight.get(key);
-  if (existing) return existing;
+  let entry = onDemandInflight.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    const requestSignal = combineAbortSignals([controller.signal, createTimeoutSignal(10_000)]);
+    const created: OnDemandInflightEntry = {
+      controller,
+      waiters: 0,
+      promise: (async () => {
+        try {
+          const resp = await fetch(
+            toApiUrl(`/api/bootstrap?keys=${encodeURIComponent(key)}&public=1`),
+            { credentials: 'omit', signal: requestSignal },
+          );
+          if (!resp.ok) return undefined;
+          const payload = (await resp.json()) as { data?: Record<string, unknown> };
+          return payload.data?.[key];
+        } catch {
+          return undefined;
+        } finally {
+          if (onDemandInflight.get(key)?.controller === controller) {
+            onDemandInflight.delete(key);
+          }
+        }
+      })(),
+    };
+    onDemandInflight.set(key, created);
+    entry = created;
+  }
 
-  const promise = (async () => {
+  entry.waiters += 1;
+  if (!signal) {
     try {
-      const resp = await fetch(
-        toApiUrl(`/api/bootstrap?keys=${encodeURIComponent(key)}&public=1`),
-        { credentials: 'omit', signal: AbortSignal.timeout(10_000) },
-      );
-      if (!resp.ok) return undefined;
-      const payload = (await resp.json()) as { data?: Record<string, unknown> };
-      return payload.data?.[key];
-    } catch {
-      return undefined;
+      return await entry.promise;
     } finally {
-      onDemandInflight.delete(key);
+      entry.waiters -= 1;
     }
-  })();
+  }
 
-  onDemandInflight.set(key, promise);
-  return promise;
+  let onAbort: (() => void) | undefined;
+  let released = false;
+  const releaseWaiter = () => {
+    if (released) return;
+    released = true;
+    entry.waiters -= 1;
+    if (entry.waiters === 0) {
+      if (onDemandInflight.get(key) === entry) {
+        onDemandInflight.delete(key);
+      }
+      entry.controller.abort(signal.reason);
+    }
+  };
+  const aborted = new Promise<undefined>((resolve) => {
+    onAbort = () => {
+      releaseWaiter();
+      resolve(undefined);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([entry.promise, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+    if (!released) {
+      released = true;
+      entry.waiters -= 1;
+    }
+  }
 }
 
 export function markBootstrapAsLive(): void {
@@ -205,44 +318,129 @@ function combineHydrationSources(states: BootstrapTierHydrationState[]): Bootstr
   return 'mixed';
 }
 
+interface BootstrapTierPayload {
+  data: Record<string, unknown>;
+  missing: string[];
+}
+
+function validateBootstrapTierPayload(payload: unknown): BootstrapTierPayload | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const data = (payload as { data?: unknown }).data;
+  const missing = (payload as { missing?: unknown }).missing;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (!Array.isArray(missing) || !missing.every((key) => typeof key === 'string')) return null;
+  return { data: data as Record<string, unknown>, missing };
+}
+
+function parseBootstrapTierPayload(text: string): BootstrapTierPayload | null {
+  try {
+    return validateBootstrapTierPayload(JSON.parse(text) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+function isAbortFailure(error: unknown, signal: AbortSignal): boolean {
+  return signal.aborted
+    || (error != null
+      && typeof error === 'object'
+      && 'name' in error
+      && error.name === 'AbortError');
+}
+
 async function fetchTier(
   tier: 'fast' | 'slow',
   signal: AbortSignal,
   shouldCommit: CommitGuard = () => true,
 ): Promise<BootstrapTierHydrationState> {
+  let requestStartedAt = performance.now();
+  const requestUrl = toApiUrl(`/api/bootstrap?tier=${tier}&public=1`);
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     const cached = await readCachedTier(tier, true); // age gate skipped: any snapshot beats blank offline
     if (cached) {
       populateCache(cached.data, shouldCommit);
+      maybeReportBootstrapTransferRum(
+        tier,
+        'cached-fallback',
+        requestStartedAt,
+        -1,
+        -1,
+        shouldCommit,
+      );
       return { source: 'cached', updatedAt: cached.updatedAt };
     }
+    maybeReportBootstrapTransferRum(
+      tier,
+      'network-error',
+      requestStartedAt,
+      -1,
+      -1,
+      shouldCommit,
+    );
     return { ...EMPTY_TIER_STATE };
   }
 
   let liveData: Record<string, unknown> = {};
   let missingKeys: string[] = [];
-  const requestStartedAt = performance.now();
-  let rumResponse: Response | null = null;
+  let completedResponse = false;
+  let failedOutcome: Exclude<BootstrapTransferRumOutcome, 'complete' | 'cached-fallback'> | null = null;
 
   try {
     // public=1 gives the shared seed bundle a cache key distinct from the legacy
     // credentialed tier URL. credentials:'omit' also avoids sending cookies to
     // a route whose contract is explicitly public (see #5249).
-    const resp = await fetch(toApiUrl(`/api/bootstrap?tier=${tier}&public=1`), { signal, credentials: 'omit' });
-    rumResponse = resp;
-    if (resp.ok) {
-      const payload = (await resp.json()) as {
-        data?: Record<string, unknown>;
-        missing?: string[];
-      };
-      liveData = payload.data ?? {};
-      missingKeys = Array.isArray(payload.missing) ? payload.missing : [];
-      maybeReportBootstrapR2Rum(tier, 'success', requestStartedAt, resp);
+    //
+    // The omit is now load-bearing for CORS, not just cookie hygiene: since #7308
+    // this URL answers ACAO `*` with no Allow-Credentials from both the edge and
+    // the origin, which a browser refuses to hand to a credentialed request. Drop
+    // the omit here — or let the wm-session interceptor's `?? 'include'` default
+    // apply by taking this call out of isCredentiallessPublicDataRequest's exact
+    // shape — and hydration fails as an opaque console CORS error, not a test.
+    // The dashboard entry may already have started the fast tier
+    // (bootstrap-prefetch.ts) before this chunk loaded.
+    const primed = tier === 'fast' ? adoptPrimedBootstrapTier(requestUrl, signal) : null;
+    if (primed) requestStartedAt = primed.startedAt;
+    const resp = primed
+      ? await primed.response.catch((error: unknown) => {
+        // A network failure before App loaded gets one direct attempt within
+        // the same budget; an abort is the budget itself and propagates.
+        if (isAbortFailure(error, signal)) throw error;
+        return fetch(requestUrl, { signal, credentials: 'omit' });
+      })
+      : await fetch(requestUrl, { signal, credentials: 'omit' });
+    if (!resp.ok) {
+      failedOutcome = 'http-error';
+    } else {
+      try {
+        const readTransferBody = shouldMeasureBootstrapTransferRum(tier, shouldCommit);
+        const responseText = readTransferBody ? await resp.text() : null;
+        const measureTransfer = responseText !== null
+          && shouldMeasureBootstrapTransferRum(tier, shouldCommit);
+        const decodedBytes = measureTransfer && responseText !== null ? utf8TextBytes(responseText) : -1;
+        const payload = responseText === null
+          ? validateBootstrapTierPayload(await resp.json() as unknown)
+          : parseBootstrapTierPayload(responseText);
+        if (!payload) {
+          failedOutcome = 'parse-error';
+        } else {
+          completedResponse = true;
+          liveData = payload.data;
+          missingKeys = payload.missing;
+          maybeReportBootstrapTransferRum(
+            tier,
+            'complete',
+            requestStartedAt,
+            decodedBytes,
+            measureTransfer ? encodedBodySizeResolver(requestUrl, decodedBytes) : -1,
+            shouldCommit,
+          );
+        }
+      } catch (error) {
+        failedOutcome = isAbortFailure(error, signal) ? 'abort' : 'network-error';
+      }
     }
-  } catch {
-    if (signal.aborted && rumResponse) {
-      maybeReportBootstrapR2Rum(tier, 'abort', requestStartedAt, rumResponse);
-    }
+  } catch (error) {
+    failedOutcome = isAbortFailure(error, signal) ? 'abort' : 'network-error';
     // Fall through to cached tier.
   }
 
@@ -250,7 +448,27 @@ async function fetchTier(
     const cached = await readCachedTier(tier);
     if (cached) {
       populateCache(cached.data, shouldCommit);
+      if (!completedResponse) {
+        maybeReportBootstrapTransferRum(
+          tier,
+          'cached-fallback',
+          requestStartedAt,
+          -1,
+          -1,
+          shouldCommit,
+        );
+      }
       return { source: 'cached', updatedAt: cached.updatedAt };
+    }
+    if (!completedResponse) {
+      maybeReportBootstrapTransferRum(
+        tier,
+        failedOutcome ?? 'network-error',
+        requestStartedAt,
+        -1,
+        -1,
+        shouldCommit,
+      );
     }
     return { ...EMPTY_TIER_STATE };
   }
@@ -317,6 +535,14 @@ function scheduleAfterNextPaint(fn: () => void): () => void {
   };
 }
 
+function shouldAbortSlowTierOnTimeout(): boolean {
+  try {
+    return import.meta.env.VITE_E2E !== '1';
+  } catch {
+    return true;
+  }
+}
+
 function scheduleSlowTierFetch(generation: number, onSlowSettled?: () => void): Promise<void> {
   const desktop = isDesktopRuntime();
   const isCurrentGeneration = (): boolean => generation === bootstrapGeneration;
@@ -330,7 +556,13 @@ function scheduleSlowTierFetch(generation: number, onSlowSettled?: () => void): 
 
       const slowCtrl = new AbortController();
       activeSlowCtrl = slowCtrl;
-      const slowTimeout = setTimeout(() => slowCtrl.abort(), desktop ? 8_000 : 3_000);
+      const abortSlowTier = shouldAbortSlowTierOnTimeout();
+      const slowTimeout = abortSlowTier
+        ? setTimeout(
+          () => slowCtrl.abort(),
+          desktop ? BOOTSTRAP_TIER_TIMEOUT_MS.desktop.slow : BOOTSTRAP_TIER_TIMEOUT_MS.web.slow,
+        )
+        : null;
 
       void fetchTier('slow', slowCtrl.signal, isCurrentGeneration)
         .then((slowState) => {
@@ -344,7 +576,7 @@ function scheduleSlowTierFetch(generation: number, onSlowSettled?: () => void): 
           // Background failure: leave the slow keys un-hydrated; consumers refetch on demand.
         })
         .finally(() => {
-          clearTimeout(slowTimeout);
+          if (slowTimeout !== null) clearTimeout(slowTimeout);
           if (activeSlowCtrl === slowCtrl) activeSlowCtrl = null;
           if (isCurrentGeneration()) onSlowSettled?.();
           resolve();
@@ -358,6 +590,20 @@ function scheduleSlowTierFetch(generation: number, onSlowSettled?: () => void): 
   });
 }
 
+/**
+ * True once the slow tier for the in-flight bootstrap has settled.
+ *
+ * `slowTierSettled` is null in two very different situations: no bootstrap is
+ * running at all, and a bootstrap IS running but has not scheduled its slow
+ * tier yet (it is only scheduled after the fast tier commits). Treating both as
+ * "settled" made this fail open: a caller landing in the second window got an
+ * instant `true` for a slow tier that had not even been requested. App.ts gates
+ * viewportHydrationReady + its scroll listener on this checkpoint precisely so
+ * an early scroll cannot consume the consume-once hydration keys before they
+ * arrive, so opening that gate early wasted the ~500 KB slow tier. The
+ * reservation installed by fetchBootstrapData now covers the whole bootstrap,
+ * leaving null to mean only "nothing in flight".
+ */
 export async function waitForBootstrapSlowTier(timeoutMs = 0): Promise<boolean> {
   const pending = slowTierSettled;
   if (!pending) return true;
@@ -382,6 +628,10 @@ export function cancelBootstrapSlowTier(): void {
   bootstrapGeneration += 1;
   activeSlowCtrl?.abort();
   activeSlowCtrl = null;
+  // Resolve before dropping the reference: a caller that already captured this
+  // checkpoint would otherwise await a promise nothing can settle.
+  releaseReservedSlowTier?.();
+  releaseReservedSlowTier = null;
   slowTierSettled = null;
 }
 
@@ -403,7 +653,23 @@ export async function fetchBootstrapData(onSlowSettled?: () => void): Promise<vo
 
   activeSlowCtrl?.abort();
   activeSlowCtrl = null;
-  slowTierSettled = null;
+  // Release any reservation from a superseded bootstrap before replacing it,
+  // so an awaiter still holding that generation's checkpoint is not stranded.
+  releaseReservedSlowTier?.();
+  // Reserve the checkpoint for the WHOLE bootstrap rather than only from the
+  // moment the slow tier is scheduled. Between here and that hand-off the slow
+  // tier has not settled, and a null would tell waitForBootstrapSlowTier
+  // otherwise — the fail-open that let App.ts open viewport hydration before
+  // the slow tier was even requested.
+  slowTierSettled = new Promise<void>((resolve) => {
+    releaseReservedSlowTier = resolve;
+  });
+  const reservation = releaseReservedSlowTier;
+  const releaseReservation = (): void => {
+    if (releaseReservedSlowTier === reservation) releaseReservedSlowTier = null;
+    reservation?.();
+  };
+  let handedOffToSlowFetch = false;
   hydrationCache.clear();
   lastHydrationState = {
     source: 'none',
@@ -424,27 +690,48 @@ export async function fetchBootstrapData(onSlowSettled?: () => void): Promise<vo
   // - 3.0 s is a conservative bump to avoid that cascade. Further tuning should be driven by RUM / Sentry
   //   data once available; do not move this without evidence.
   // - Desktop budgets (5 s / 8 s) are unchanged — different network and dependency-loading constraints.
-  const fastTimeout = setTimeout(() => fastCtrl.abort(), desktop ? 5_000 : 1_200);
+  // A request primed by the entry script has already spent part of the budget.
+  const fastBudgetMs = desktop ? BOOTSTRAP_TIER_TIMEOUT_MS.desktop.fast : BOOTSTRAP_TIER_TIMEOUT_MS.web.fast;
+  const fastTimeout = setTimeout(
+    () => fastCtrl.abort(),
+    Math.max(0, fastBudgetMs - primedBootstrapTierBudgetUsedMs()),
+  );
   try {
-    const fastState = await fetchTier('fast', fastCtrl.signal, isCurrentGeneration);
-    if (!isCurrentGeneration()) return;
-    lastHydrationState = {
-      source: combineHydrationSources([fastState, lastHydrationState.tiers.slow]),
-      tiers: { fast: fastState, slow: lastHydrationState.tiers.slow },
-    };
-  } finally {
-    clearTimeout(fastTimeout);
-  }
+    try {
+      const fastState = await fetchTier('fast', fastCtrl.signal, isCurrentGeneration);
+      if (!isCurrentGeneration()) return;
+      lastHydrationState = {
+        source: combineHydrationSources([fastState, lastHydrationState.tiers.slow]),
+        tiers: { fast: fastState, slow: lastHydrationState.tiers.slow },
+      };
+    } finally {
+      clearTimeout(fastTimeout);
+    }
 
-  if (!isCurrentGeneration()) return;
-  slowTierSettled = scheduleSlowTierFetch(generation, onSlowSettled);
+    if (!isCurrentGeneration()) return;
+    const scheduled = scheduleSlowTierFetch(generation, onSlowSettled);
+    slowTierSettled = scheduled;
+    handedOffToSlowFetch = true;
+    // Callers that captured the reservation before this hand-off must observe
+    // the REAL settle, not resolve early, so chain it rather than releasing now.
+    void scheduled.then(releaseReservation, releaseReservation);
+  } finally {
+    // Every other way out — a superseded generation, or a throw from the fast
+    // tier — leaves nothing that will ever settle, so release immediately.
+    if (!handedOffToSlowFetch) releaseReservation();
+  }
 }
 
 export const __testing__ = {
   resetBootstrapForTests(): void {
+    resetPrimedBootstrapTierForTests();
     cancelBootstrapSlowTier();
     hydrationCache.clear();
-    bootstrapR2RumTier = null;
+    bootstrapTransferRumTier = null;
+    bootstrapTransferRumReported = false;
+    bootstrapTransferRumReporter = reportBootstrapTransferRum;
+    bootstrapTransferRumEnabled = isDebugBearRumActive;
+    encodedBodySizeResolver = readBootstrapEncodedBodySize;
     lastHydrationState = {
       source: 'none',
       tiers: {
@@ -453,7 +740,27 @@ export const __testing__ = {
       },
     };
   },
+  /** Test-only: drop values into the consume-once hydration cache. */
+  seedHydrationCacheForTests(data: Record<string, unknown>): void {
+    populateCache(data, () => true);
+  },
   getBootstrapGeneration(): number {
     return bootstrapGeneration;
+  },
+  setBootstrapTransferRumTierForTests(tier: BootstrapTransferRumTier): void {
+    bootstrapTransferRumTier = tier;
+  },
+  setBootstrapTransferRumReporterForTests(
+    reporter: (sample: BootstrapTransferRumSample) => void,
+  ): void {
+    bootstrapTransferRumReporter = reporter;
+  },
+  setBootstrapTransferRumEnabledForTests(enabled: boolean): void {
+    bootstrapTransferRumEnabled = () => enabled;
+  },
+  setEncodedBodySizeResolverForTests(
+    resolver: (resourceUrl: string, decodedBytes: number) => number,
+  ): void {
+    encodedBodySizeResolver = resolver;
   },
 };

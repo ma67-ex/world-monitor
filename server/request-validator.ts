@@ -35,6 +35,7 @@ interface FieldRule {
   readonly numberLte?: number;
   readonly repeatedMinItems?: number;
   readonly repeatedMaxItems?: number;
+  readonly repeatedUnique?: boolean;
 }
 
 interface MessageRule {
@@ -46,6 +47,13 @@ const messageRules: Readonly<Record<string, MessageRule>> = GENERATED_MESSAGE_RU
 const patternCache = new Map<string, RegExp>();
 const utf8Encoder = new TextEncoder();
 const hasOwn = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
+
+// Global ceiling for any request string that lacks an explicit buf.validate
+// `string.max_bytes` annotation. Keeps un-annotated fields from riding the
+// platform body limit (~4.5MB on Vercel Edge). Fields that legitimately need
+// more must declare an explicit max_bytes in proto. (#8402)
+export const DEFAULT_STRING_MAX_BYTES = 64 * 1024;
+const MAX_REQUEST_VIOLATIONS = 100;
 
 function exceedsUtf8ByteLimit(value: string, limit: number): boolean {
   if (value.length > limit) return true;
@@ -64,7 +72,9 @@ function addViolation(
   field: string,
   description: string,
 ): void {
-  violations.push({ field, description });
+  if (violations.length < MAX_REQUEST_VIOLATIONS) {
+    violations.push({ field, description });
+  }
 }
 
 function isRequiredValueMissing(value: unknown): boolean {
@@ -191,8 +201,12 @@ function validateString(
     addViolation(violations, path, `string length must be at most ${rule.stringMaxLen}`);
     oversized = true;
   }
-  if (rule.stringMaxBytes != null && exceedsUtf8ByteLimit(value, rule.stringMaxBytes)) {
-    addViolation(violations, path, `string UTF-8 length must be at most ${rule.stringMaxBytes} bytes`);
+  // Prefer an explicit proto max_bytes; otherwise apply the global ceiling so
+  // pattern/min_len-only (or formerly unregistered) strings cannot accept
+  // multi-megabyte attacker input. (#8402)
+  const maxBytes = rule.stringMaxBytes ?? DEFAULT_STRING_MAX_BYTES;
+  if (exceedsUtf8ByteLimit(value, maxBytes)) {
+    addViolation(violations, path, `string UTF-8 length must be at most ${maxBytes} bytes`);
     oversized = true;
   }
   if (rule.stringConst != null && value !== rule.stringConst) {
@@ -311,10 +325,14 @@ function validateField(
     }
     if (rule.repeatedMaxItems != null && repeatedValue.length > rule.repeatedMaxItems) {
       addViolation(violations, path, `array must contain at most ${rule.repeatedMaxItems} item(s)`);
+      return;
     }
-    repeatedValue.forEach((item, index) => {
-      validateSingleValue(rule, item, `${path}[${index}]`, violations, ancestors);
-    });
+    if (rule.repeatedUnique && new Set(repeatedValue.map((item) => JSON.stringify(item))).size !== repeatedValue.length) {
+      addViolation(violations, path, 'array items must be unique');
+    }
+    for (let index = 0; index < repeatedValue.length && violations.length < MAX_REQUEST_VIOLATIONS; index += 1) {
+      validateSingleValue(rule, repeatedValue[index], `${path}[${index}]`, violations, ancestors);
+    }
     return;
   }
 
@@ -344,6 +362,7 @@ function validateMessage(
 
   ancestors.add(body);
   for (const [fieldName, rule] of Object.entries(schema.fields)) {
+    if (violations.length >= MAX_REQUEST_VIOLATIONS) break;
     const path = parentPath ? `${parentPath}.${fieldName}` : fieldName;
     validateField(rule, body[fieldName], hasOwn(body, fieldName), path, violations, ancestors);
   }

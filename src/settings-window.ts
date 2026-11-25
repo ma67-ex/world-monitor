@@ -19,20 +19,10 @@ import { isProUser } from '@/services/widget-store';
 import { SITE_VARIANT } from '@/config/variant';
 import { loadFromStorage, saveToStorage } from '@/utils';
 import { t } from '@/services/i18n';
+import { getPanelDisplayName } from '@/services/panel-display-name';
 import { escapeHtml } from '@/utils/sanitize';
 import { isDesktopRuntime } from '@/services/runtime';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
-
-
-function getLocalizedPanelName(panelKey: string, fallback: string): string {
-  if (panelKey === 'runtime-config') {
-    return t('modals.runtimeConfig.title');
-  }
-  const key = panelKey.replace(/-([a-z])/g, (_match, group: string) => group.toUpperCase());
-  const lookup = `panels.${key}`;
-  const localized = t(lookup);
-  return localized === lookup ? fallback : localized;
-}
 
 export function initSettingsWindow(): void {
   const appEl = document.getElementById('app');
@@ -72,7 +62,7 @@ export function initSettingsWindow(): void {
           return `
         <div class="panel-toggle-item ${panel.enabled ? 'active' : ''}" data-panel="${escapeHtml(key)}">
           <div class="panel-toggle-checkbox">${panel.enabled ? '✓' : ''}</div>
-          <span class="panel-toggle-label">${escapeHtml(getLocalizedPanelName(key, resolvedPanel.name ?? panel.name))}</span>
+          <span class="panel-toggle-label">${escapeHtml(getPanelDisplayName(key, resolvedPanel.name ?? panel.name))}</span>
         </div>
       `;
         }
@@ -91,7 +81,7 @@ export function initSettingsWindow(): void {
             // not collapse to getEffectivePanelConfig's disabled synthetic fallback.
             const resolvedConfig = ALL_PANELS[panelKey] ? getEffectivePanelConfig(panelKey, SITE_VARIANT) : config;
             if (!config.enabled && !isPanelEntitled(panelKey, resolvedConfig, isProUser())) return;
-            if (!config.enabled && !isProUser() && isFreePanelCapCounted(panelKey)) {
+            if (!config.enabled && !isProUser() && isFreePanelCapCounted(panelKey, resolvedConfig)) {
               const enabledCount = countFreePanelCapUsage(panelSettings);
               if (enabledCount >= FREE_MAX_PANELS) return;
             }
@@ -111,7 +101,7 @@ export function initSettingsWindow(): void {
           <span class="settings-window-title">${escapeHtml(t('header.settings'))}</span>
           <p class="settings-window-caption">${escapeHtml(t('header.panelDisplayCaption'))}</p>
         </div>
-        <button type="button" class="modal-close" id="settingsWindowClose">×</button>
+        <button type="button" class="modal-close" id="settingsWindowClose" aria-label="${escapeHtml(t('common.close'))}">×</button>
       </div>
       <div class="panel-toggle-grid" id="panelToggles"></div>
     </div>

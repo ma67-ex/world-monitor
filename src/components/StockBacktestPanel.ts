@@ -6,8 +6,8 @@ import { createWatchlistButton } from './watchlist-modal';
 import { WatchlistTableView } from './WatchlistTableView';
 
 function tone(value: number): string {
-  if (value > 0) return '#8df0b2';
-  if (value < 0) return '#ff8c8c';
+  if (value > 0) return 'var(--green-text, #8df0b2)';
+  if (value < 0) return 'var(--red-text, #ff8c8c)';
   return 'var(--text-dim)';
 }
 
@@ -52,6 +52,7 @@ export class StockBacktestPanel extends Panel {
 
     if (!this.tableView) {
       this.tableView = new WatchlistTableView<StockBacktestResult>({
+        labelledBy: `${this.panelId}Title`,
         intro: 'Historical replay of the technical signal model over recent daily bars. Point-in-time fundamentals are not included.',
         columns: [
           {
@@ -106,8 +107,9 @@ export class StockBacktestPanel extends Panel {
 
   private rerender(): void {
     if (!this.tableView) return;
-    this.setSafeContent(unsafeRawHtml(this.tableView.render(), 'legacy Panel.setContent() migration'));
-    this.tableView.bind(this.content, () => this.rerender());
+    this.setSafeContent(unsafeRawHtml(this.tableView.render(), 'legacy Panel.setContent() migration'), () => {
+      this.tableView?.bind(this.content, () => this.rerender());
+    });
   }
 
   private renderDetail(item: StockBacktestResult): string {

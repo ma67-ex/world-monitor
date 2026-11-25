@@ -32,11 +32,38 @@ export class ServiceStatusPanel extends Panel {
 
   private lastServicesJson = '';
 
-  public async fetchStatus(): Promise<boolean> {
+  public async fetchStatus(signal?: AbortSignal): Promise<boolean> {
+    if (this.signal.aborted || signal?.aborted) return false;
+    let requestSignal: AbortSignal = this.signal;
+    let cleanupSignals: (() => void) | undefined;
+    if (signal) {
+      const panelSignal = this.signal;
+      const runController = new AbortController();
+      const onPanelAbort = (): void => runController.abort(panelSignal.reason);
+      const onCallerAbort = (): void => runController.abort(signal.reason);
+      panelSignal.addEventListener('abort', onPanelAbort, { once: true });
+      signal.addEventListener('abort', onCallerAbort, { once: true });
+      requestSignal = runController.signal;
+      cleanupSignals = () => {
+        panelSignal.removeEventListener('abort', onPanelAbort);
+        signal.removeEventListener('abort', onCallerAbort);
+      };
+    }
+    let keptLastGood = false;
+    let aborted = false;
     try {
-      const data = await fetchServiceStatuses();
-      if (!this.element?.isConnected) return false;
-      if (!data.success) throw new Error('Failed to load status');
+      const data = await fetchServiceStatuses(requestSignal);
+      if (requestSignal.aborted || !this.element?.isConnected) {
+        aborted = true;
+        return false;
+      }
+      if (!data.success || data.services.length === 0) {
+        if (this.services.length > 0) {
+          keptLastGood = true;
+          return false;
+        }
+        throw new Error('Failed to load status');
+      }
 
       const fingerprint = data.services.map(s => `${s.name}:${s.status}`).join(',');
       const changed = fingerprint !== this.lastServicesJson;
@@ -45,15 +72,21 @@ export class ServiceStatusPanel extends Panel {
       this.error = null;
       return changed;
     } catch (err) {
-      if (this.isAbortError(err)) return false;
+      if (requestSignal.aborted || this.isAbortError(err)) {
+        aborted = true;
+        return false;
+      }
       if (!this.element?.isConnected) return false;
       this.error = t('common.failedToLoad');
       console.error('[ServiceStatus] Fetch error:', err);
       return true;
     } finally {
-      this.loading = false;
-      if (this.element?.isConnected) {
-        this.render();
+      cleanupSignals?.();
+      if (!aborted) {
+        this.loading = false;
+        if (this.element?.isConnected && !keptLastGood) {
+          this.render();
+        }
       }
     }
   }
@@ -84,17 +117,17 @@ export class ServiceStatusPanel extends Panel {
       return;
     }
 
-    this.clearErrorState();
     const filtered = this.getFilteredServices();
     const issues = filtered.filter(s => s.status !== 'operational');
 
-    replaceChildren(this.content,
+    this.setContentNodes(
       this.buildSummary(filtered),
       this.buildFilters(),
       h('div', { className: 'service-status-list' },
         ...this.buildServiceItems(filtered),
       ),
-      issues.length === 0 ? h('div', { className: 'all-operational' }, t('components.serviceStatus.allOperational')) : false,
+      filtered.length === 0 ? h('div', { className: 'panel-empty' }, t('common.noDataAvailable')) : false,
+      filtered.length > 0 && issues.length === 0 ? h('div', { className: 'all-operational' }, t('components.serviceStatus.allOperational')) : false,
     );
   }
 

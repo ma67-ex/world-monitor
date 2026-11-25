@@ -3,17 +3,19 @@ import { afterEach, describe, it } from 'node:test';
 
 import {
   __testing__,
+  getLlmHealthStatus,
   getLlmModelHealthStatus,
   isModelRejection,
   isModelUsable,
   recordModelFailure,
   recordModelSuccess,
+  warmHealthCache,
 } from '../server/_shared/llm-health.ts';
 
 const { MODEL_FAILURE_THRESHOLD, MODEL_QUARANTINE_MS } = __testing__;
 
 const OPENROUTER = 'https://openrouter.ai/api/v1/chat/completions';
-const GROQ = 'https://api.groq.com/openai/v1/chat/completions';
+const OTHER_PROVIDER = 'https://llm.example.test/v1/chat/completions';
 const DEAD_MODEL = 'ghost/ghost-model-v9';
 
 /** Real provider bodies for an unroutable model ID, verbatim in shape. */
@@ -26,10 +28,60 @@ const OPENAI_STYLE_UNKNOWN_MODEL = JSON.stringify({
 const OLLAMA_UNKNOWN_MODEL = JSON.stringify({ error: `model '${DEAD_MODEL}' not found, try pulling it first` });
 
 const originalDateNow = Date.now;
+const originalFetch = globalThis.fetch;
+const originalProviderEnv = {
+  GROQ_API_KEY: process.env.GROQ_API_KEY,
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+  OLLAMA_API_URL: process.env.OLLAMA_API_URL,
+  LLM_API_URL: process.env.LLM_API_URL,
+};
 
 afterEach(() => {
   Date.now = originalDateNow;
+  globalThis.fetch = originalFetch;
+  for (const [key, value] of Object.entries(originalProviderEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   __testing__.reset();
+});
+
+describe('configured provider health', () => {
+  it('reports a configured hosted key as available on the server (#7126)', async () => {
+    process.env.OPENROUTER_API_KEY = 'or-test-key';
+    delete process.env.OLLAMA_API_URL;
+    delete process.env.LLM_API_URL;
+
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), 'https://openrouter.ai');
+      return new Response(null, { status: 404 });
+    };
+
+    warmHealthCache();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const status = getLlmHealthStatus();
+    assert.equal(status['https://openrouter.ai']?.available, true);
+  });
+
+  it('does not probe Groq when a stale GROQ_API_KEY is still set (#8885)', async () => {
+    process.env.GROQ_API_KEY = 'groq-test-key';
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.OLLAMA_API_URL;
+    delete process.env.LLM_API_URL;
+
+    const probed: string[] = [];
+    globalThis.fetch = async (input) => {
+      probed.push(String(input));
+      return new Response(null, { status: 200 });
+    };
+
+    warmHealthCache();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(probed, []);
+    assert.deepEqual(getLlmHealthStatus(), {});
+  });
 });
 
 describe('isModelRejection', () => {
@@ -202,7 +254,7 @@ describe('model quarantine', () => {
       'a sibling model on the same provider stays usable',
     );
     assert.equal(
-      isModelUsable(GROQ, DEAD_MODEL),
+      isModelUsable(OTHER_PROVIDER, DEAD_MODEL),
       true,
       'the same model ID on another provider stays usable',
     );

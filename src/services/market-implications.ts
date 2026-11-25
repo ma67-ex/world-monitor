@@ -1,8 +1,7 @@
 import { toApiUrl } from '@/services/runtime';
 import { premiumFetch } from '@/services/premium-fetch';
-import { getHydratedData } from '@/services/bootstrap';
-import { hasUserAiKey, generateStructuredCompletion } from '@/services/user-ai-keys';
 import type { NewsItem } from '@/types';
+import { hasUserAiKey, generateStructuredCompletion } from '@/services/user-ai-keys';
 
 export interface TransmissionNode {
   node: string;
@@ -63,31 +62,13 @@ export function normalizeCard(raw: Record<string, unknown>): MarketImplicationCa
 const cache = new Map<string, { data: MarketImplicationsData; cachedAt: number }>();
 const CACHE_TTL = 10 * 60 * 1000;
 
-export function getCachedMarketImplications(): MarketImplicationsData | null {
-  return cache.get('')?.data ?? null;
-}
-
 export async function fetchMarketImplications(frameworkId = ''): Promise<MarketImplicationsData | null> {
   const now = Date.now();
   const cached = cache.get(frameworkId);
   if (cached && !cached.data.degraded && now - cached.cachedAt < CACHE_TTL) return cached.data;
 
-  if (!frameworkId) {
-    const hydrated = getHydratedData('marketImplications') as { cards?: unknown[]; degraded?: boolean; emptyReason?: string; generatedAt?: string } | undefined;
-    if (hydrated?.cards && Array.isArray(hydrated.cards) && hydrated.cards.length > 0 && !hydrated.degraded) {
-      const data: MarketImplicationsData = {
-        cards: hydrated.cards.map(c => normalizeCard(c as Record<string, unknown>)),
-        degraded: false,
-        emptyReason: hydrated.emptyReason ?? '',
-        generatedAt: hydrated.generatedAt ?? '',
-      };
-      cache.set('', { data, cachedAt: now });
-      return data;
-    }
-  }
-
   try {
-    const url = new URL(toApiUrl('/api/intelligence/v1/list-market-implications'));
+    const url = new URL(toApiUrl('/api/intelligence/v1/list-market-implications'), window.location.origin);
     if (frameworkId) url.searchParams.set('frameworkId', frameworkId);
     // list-market-implications is a PREMIUM_RPC_PATH; a bare fetch still picked
     // up the Clerk bearer from the global patch but skipped reportServerError,

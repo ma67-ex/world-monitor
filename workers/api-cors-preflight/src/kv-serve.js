@@ -20,7 +20,7 @@
 // edge cache rather than Redis.
 
 import { bootstrapTierFromPublicRequest } from '../../../api/_bootstrap-public-tier.js';
-import { classifyKvEnvelope, emit } from './kv-shadow.js';
+import { TIER_MAX_AGE_MS, emit, parseAndClassifyKvEnvelope } from './kv-shadow.js';
 import { isBootstrapKvServingTier } from './kv-serve-mode.js';
 
 // Per-tier read cacheTtl (seconds): keep low-traffic POPs hot, trading a little staleness.
@@ -40,9 +40,13 @@ function hedgeTimer(ms) {
   return { promise, cancel: () => clearTimeout(id) };
 }
 
-// Read + classify a tier, never rejecting. On a servable value it also lifts the payload body (a
-// deliberate second parse kept OUT of classifyKvEnvelope so the live U-K2 shadow path stays
-// byte-for-byte unchanged; ~1-2 ms on the 452 KB fast tier, negligible next to the KV read).
+// Per-isolate cache of the serialized payload for each tier. KV's cacheTtl (60 s / 300 s) hands
+// every request on a POP the identical raw envelope string, so a repeat hit can reuse the body
+// instead of re-parsing and re-stringifying 700 KB to 1.44 MB. Staleness is re-checked on every hit.
+const isolatePayloadCache = new Map();
+
+// Read + classify a tier, never rejecting. Parses a new envelope once and reuses its serialized
+// payload on repeat hits of the same raw value.
 async function readKvEnvelope(env, tier) {
   let raw = null;
   try {
@@ -50,10 +54,21 @@ async function readKvEnvelope(env, tier) {
   } catch {
     return { decision: { outcome: 'fallback', reason: 'error' } };
   }
-  const decision = classifyKvEnvelope(tier, raw, Date.now());
+  const now = Date.now();
+  const cached = isolatePayloadCache.get(tier);
+  if (cached && raw != null && raw === cached.raw) {
+    if (now - cached.generatedAt > TIER_MAX_AGE_MS[tier]) {
+      isolatePayloadCache.delete(tier);
+      return { decision: { outcome: 'fallback', reason: 'stale' } };
+    }
+    return { decision: { outcome: 'kv', reason: null }, body: cached.body };
+  }
+  const { decision, envelope } = parseAndClassifyKvEnvelope(tier, raw, now);
   if (decision.outcome !== 'kv') return { decision };
   try {
-    return { decision, body: JSON.stringify(JSON.parse(raw).payload) };
+    const body = JSON.stringify(envelope.payload);
+    isolatePayloadCache.set(tier, { raw, generatedAt: envelope.generatedAt, body });
+    return { decision, body };
   } catch {
     return { decision: { outcome: 'fallback', reason: 'invalid' } };
   }
@@ -77,8 +92,20 @@ function recordServe(env, ctx, { tier, outcome, reason, durationMs, cf }) {
 function serveFromKv(env, ctx, { tier, body, cf, started, corsHeaders }) {
   recordServe(env, ctx, { tier, outcome: 'served', reason: null, durationMs: Date.now() - started, cf });
   // Mirror the headers the origin sets for this route (the Worker is the CORS source of truth, so
-  // corsHeaders is spread first). x-vercel-* / age are intentionally absent; the source marker
-  // makes a KV-served response identifiable in curl/devtools.
+  // corsHeaders is spread first). corsHeaders is the caller's PUBLIC bootstrap shape — ACAO:*, no
+  // Allow-Credentials, no Vary: Origin — matching what api/bootstrap.js returns for a `?public=1`
+  // tier URL; the credentialed bag here was #7308. x-vercel-* / age are intentionally absent; the
+  // source marker makes a KV-served response identifiable in curl/devtools.
+  //
+  // Cache-Control stays `no-store`, deliberately. A Worker-generated Response is never stored by
+  // the Cloudflare cache, so the shared lifetime this path has is the POP-local KV read
+  // (TIER_CACHE_TTL_S) bounded by classifyKvEnvelope's KTD4 staleness gate — not a CDN entry. A
+  // CDN-Cache-Control here would advertise a shared lifetime nothing honours, and a browser
+  // max-age would let a cache replay masquerade as a fresh transfer sample in the bootstrap RUM
+  // (#7047).
+  //
+  // This DOES diverge from the origin fallback, which serves TIER_CACHE's `max-age=60` (fast) /
+  // `max-age=300` (slow) for the same URL — considered, not missed, for the reasons above.
   return new Response(body, {
     status: 200,
     headers: {
@@ -87,6 +114,9 @@ function serveFromKv(env, ctx, { tier, body, cf, started, corsHeaders }) {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
       'X-WorldMonitor-Bootstrap-Source': 'kv',
+      // This response bypasses api/bootstrap.js, whose public responses set TAO for bootstrap
+      // transfer RUM. It is safe here because KV serving is limited to explicit public tiers.
+      'Timing-Allow-Origin': '*',
     },
   });
 }
@@ -96,6 +126,10 @@ function serveFromKv(env, ctx, { tier, body, cf, started, corsHeaders }) {
  * KV is not servable / too slow, or null when this isn't a servable request at all (so the caller
  * runs its normal pass-through). fetchOrigin is the caller's single origin+CORS path — invoked at
  * most once here, so origin is fetched exactly once across the whole request. Never throws.
+ *
+ * corsHeaders must be the PUBLIC bootstrap shape (#7308). The caller decides that, because it is
+ * also the one that knows whether the request's Origin is allowed at all — a disallowed Origin is
+ * never routed here, so this function can spread what it is given without re-deciding.
  */
 export async function maybeServeBootstrapFromKv(request, url, env, ctx, corsHeaders, fetchOrigin) {
   if (!env?.BOOTSTRAP_KV) return null;

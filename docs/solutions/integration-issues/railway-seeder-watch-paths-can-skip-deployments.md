@@ -152,6 +152,28 @@ same `gate` status branch protection requires.
 
 ## Solution
 
+### Keep operational status off deployable commits
+
+The Seed Freshness Monitor observes the newest gated `main` revision but writes
+its durable `ingestion/seed/*` projection to the fixed historical merge commit
+`b93afd05d0f4ea2c465e79fd064e87fc1f9fb2f3`. That commit introduced the
+transition publisher, is required to be an ancestor of the observed revision,
+and cannot become a future deployment candidate.
+
+This keeps the protection without recreating the lag source described above:
+a new or materially changed incident still fails one monitor run, the anchor
+keeps the source status non-green until live recovery, and unchanged polls
+append nothing. The first anchored run imports the newest trusted legacy
+projection from recent first-parent history, so already-active incidents move
+to the anchor without being reported as new failures. Because the acceptance
+context is written last, a later poll can also distinguish an empty anchor from
+a partial write, repair that write, and avoid reporting the same transition
+twice.
+
+Do not move this projection back to `main`, a gated ancestor selected for the
+probe, or any other commit Railway may be asked to deploy. GitHub commit status
+is deployment input in this repository, not only an observability surface.
+
 ### The audit: the registry contract, unchanged
 
 `scripts/railway-services.json` remains the repository-side contract. Each
@@ -192,10 +214,10 @@ real production verdicts:
   it makes the matcher disagree with Railway on every scripts-rooted service
   that lists `shared/**`.
 - **Registry ∪ live, never one or the other.** The registry is edited in a PR
-  and only reaches Railway when someone runs the audit with `--apply`, so
-  between those two events each source knows a path the other does not. The
-  remaining 3 apparent refusals sat in exactly that window. A union is wrong
-  only in the direction that builds too much.
+  and reaches Railway when the main-only registry-sync workflow applies it.
+  Between the merge and verified convergence, each source can know a path the
+  other does not. The remaining 3 apparent refusals sat in exactly that window.
+  A union is wrong only in the direction that builds too much.
 
 Everything uncertain resolves to "this change reaches the service": an
 unsupported glob shape, a commit git cannot reach, a service neither source
@@ -357,11 +379,12 @@ The original implementation used
 no deployment suppression: every unknown, failed, overdue, contradictory, or
 otherwise unaccepted result is directly red.
 
-`.github/workflows/railway-deploy-drift.yml` now owns two independent read-only
-jobs: the Viewer-safe source/build/trigger audit and deployment-history drift.
-It runs hourly and on manual dispatch, only on `main`, with deployment tracking
-disabled for its GitHub environment. `Seed Freshness Monitor` owns ingestion
-acceptance only and no longer installs Railway or reports a fleet conclusion.
+`.github/workflows/railway-deploy-drift.yml` now owns one combined read-only job:
+the Viewer-safe source/build/trigger audit and deployment-history drift share a
+single per-service projection. It runs every six hours and on manual dispatch,
+only on `main`, with deployment tracking disabled for its GitHub environment.
+`Seed Freshness Monitor` owns ingestion acceptance only and no longer installs
+Railway or reports a fleet conclusion.
 
 The deployment job checks out full history with `fetch-depth: 0` and a blobless
 filter, freezes the event SHA, and refreshes the explicit `origin/main` tracking
@@ -369,13 +392,27 @@ ref before evaluating ancestry. An `AHEAD` deployment is healthy only when its
 running commit is proven reachable from the authorized current `main` ref;
 otherwise it reports `AHEAD_LINEAGE_UNPROVEN`.
 
-### Still true, and unchanged
+### Runtime prerequisites and source health
 
 Routing variables that a source resolves as `SOURCE_SPECIFIC || PROXY_URL`
 are declared as a nested any-of group in `requiredEnv`, matching the shape
 `scripts/_bundle-runner.mjs` accepts. Declared flat, the gate demands *both* and
 reports drift for a service routing perfectly well on its source-specific exit —
 stricter than the runtime it guards.
+
+Registry sync separates these runtime prerequisites from deployment configuration.
+Removing an IMD API key can disable the source, but it must not prevent a watch-path
+or cron repair for another service. Apply mode lists missing variable names in its
+log and GitHub step summary, then applies and verifies configuration changes
+without treating those missing credentials as configuration drift. It never
+writes variables. A run with only missing credentials performs no apply.
+
+The standalone audit remains strict about required variables. Invalid service
+identity, missing services, unsafe root changes, failed Railway calls, and
+configuration that does not converge still fail registry sync. A successful sync
+proves configuration convergence only. The ingestion monitor retains source-health
+verdicts and suppresses duplicate incident transitions; a disabled source does not
+become healthy because registry sync passed.
 
 The separate `scripts/check-seed-freshness.mjs` probe accepts the healthy compact
 response shape where `problems` is absent and fails for every actionable
@@ -410,16 +447,43 @@ left every genuinely-behind service reported — and all 53 remaining
 a path refusal.
 
 `Seed Freshness Monitor` keeps the gate-dependent ingestion acceptance. A
-missing, pending, or failed gate fails that workflow; it is never converted
-into a green skip. It deliberately does not run on an ingestion push because
-Railway may not have deployed or executed that revision yet.
+missing, pending, failed, or errored head gate is not a green skip and is not
+an ingestion failure: the job uses the newest gated ancestor in the bounded
+window for acceptance bookkeeping, and fails closed when none qualifies.
+The probe and transition publisher stay at the workflow's `github.sha` because
+production API changes can deploy before that revision passes its gate. Checking
+out the ancestor would restore an older classifier that can mistake a newly
+introduced pending kind for a blocking incident (#8285). This removes the gate
+fallback's version skew; it does not verify the live deployment SHA or prevent
+production from advancing while a run is queued. It deliberately does not run
+on an ingestion push because Railway may not have deployed or executed that
+revision yet.
 
-`Railway Deploy Drift` is a separate hourly workflow and has no dependency on
-the Seed Freshness gate. The gate and deployment drift share an upstream: an
-ungated or red main is exactly when Railway can refuse a push, so using the gate
-to skip the drift probe would hide the blast radius. Its two independent jobs
-therefore publish Railway configuration and deployment conclusions directly,
+Its live health probe remains fail-closed on every actionable source problem.
+The scheduled workflow now projects that strict result into durable
+`ingestion/seed/<source>` statuses. A new or changed problem fails one run;
+unchanged later observations keep the source status red without manufacturing
+another incident, and live recovery posts success. Transport failures,
+malformed health evidence, and expired acknowledgements still fail directly.
+This distinction is operationally important: a red status means "still
+broken", while a newly failed workflow run means "new information needs
+attention".
+
+`Railway Native Deploy Health` is a separate six-hourly workflow and has no
+dependency on the Seed Freshness gate. The gate and deployment drift share an
+upstream: an ungated or red main is exactly when Railway can refuse a push, so
+using the gate to skip the drift probe would hide the blast radius. Its one job
+publishes both Railway configuration and deployment conclusions directly,
 without changing the ingestion workflow's verdict.
+
+The earlier two-job hourly layout duplicated the expensive Viewer projection:
+both jobs queried all 80 services, so each scheduled run produced about 160
+per-service GraphQL calls before deployment-history reads. On 2026-08-15 this
+exhausted Railway's rolling API allowance and both jobs failed with HTTP 429.
+The combined job queries each service once with concurrency two, reuses that
+projection for both conclusions, and runs every six hours. A quota failure
+still fails closed; lowering request volume prevents the monitor from creating
+the condition it is meant to observe.
 
 ## Prevention
 
@@ -435,12 +499,12 @@ without changing the ingestion workflow's verdict.
   do not treat it as unreliable either. It matches accurately; it just cannot
   see outside the service's build context, and a pattern pointing outside that
   context (`shared/**` on a `rootDirectory: scripts` service) is dead weight.
-- Run `node scripts/audit-railway-watch-paths.mjs` after adding or replacing a
-  Railway seeder, changing its imports, or changing its cron. Keep the registry
-  dependency-closure test green.
+- Keep the registry dependency-closure test green after adding or replacing a
+  Railway seeder, changing its imports, or changing its cron. The main-only
+  registry-sync workflow applies and independently verifies the merged state.
 - Never narrow a seeder's watch paths in the Railway dashboard. Add its closure
-  to the registry instead — a dashboard-only narrowing is drift the audit will
-  push back to the broad contract on the next `--apply`.
+  to the registry instead. The scheduled audit reports dashboard-only drift,
+  and the next registry-sync run pushes it back to the declared contract.
 - Run `node scripts/check-railway-deploy-drift.mjs` whenever a merge looks like
   it did not take effect; `--json` gives the machine-readable form. A
   `REJECTED_PUSH` verdict names the SHAs Railway refused **and the reason it

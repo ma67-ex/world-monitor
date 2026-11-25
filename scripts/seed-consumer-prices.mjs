@@ -105,17 +105,6 @@ export function emptyCoverage(market) {
   };
 }
 
-// #6059: this script deliberately does NOT write the coverage activation marker.
-// Activation is a PERMANENT, one-way claim that a market's durable producer has
-// published real coverage — and this script's coverage key carries a 30-minute
-// TTL (see TTL_COVERAGE), because it is a stopgap for when publish.ts is broken.
-// Claiming permanent activation off a 30-minute artifact would strand the market
-// in an unrecoverable EMPTY (crit) half an hour later, once the data expired but
-// the marker did not, fixable only by hand-deleting the Redis key. Leaving health
-// softened instead costs nothing: the compiled deadline bounds that window
-// anyway, and while this script's data is live the key is present, so no
-// softening is even in play. Only consumer-prices-core/src/jobs/publish.ts, which
-// writes a 26h key on the daily cadence, may activate a market.
 export function coverageForSeedMeta(data) {
   if (!Array.isArray(data?.retailers) || !('completedPages' in data)) return undefined;
   return {
@@ -147,11 +136,12 @@ async function run() {
   const COVERAGE_KEY = `consumer-prices:coverage:${MARKET}`;
 
   // Fetch all snapshots in parallel
-  const [overview, movers30d, movers7d, spread, freshness, series30d, series7d, series90d,
+  const [overview, movers30d, movers7d, movers90d, spread, freshness, series30d, series7d, series90d,
          categories30d, categories7d, categories90d, coverage] = await Promise.all([
     fetchSnapshot(`/wm/consumer-prices/v1/overview?market=${MARKET}`),
     fetchSnapshot(`/wm/consumer-prices/v1/movers?market=${MARKET}&days=30`),
     fetchSnapshot(`/wm/consumer-prices/v1/movers?market=${MARKET}&days=7`),
+    fetchSnapshot(`/wm/consumer-prices/v1/movers?market=${MARKET}&days=90`),
     fetchSnapshot(`/wm/consumer-prices/v1/retailer-spread?market=${MARKET}&basket=${BASKET}`),
     fetchSnapshot(`/wm/consumer-prices/v1/freshness?market=${MARKET}`),
     fetchSnapshot(`/wm/consumer-prices/v1/basket-series?market=${MARKET}&basket=${BASKET}&range=30d`),
@@ -181,6 +171,12 @@ async function run() {
       data: movers7d ?? emptyMovers(MARKET, '7d'),
       ttl: TTL_MOVERS,
       metaKey: `seed-meta:consumer-prices:movers:${MARKET}:7d`,
+    },
+    {
+      key: `consumer-prices:movers:${MARKET}:90d`,
+      data: movers90d ?? emptyMovers(MARKET, '90d'),
+      ttl: TTL_MOVERS,
+      metaKey: `seed-meta:consumer-prices:movers:${MARKET}:90d`,
     },
     {
       key: `consumer-prices:retailer-spread:${MARKET}:${BASKET}`,

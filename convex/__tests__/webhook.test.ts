@@ -289,6 +289,187 @@ describe("webhook processWebhookEvent", () => {
     expect(subs[0].status).toBe("active");
   });
 
+  test("subscription.active reactivation clears leftover cancelledAt/onHoldAt (#6769)", async () => {
+    const t = convexTest(schema, modules);
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+
+    // A sub that was cancelled (and had earlier been on hold) still carries the
+    // episode stamps. Reactivation must wipe them so downstream classifiers —
+    // esp. the refund-alert `already-cancelled` short-circuit — don't read a
+    // stale cancellation as current.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("subscriptions", {
+        userId: "test-user-001",
+        dodoSubscriptionId: "sub_test_001",
+        dodoProductId: "pdt_test_pro",
+        planKey: "pro_monthly",
+        status: "cancelled",
+        currentPeriodStart: BASE_TIMESTAMP - 86400000,
+        currentPeriodEnd: BASE_TIMESTAMP,
+        cancelledAt: BASE_TIMESTAMP - 3600000,
+        onHoldAt: BASE_TIMESTAMP - 7200000,
+        rawPayload: {},
+        updatedAt: BASE_TIMESTAMP - 86400000,
+      });
+    });
+
+    await processEvent(
+      t,
+      "wh_reactivate_clear_stamps",
+      "subscription.active",
+      makeSubscriptionPayload(),
+      BASE_TIMESTAMP,
+    );
+
+    const subs = await t.run(async (ctx) => ctx.db.query("subscriptions").collect());
+    expect(subs).toHaveLength(1);
+    expect(subs[0].status).toBe("active");
+    expect(subs[0].cancelledAt).toBeUndefined();
+    expect(subs[0].onHoldAt).toBeUndefined();
+  });
+
+  test("full refund after reactivation still fires the refund-alert (#6769 — stale cancelledAt no longer silences it)", async () => {
+    const t = convexTest(schema, modules);
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+
+    // Cancelled sub carrying a stale cancelledAt stamp.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("subscriptions", {
+        userId: "test-user-001",
+        dodoSubscriptionId: "sub_test_001",
+        dodoProductId: "pdt_test_pro",
+        planKey: "pro_monthly",
+        status: "cancelled",
+        currentPeriodStart: BASE_TIMESTAMP - 86400000,
+        currentPeriodEnd: BASE_TIMESTAMP,
+        cancelledAt: BASE_TIMESTAMP - 3600000,
+        rawPayload: {},
+        updatedAt: BASE_TIMESTAMP - 86400000,
+      });
+    });
+
+    // Reactivate. The activation payload carries the recurring price so the
+    // refund-alert can classify a full refund — reactivation overwrites
+    // rawPayload, so the price must ride on THIS event.
+    await processEvent(
+      t,
+      "wh_reactivate_before_refund",
+      "subscription.active",
+      makeSubscriptionPayload({ recurring_pre_tax_amount: 1999 }),
+      BASE_TIMESTAMP,
+    );
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Full refund on the now-active sub. Before the fix the leftover
+    // cancelledAt short-circuited classifyRefundAlert to `already-cancelled`
+    // and no alert fired.
+    await processEvent(
+      t,
+      "wh_full_refund_after_reactivate",
+      "refund.succeeded",
+      // processEvent's eventType arg drives dispatch; the payload's own `type`
+      // is inert, so reuse makePaymentPayload the way the dispute.lost tests do.
+      makePaymentPayload("payment.succeeded", {
+        payload_type: "Refund",
+        payment_id: "pay_refund_001",
+        subscription_id: "sub_test_001",
+        total_amount: "not-an-amount",
+        amount: "1999",
+      }),
+      BASE_TIMESTAMP + 300000,
+    );
+
+    const events = await t.run(async (ctx) => ctx.db.query("paymentEvents").collect());
+    expect(events).toHaveLength(1);
+    expect(events[0].amount).toBe(1999);
+    const amountWarnings = warnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((message) => message.includes("[coerceAmount] non-numeric amount"));
+    expect(amountWarnings).toHaveLength(1);
+
+    const refundAlerts = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((msg) => msg.includes("[refund-alert]"));
+    expect(refundAlerts).toHaveLength(1);
+    expect(refundAlerts[0]).toContain("full refund without prior cancellation");
+  });
+
+  test("partial refund after reactivation does NOT fire the refund-alert (#6769 over-fire guard)", async () => {
+    const t = convexTest(schema, modules);
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+
+    await t.run(async (ctx) => {
+      await ctx.db.insert("subscriptions", {
+        userId: "test-user-001",
+        dodoSubscriptionId: "sub_test_001",
+        dodoProductId: "pdt_test_pro",
+        planKey: "pro_monthly",
+        status: "cancelled",
+        currentPeriodStart: BASE_TIMESTAMP - 86400000,
+        currentPeriodEnd: BASE_TIMESTAMP,
+        cancelledAt: BASE_TIMESTAMP - 3600000,
+        rawPayload: {},
+        updatedAt: BASE_TIMESTAMP - 86400000,
+      });
+    });
+
+    await processEvent(
+      t,
+      "wh_reactivate_before_partial_refund",
+      "subscription.active",
+      makeSubscriptionPayload({ recurring_pre_tax_amount: 1999 }),
+      BASE_TIMESTAMP,
+    );
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A partial refund (well under 99% of 1999) must still no-op. Clearing the
+    // stamp removed the `already-cancelled` short-circuit, so the amount check
+    // in classifyRefundAlert is now the ONLY guard against over-firing.
+    await processEvent(
+      t,
+      "wh_partial_refund_after_reactivate",
+      "refund.succeeded",
+      makePaymentPayload("payment.succeeded", {
+        payload_type: "Refund",
+        payment_id: "pay_partial_refund_001",
+        subscription_id: "sub_test_001",
+        total_amount: 500,
+      }),
+      BASE_TIMESTAMP + 300000,
+    );
+
+    const refundAlerts = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((msg) => msg.includes("[refund-alert]"));
+    expect(refundAlerts).toHaveLength(0);
+  });
+
+  test("subscription.active reactivation clears onHoldAt with no prior cancellation (#6769)", async () => {
+    const t = convexTest(schema, modules);
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+
+    // Drive the full lifecycle through real webhook events (no hand-seeded row):
+    // active -> on_hold -> active. onHoldAt is set on hold, then must be cleared
+    // on reactivation, with cancellation never involved.
+    await processEvent(t, "wh_oh_active", "subscription.active", makeSubscriptionPayload(), BASE_TIMESTAMP);
+    await processEvent(t, "wh_oh_hold", "subscription.on_hold", makeSubscriptionPayload(), BASE_TIMESTAMP + 1000);
+
+    const held = await t.run(async (ctx) => ctx.db.query("subscriptions").collect());
+    expect(held[0].status).toBe("on_hold");
+    expect(held[0].onHoldAt).toBeDefined();
+    expect(held[0].cancelledAt).toBeUndefined();
+
+    await processEvent(t, "wh_oh_reactivate", "subscription.active", makeSubscriptionPayload(), BASE_TIMESTAMP + 2000);
+
+    const reactivated = await t.run(async (ctx) => ctx.db.query("subscriptions").collect());
+    expect(reactivated[0].status).toBe("active");
+    expect(reactivated[0].onHoldAt).toBeUndefined();
+    expect(reactivated[0].cancelledAt).toBeUndefined();
+  });
+
   test("subscription.active reactivation sends a welcome-back email", async () => {
     vi.useFakeTimers();
     process.env.RESEND_API_KEY = "re_test";
@@ -356,6 +537,50 @@ describe("webhook processWebhookEvent", () => {
     await processEvent(
       t,
       "wh_new_subscription_reactivation",
+      "subscription.active",
+      makeSubscriptionPayload({ subscription_id: "sub_new_reactivated" }),
+      BASE_TIMESTAMP,
+    );
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const sends = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes("api.resend.com"))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as {
+        to: string[];
+        subject: string;
+      });
+
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.to).toEqual(["test@example.com"]);
+    expect(sends[0]?.subject).toContain("Welcome back");
+  });
+
+  test("new-checkout reactivation uses prior expired on-hold history instead of a new-subscriber alert", async () => {
+    vi.useFakeTimers();
+    process.env.RESEND_API_KEY = "re_test";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+    const t = convexTest(schema, modules);
+
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("subscriptions", {
+        userId: "test-user-001",
+        dodoSubscriptionId: "sub_old_on_hold",
+        dodoProductId: "pdt_test_pro",
+        planKey: "pro_monthly",
+        status: "on_hold",
+        currentPeriodStart: BASE_TIMESTAMP - 31 * 86400000,
+        currentPeriodEnd: BASE_TIMESTAMP - 86400000,
+        rawPayload: {},
+        updatedAt: BASE_TIMESTAMP - 86400000,
+      });
+    });
+
+    await processEvent(
+      t,
+      "wh_new_subscription_reactivation_from_hold",
       "subscription.active",
       makeSubscriptionPayload({ subscription_id: "sub_new_reactivated" }),
       BASE_TIMESTAMP,
@@ -1799,9 +2024,10 @@ describe("webhook processWebhookEvent", () => {
   });
 
   test.each([
-    ["on_hold", BASE_TIMESTAMP + 7 * 86400000],
-    ["cancelled", BASE_TIMESTAMP],
-  ] as const)("subscription.active from non-lapsed %s remains email-silent", async (status, currentPeriodEnd) => {
+    ["on_hold before paid-through end", "on_hold", BASE_TIMESTAMP + 7 * 86400000],
+    ["on_hold at paid-through end", "on_hold", BASE_TIMESTAMP],
+    ["cancelled at paid-through end", "cancelled", BASE_TIMESTAMP],
+  ] as const)("subscription.active from %s remains email-silent", async (_scenario, status, currentPeriodEnd) => {
     vi.useFakeTimers();
     process.env.RESEND_API_KEY = "re_test";
     const fetchMock = vi
@@ -1886,6 +2112,8 @@ describe("webhook processWebhookEvent", () => {
   });
 
   test("subscription.on_hold marks subscription at-risk without revoking entitlements", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIMESTAMP);
     const t = convexTest(schema, modules);
 
     await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
@@ -1925,6 +2153,9 @@ describe("webhook processWebhookEvent", () => {
   });
 
   test("subscription.cancelled preserves entitlements until period end", async () => {
+    // Coverage is evaluated at processing time; pin it inside the paid period.
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIMESTAMP + 1000);
     const t = convexTest(schema, modules);
 
     await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
@@ -2049,6 +2280,59 @@ describe("webhook processWebhookEvent", () => {
       apiRateLimit: 60,
       maxDashboards: 25,
     });
+  });
+
+  // #8733: Dodo stamps every event of one change with the same timestamp. On a
+  // live upgrade `renewed` landed first (it never reads product_id), which left
+  // `plan_changed` and `updated` looking stale and the customer on Pro.
+  test("subscription.plan_changed sharing its batch timestamp with an earlier renewed still applies (#8733)", async () => {
+    const t = convexTest(schema, modules);
+
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+    await seedProductPlan(t, "pdt_test_api", "api_starter", "API Starter");
+
+    await processEvent(t, "wh_8733_01", "subscription.active", makeSubscriptionPayload(), BASE_TIMESTAMP);
+
+    const batchTimestamp = BASE_TIMESTAMP + 1000;
+    const upgraded = makeSubscriptionPayload({ product_id: "pdt_test_api" });
+    await processEvent(t, "wh_8733_02", "subscription.renewed", upgraded, batchTimestamp);
+    await processEvent(t, "wh_8733_03", "subscription.plan_changed", upgraded, batchTimestamp);
+    await processEvent(t, "wh_8733_04", "subscription.updated", upgraded, batchTimestamp);
+
+    const subs = await t.run((ctx) => ctx.db.query("subscriptions").collect());
+    expect(subs).toHaveLength(1);
+    expect(subs[0].dodoProductId).toBe("pdt_test_api");
+    expect(subs[0].planKey).toBe("api_starter");
+
+    const entitlements = await t.run((ctx) => ctx.db.query("entitlements").collect());
+    expect(entitlements).toHaveLength(1);
+    expect(entitlements[0].planKey).toBe("api_starter");
+    expect(entitlements[0].features).toMatchObject({ apiAccess: true, apiRateLimit: 60 });
+  });
+
+  test("subscription.plan_changed older than the stored state is still rejected", async () => {
+    const t = convexTest(schema, modules);
+
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+    await seedProductPlan(t, "pdt_test_api", "api_starter", "API Starter");
+
+    await processEvent(
+      t,
+      "wh_8733_10",
+      "subscription.active",
+      makeSubscriptionPayload({ product_id: "pdt_test_api" }),
+      BASE_TIMESTAMP + 1000,
+    );
+    await processEvent(
+      t,
+      "wh_8733_11",
+      "subscription.plan_changed",
+      makeSubscriptionPayload(),
+      BASE_TIMESTAMP,
+    );
+
+    const subs = await t.run((ctx) => ctx.db.query("subscriptions").collect());
+    expect(subs[0].planKey).toBe("api_starter");
   });
 
   test("payment.succeeded creates audit record", async () => {
@@ -2306,19 +2590,29 @@ describe("webhook processWebhookEvent", () => {
     expect(rows.entitlement?.planKey).toBe("pro_monthly");
   });
 
-  test("dispute.lost expires only the disputed subscription when another active subscription covers the user", async () => {
+  test.each([
+    { inlineSubscriptionId: true, reusedCustomer: false },
+    { inlineSubscriptionId: false, reusedCustomer: false },
+    { inlineSubscriptionId: false, reusedCustomer: true },
+  ])("dispute.lost resolves the disputed subscription ($inlineSubscriptionId, reused customer: $reusedCustomer)", async ({ inlineSubscriptionId, reusedCustomer }) => {
     const t = convexTest(schema, modules);
     const userId = "user_dispute_multi";
 
     await t.run(async (ctx) => {
       await ctx.db.insert("customers", {
-        userId,
+        userId: reusedCustomer ? 'deleted:old-customer-owner' : userId,
         dodoCustomerId: "cust_dispute_multi",
         email: "multi@example.com",
         normalizedEmail: "multi@example.com",
         createdAt: BASE_TIMESTAMP - 1000,
         updatedAt: BASE_TIMESTAMP - 1000,
       });
+      if (reusedCustomer) {
+        await ctx.db.insert('accountDeletions', {
+          userId: 'old-customer-owner', userIdHash: 'old-customer-owner', source: 'self',
+          status: 'complete', step: 'complete', startedAt: BASE_TIMESTAMP - 2000, updatedAt: BASE_TIMESTAMP - 1000,
+        });
+      }
       await ctx.db.insert("subscriptions", {
         userId,
         dodoSubscriptionId: "sub_disputed_multi",
@@ -2352,15 +2646,20 @@ describe("webhook processWebhookEvent", () => {
       });
     });
 
+    await t.run(async ctx => {
+      await ctx.db.insert('paymentEvents', { userId, dodoPaymentId: 'pay_dispute_multi',
+        type: 'charge', amount: 1000, currency: 'USD', status: 'succeeded',
+        dodoSubscriptionId: 'sub_disputed_multi', rawPayload: {}, occurredAt: BASE_TIMESTAMP });
+    });
+    const payload = makePaymentPayload("payment.succeeded", {
+      payment_id: "pay_dispute_multi", subscription_id: "sub_disputed_multi",
+      customer: { customer_id: "cust_dispute_multi", email: "multi@example.com" },
+    });
+    if (!inlineSubscriptionId) delete (payload.data as Record<string, unknown>).subscription_id;
     await t.mutation(internal.payments.webhookMutations.processWebhookEvent, {
       webhookId: "wh_dispute_multi",
       eventType: "dispute.lost",
-      rawPayload: makePaymentPayload("payment.succeeded", {
-        payment_id: "pay_dispute_multi",
-        subscription_id: "sub_disputed_multi",
-        customer: { customer_id: "cust_dispute_multi", email: "multi@example.com" },
-        metadata: { wm_user_id: userId },
-      }),
+      rawPayload: payload,
       timestamp: BASE_TIMESTAMP + 1000,
     });
 
@@ -2369,19 +2668,24 @@ describe("webhook processWebhookEvent", () => {
         ctx.db.query("subscriptions").withIndex("by_dodoSubscriptionId", (q) => q.eq("dodoSubscriptionId", "sub_disputed_multi")).unique(),
         ctx.db.query("subscriptions").withIndex("by_dodoSubscriptionId", (q) => q.eq("dodoSubscriptionId", "sub_cover_multi")).unique(),
         ctx.db.query("entitlements").withIndex("by_userId", (q) => q.eq("userId", userId)).first(),
-        ctx.db.query("paymentEvents").withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_dispute_multi")).first(),
+        ctx.db.query("paymentEvents").withIndex("by_dodoPaymentId", (q) => q.eq("dodoPaymentId", "pay_dispute_multi")).order('desc').first(),
       ]);
       return { disputed, cover, entitlement, paymentEvent };
     });
     expect(rows.disputed?.status).toBe("expired");
+    expect(rows.disputed?.userId).toBe(userId);
     expect(rows.cover?.status).toBe("active");
     expect(rows.entitlement?.planKey).toBe("api_starter");
     expect(rows.entitlement?.validUntil).toBe(BASE_TIMESTAMP + 45 * 86400000);
     expect(rows.entitlement?.features.tier).toBe(getFeaturesForPlan("api_starter").tier);
     expect(rows.paymentEvent?.status).toBe("dispute_lost");
+    expect(rows.paymentEvent?.userId).toBe(userId);
   });
 
   test("dispute.lost preserves a future complimentary entitlement floor", async () => {
+    // Coverage is evaluated at processing time; pin it before compUntil.
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIMESTAMP + 1000);
     const t = convexTest(schema, modules);
     const userId = "user_dispute_comp";
     const compUntil = BASE_TIMESTAMP + 60 * 86400000;
@@ -2578,6 +2882,52 @@ describe("webhook processWebhookEvent", () => {
     expect(subs).toHaveLength(1);
   });
 
+  test("a conflicting equal-timestamp lifecycle event preserves the first accepted state", async () => {
+    const t = convexTest(schema, modules);
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+    await processEvent(t, "wh_equal_active", "subscription.active", makeSubscriptionPayload(), BASE_TIMESTAMP);
+    const before = await t.run((ctx) => ctx.db.query("subscriptions").unique());
+    expect(before?.status).toBe("active");
+    await processEvent(t, "wh_equal_cancel", "subscription.cancelled", makeSubscriptionPayload(), BASE_TIMESTAMP);
+    const equal = await t.run((ctx) => ctx.db.query("subscriptions").unique());
+    expect(equal).toEqual(before);
+    await processEvent(t, "wh_newer_cancel", "subscription.cancelled", makeSubscriptionPayload(), BASE_TIMESTAMP + 1);
+    const newer = await t.run((ctx) => ctx.db.query("subscriptions").unique());
+    expect(newer?.status).toBe("cancelled");
+    expect(newer?.updatedAt).toBe(BASE_TIMESTAMP + 1);
+  });
+
+  test.each(["subscription.active", "payment.succeeded"] as const)("concurrent duplicate %s deliveries apply storage effects once", async (eventType) => {
+    const t = convexTest(schema, modules);
+    await seedProductPlan(t, "pdt_test_pro", "pro_monthly", "Pro Monthly");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("customers", {
+        userId: "test-user-001", dodoCustomerId: "cust_test_001", email: "test@example.com",
+        createdAt: BASE_TIMESTAMP, updatedAt: BASE_TIMESTAMP,
+      });
+    });
+    const args = {
+      webhookId: "wh_concurrent_duplicate", eventType, timestamp: BASE_TIMESTAMP,
+      rawPayload: eventType === "subscription.active" ? makeSubscriptionPayload() : makePaymentPayload("payment.succeeded"),
+    };
+    await Promise.all(Array.from({ length: 8 }, () => t.mutation(internal.payments.webhookMutations.processWebhookEvent, args)));
+    const state = await t.run(async (ctx) => ({
+      webhooks: await ctx.db.query("webhookEvents").collect(),
+      subscriptions: await ctx.db.query("subscriptions").collect(),
+      payments: await ctx.db.query("paymentEvents").collect(),
+      entitlements: await ctx.db.query("entitlements").collect(),
+      customers: await ctx.db.query("customers").collect(),
+    }));
+    expect(state.webhooks).toHaveLength(1);
+    expect(state.customers).toHaveLength(1);
+    expect(state.subscriptions).toHaveLength(eventType === "subscription.active" ? 1 : 0);
+    expect(state.payments).toHaveLength(eventType === "payment.succeeded" ? 1 : 0);
+    if (eventType === "subscription.active") {
+      expect(state.entitlements).toHaveLength(1);
+      expect(state.entitlements[0]?.planKey).toBe("pro_monthly");
+    }
+  });
+
   test.each([
     ["dispute.opened", "dispute_opened"],
     ["dispute.won", "dispute_won"],
@@ -2593,6 +2943,86 @@ describe("webhook processWebhookEvent", () => {
     const events = await t.run(async (ctx) => ctx.db.query("paymentEvents").collect());
     expect(events).toHaveLength(1);
     expect(events[0].status).toBe(expectedStatus);
+  });
+
+  // WORLDMONITOR-114 — Dodo dispute payloads type `amount` as a string.
+  // A malformed `total_amount` must fall through to it before paymentEvents
+  // validates its numeric amount field.
+  test("dispute.opened falls back to a string amount when total_amount is invalid", async () => {
+    const t = convexTest(schema, modules);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const payload = {
+      type: "dispute.opened",
+      business_id: "biz_test",
+      timestamp: "2026-03-21T10:00:00Z",
+      data: {
+        payload_type: "Dispute",
+        dispute_id: "dp_string_amount",
+        payment_id: "pay_string_amount",
+        currency: "USD",
+        total_amount: "not-an-amount",
+        amount: "9999",
+        customer: {
+          customer_id: "cust_test_001",
+          email: "test@example.com",
+          name: "Test User",
+        },
+        metadata: { wm_user_id: "test-user-001" },
+      },
+    };
+    await processEvent(t, "wh_dispute_string_amount", "dispute.opened", payload, BASE_TIMESTAMP);
+
+    const events = await t.run(async (ctx) => ctx.db.query("paymentEvents").collect());
+    expect(events).toHaveLength(1);
+    expect(events[0].amount).toBe(9999);
+    expect(events[0].status).toBe("dispute_opened");
+    expect(events[0].dodoPaymentId).toBe("pay_string_amount");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[coerceAmount] non-numeric amount"));
+  });
+
+  test("payment.succeeded with string total_amount persists a numeric amount", async () => {
+    const t = convexTest(schema, modules);
+
+    const payload = makePaymentPayload("payment.succeeded", { total_amount: "1999" });
+    await processEvent(t, "wh_payment_string_amount", "payment.succeeded", payload, BASE_TIMESTAMP);
+
+    const events = await t.run(async (ctx) => ctx.db.query("paymentEvents").collect());
+    expect(events).toHaveLength(1);
+    expect(events[0].amount).toBe(1999);
+    expect(events[0].status).toBe("succeeded");
+  });
+
+  test("payment.succeeded falls back to a valid amount when total_amount is non-numeric", async () => {
+    const t = convexTest(schema, modules);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const payload = makePaymentPayload("payment.succeeded", {
+      total_amount: "not-an-amount",
+      amount: "1999",
+    });
+    await processEvent(t, "wh_payment_invalid_amount", "payment.succeeded", payload, BASE_TIMESTAMP);
+
+    const events = await t.run(async (ctx) => ctx.db.query("paymentEvents").collect());
+    expect(events).toHaveLength(1);
+    expect(events[0].amount).toBe(1999);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[coerceAmount] non-numeric amount"));
+  });
+
+  test("payment.succeeded with no usable amount persists 0 and warns", async () => {
+    const t = convexTest(schema, modules);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const payload = makePaymentPayload("payment.succeeded", {
+      total_amount: "not-an-amount",
+      amount: "also-not-an-amount",
+    });
+    await processEvent(t, "wh_payment_no_usable_amount", "payment.succeeded", payload, BASE_TIMESTAMP);
+
+    const events = await t.run(async (ctx) => ctx.db.query("paymentEvents").collect());
+    expect(events).toHaveLength(1);
+    expect(events[0].amount).toBe(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[coerceAmount] non-numeric amount"));
   });
 
   test("out-of-order events are rejected", async () => {

@@ -34,6 +34,8 @@ import { jsonResponse } from '../_json-response.js';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../_sentry-edge.js';
 import { validateBearerToken } from '../../server/auth-session';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from '../_rate-limit.js';
 import { getReferralCodeForUser, buildShareUrl } from '../../server/_shared/referral-code';
 
 const PUBLIC_BASE =
@@ -58,7 +60,7 @@ async function registerReferralCodeInConvex(userId: string, code: string): Promi
   const convexSite =
     process.env.CONVEX_SITE_URL ??
     (process.env.CONVEX_URL ?? '').replace('.convex.cloud', '.convex.site');
-  const relaySecret = process.env.RELAY_SHARED_SECRET ?? '';
+  const relaySecret = process.env.CONVEX_TENANT_RELAY_SECRET ?? '';
   if (!convexSite || !relaySecret) {
     throw new Error('convex_relay_not_configured');
   }
@@ -90,17 +92,22 @@ export default async function handler(
     return new Response(null, { status: 204, headers: cors });
   }
   if (req.method !== 'GET') {
-    return jsonResponse({ error: 'Method not allowed' }, 405, cors);
+    return jsonResponse({ error: 'Method not allowed' }, 405, { ...cors, Allow: 'GET, OPTIONS' });
   }
 
   const authHeader = req.headers.get('Authorization') ?? '';
   const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
   if (!jwt) return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
 
-  const session = await validateBearerToken(jwt);
+  const session = await validateBearerToken(jwt, { resolvePlan: false });
   if (!session.valid || !session.userId) {
     return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
   }
+
+  const limited = await checkRateLimit(req, cors, {
+    scope: 'referral-me', identifier: `user:${session.userId}`, limit: 30, window: '60 s',
+  });
+  if (limited) return limited;
 
   // Reuse BRIEF_URL_SIGNING_SECRET as the HMAC secret for referral
   // codes. Same secret, different message namespace (`referral:v1:`
@@ -119,7 +126,7 @@ export default async function handler(
     code = await getReferralCodeForUser(session.userId, secret);
   } catch (err) {
     console.error('[api/referral/me] code generation failed:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/referral/me', step: 'code-generation' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/referral/me', step: 'code-generation' }, fingerprint: ['api/referral/me', 'code-generation', err instanceof Error ? err.name : 'Error'], ctx });
     return jsonResponse({ error: 'service_unavailable' }, 503, cors);
   }
 

@@ -36,6 +36,13 @@ import { fileURLToPath } from 'node:url';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(REPO_ROOT, 'scripts', 'prepush-changed-tests.sh');
 
+// A sync child blocks the event loop, so node:test's per-test timeout cannot
+// fire while it runs. Without a deadline, a child that never exits hangs the
+// whole file until run-data-tests' 300s watchdog aborts it unnamed (#10334).
+// SIGKILL, because the default SIGTERM leaves the call blocked until a child
+// that ignores it exits on its own.
+const CHILD_TIMEOUT_MS = 60_000;
+
 // Every mkdtemp below funnels through here so the run leaves nothing behind.
 // These fixtures used to accumulate one directory per call in $TMPDIR forever.
 const FIXTURE_DIRS = [];
@@ -106,8 +113,44 @@ function partition(mode, { cwd, changed = CHANGED } = {}) {
     // gate that failed. `err.stderr` is still populated, which is what the
     // loud-failure assertions match on.
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: CHILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
   return out.split('\0').filter(Boolean);
+}
+
+// The probe catches a config error and prints it rather than dying on it. On
+// Linux, a tsx child that exits on an uncaught error sometimes deadlocks in
+// exit with its loader thread (futex_wait, 5 in 4000 runs on Node 24.22.2;
+// none in 2400 with the error caught), and the call then sits out the full
+// CHILD_TIMEOUT_MS (CI runs 43812543197, 43737436237).
+function loadDomTestConfig(env = {}) {
+  const probe = join(fixtureDir('wm-dom-config-probe-'), 'probe.mts');
+  writeFileSync(
+    probe,
+    'let result;\n' +
+      'try {\n' +
+      `  const m = await import(${JSON.stringify(join(REPO_ROOT, 'vitest.dom.config.mts'))});\n` +
+      '  result = { test: m.default?.test ?? null };\n' +
+      '} catch (error) {\n' +
+      '  result = { error: error instanceof Error ? error.message : String(error) };\n' +
+      '}\n' +
+      'console.log(JSON.stringify(result));\n',
+  );
+  const childEnv = { ...process.env };
+  delete childEnv.VITEST_MAX_THREADS;
+  Object.assign(childEnv, env);
+  const out = execFileSync(join(REPO_ROOT, 'node_modules', '.bin', 'tsx'), [probe], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: childEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: CHILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
+  const result = JSON.parse(out.trim().split('\n').at(-1));
+  if ('error' in result) throw new Error(result.error);
+  return result.test;
 }
 
 describe('pre-push changed-test partition', () => {
@@ -220,19 +263,8 @@ describe('partition stays in step with the vitest DOM project', () => {
   // Resolved in a CHILD process on purpose: importing it here would pull
   // vitest/config (~220MB RSS) into the shared `npm run test:data` runner,
   // which already OOMs at the tail of its ~390-file single-process run.
-  const include = (() => {
-    const probe = join(fixtureDir('wm-dom-config-probe-'), 'probe.mts');
-    writeFileSync(
-      probe,
-      `const m = await import(${JSON.stringify(join(REPO_ROOT, 'vitest.dom.config.mts'))});\n` +
-        'console.log(JSON.stringify(m.default?.test?.include ?? null));\n',
-    );
-    const out = execFileSync(join(REPO_ROOT, 'node_modules', '.bin', 'tsx'), [probe], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    });
-    return JSON.parse(out.trim().split('\n').at(-1));
-  })();
+  const defaultConfig = loadDomTestConfig();
+  const include = defaultConfig.include;
 
   test('every DOM include glob lives under the prefix the partition claims', () => {
     assert.ok(Array.isArray(include) && include.length > 0, 'DOM config must declare test.include');
@@ -277,6 +309,24 @@ describe('partition stays in step with the vitest DOM project', () => {
     const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
     assert.match(pkg.scripts['test:dom'], /vitest run --config vitest\.dom\.config\.mts/);
   });
+
+  test('the local hook can cap vitest workers without slowing CI by default', () => {
+    assert.equal(defaultConfig.maxWorkers, undefined);
+    assert.equal(loadDomTestConfig({ VITEST_MAX_THREADS: '2' }).maxWorkers, 2);
+    assert.throws(
+      () => loadDomTestConfig({ VITEST_MAX_THREADS: 'not-a-number' }),
+      /VITEST_MAX_THREADS must be a positive integer/,
+    );
+  });
+
+  test('the DOM project sets an explicit testTimeout above vitest\'s 5000ms default', () => {
+    // #6984: nobody chose 5000 — it is vitest's built-in default. Several DOM
+    // files pay a large module-graph transform to the first test, which under
+    // load lands just over 5000ms and false-reds an unrelated push. Pinning
+    // the resolved config (not the source text) is what keeps the next
+    // #6677-class file from silently inheriting the default again.
+    assert.equal(defaultConfig.testTimeout, 15_000);
+  });
 });
 
 describe('runner dispatch', () => {
@@ -285,9 +335,14 @@ describe('runner dispatch', () => {
   // green when `-n` becomes `-z` or `|| exit 1` is dropped, silently skipping
   // the suite. The decision now lives in the script, so these run it for real
   // against stubbed runners and assert what was invoked.
-  function runDispatch(mode, list, { stubExit = 0 } = {}) {
+  function runDispatch(mode, list, { stubExit = 0, concurrency, env = {} } = {}) {
     const dir = fixtureDir('wm-prepush-dispatch-');
     const log = join(dir, 'invocations.log');
+    const budgets = join(dir, 'budgets.log');
+    // Records the wall-clock budget each runner gets, then runs it unchanged.
+    const timeoutStub = join(dir, 'timeout');
+    writeFileSync(timeoutStub, `#!/bin/sh\necho "$1" >> ${JSON.stringify(budgets)}\nshift\nexec "$@"\n`);
+    chmodSync(timeoutStub, 0o755);
     for (const bin of ['npm', 'npx']) {
       const stub = join(dir, bin);
       writeFileSync(stub, `#!/bin/sh\necho "${bin} $*" >> ${JSON.stringify(log)}\nexit ${stubExit}\n`);
@@ -300,14 +355,72 @@ describe('runner dispatch', () => {
         cwd: REPO_ROOT,
         input: nulList(list),
         encoding: 'utf8',
-        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          ...(concurrency ? { WM_PREPUSH_TEST_CONCURRENCY: concurrency } : {}),
+          ...env,
+        },
+        timeout: CHILD_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       });
     } catch (err) {
+      if (err.code === 'ETIMEDOUT') throw err;
       status = err.status;
     }
 
-    return { status, invocations: existsSync(log) ? readFileSync(log, 'utf8').trim() : '' };
+    return {
+      status,
+      invocations: existsSync(log) ? readFileSync(log, 'utf8').trim() : '',
+      budget: existsSync(budgets) ? readFileSync(budgets, 'utf8').trim() : '',
+    };
   }
+
+  // The DOM half runs the whole vitest project, not the changed files, under
+  // the hook's 2-worker cap. Measured 2026-10-20 at 269 files: 129s on an idle
+  // machine, so the 120s budget the node half uses killed every push that
+  // touched tests/dom/ with no test having failed.
+  test('the DOM suite gets its own budget, sized for the whole project', () => {
+    const { status, budget } = runDispatch('run-dom', ['tests/dom/gate-action.test.mts'], {
+      env: { WM_PREPUSH_TEST_TIMEOUT: '', WM_PREPUSH_DOM_TEST_TIMEOUT: '' },
+    });
+    assert.equal(status, 0);
+    assert.equal(budget, '600');
+  });
+
+  test('the DOM budget is overridable without touching the node budget', () => {
+    const dom = runDispatch('run-dom', ['tests/dom/gate-action.test.mts'], {
+      env: { WM_PREPUSH_TEST_TIMEOUT: '', WM_PREPUSH_DOM_TEST_TIMEOUT: '900' },
+    });
+    assert.equal(dom.budget, '900');
+    const node = runDispatch('run-node', ['tests/handlers.test.mts'], {
+      env: { WM_PREPUSH_TEST_TIMEOUT: '', WM_PREPUSH_DOM_TEST_TIMEOUT: '900' },
+    });
+    assert.equal(node.budget, '120');
+  });
+
+  test('a non-numeric DOM budget fails loudly instead of running unbounded', () => {
+    const { status, invocations } = runDispatch('run-dom', ['tests/dom/gate-action.test.mts'], {
+      env: { WM_PREPUSH_DOM_TEST_TIMEOUT: 'ten-minutes' },
+    });
+    assert.equal(status, 2);
+    assert.equal(invocations, '');
+  });
+
+  test('an all-zero DOM budget fails loudly, since `timeout 00` means no deadline', () => {
+    for (const value of ['0', '00', '000']) {
+      const { status, invocations } = runDispatch('run-dom', ['tests/dom/gate-action.test.mts'], {
+        env: { WM_PREPUSH_DOM_TEST_TIMEOUT: value },
+      });
+      assert.equal(status, 2, `WM_PREPUSH_DOM_TEST_TIMEOUT=${value}`);
+      assert.equal(invocations, '');
+    }
+    const padded = runDispatch('run-dom', ['tests/dom/gate-action.test.mts'], {
+      env: { WM_PREPUSH_DOM_TEST_TIMEOUT: '0600' },
+    });
+    assert.equal(padded.status, 0);
+    assert.equal(padded.budget, '0600');
+  });
 
   test('a changed DOM test runs the vitest project', () => {
     const { status, invocations } = runDispatch('run-dom', ['tests/dom/gate-action.test.mts']);
@@ -335,7 +448,20 @@ describe('runner dispatch', () => {
     ]);
     assert.equal(status, 0);
     // Quoted expansion — the path with a space stays one argument.
-    assert.match(invocations, /^npx tsx --test tests\/handlers\.test\.mts tests\/a b\.test\.mjs$/);
+    assert.match(
+      invocations,
+      /^npx tsx --test --test-concurrency=2 tests\/handlers\.test\.mts tests\/a b\.test\.mjs$/,
+    );
+  });
+
+  test('changed node tests honor an explicit local worker cap', () => {
+    const { status, invocations } = runDispatch(
+      'run-node',
+      ['tests/handlers.test.mts'],
+      { concurrency: '3' },
+    );
+    assert.equal(status, 0);
+    assert.equal(invocations, 'npx tsx --test --test-concurrency=3 tests/handlers.test.mts');
   });
 
   test('an empty node list runs nothing and does not fail the push', () => {
@@ -407,6 +533,7 @@ describe('pre-push hook wiring', () => {
     // assertions absent exactly when the thing they pin was being rewritten.
     for (const path of [
       '\\.husky/pre-push',
+      'scripts/prepush-admission\\.mjs',
       'scripts/prepush-changed-tests\\.sh',
       'scripts/prepush-attest\\.sh',
       'vitest\\.dom\\.config\\.mts',
@@ -417,8 +544,33 @@ describe('pre-push hook wiring', () => {
         `pre-push must re-run the contract tests when ${path} changes`,
       );
     }
-    for (const testFile of ['tests/prepush-changed-tests.test.mjs', 'tests/prepush-attest.test.mjs']) {
+    for (const testFile of [
+      'tests/prepush-admission.test.mjs',
+      'tests/prepush-changed-tests.test.mjs',
+      'tests/prepush-attest.test.mjs',
+    ]) {
       assert.ok(hook.includes(testFile), `${testFile} must be in the contract-test list`);
     }
+  });
+
+  test('caps every direct node:test runner in the hook', () => {
+    const directRuns = hook
+      .split('\n')
+      .filter((line) => line.includes('npx tsx --test'));
+
+    assert.equal(directRuns.length, 3);
+    assert.ok(
+      directRuns.every((line) =>
+        line.includes('--test-concurrency="$WM_PREPUSH_TEST_CONCURRENCY"'),
+      ),
+      'every direct node:test runner must use the configured worker cap',
+    );
+  });
+
+  test('exports VITEST_MAX_THREADS from the configured worker cap', () => {
+    assert.match(
+      hook,
+      /export VITEST_MAX_THREADS="\$\{VITEST_MAX_THREADS:-\$WM_PREPUSH_TEST_CONCURRENCY\}"/,
+    );
   });
 });

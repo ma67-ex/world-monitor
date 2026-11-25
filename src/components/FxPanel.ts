@@ -315,14 +315,14 @@ export class FxPanel extends Panel {
     const stressedCount = this.stress.filter((r) => r.stressed).length;
 
     return safeHtml`
-      <div class="fx-scroll">
-        <table class="fx-table">
+      <div class="fx-scroll table-scroll table-scroll-pinned-start" role="group" tabindex="0" aria-labelledby="${this.panelId}Title">
+        <table class="wm-table fx-table">
           <thead>
             <tr>
-              <th class="fx-ccy">${t('components.fx.currency')}</th>
-              <th>${t('components.fx.yoy')}</th>
-              <th>${t('components.fx.drawdown')}</th>
-              <th class="fx-window">${t('components.fx.peakToTrough')}</th>
+              <th scope="col" class="fx-ccy">${t('components.fx.currency')}</th>
+              <th scope="col">${t('components.fx.yoy')}</th>
+              <th scope="col">${t('components.fx.drawdown')}</th>
+              <th scope="col" class="fx-window">${t('components.fx.peakToTrough')}</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -354,13 +354,13 @@ export class FxPanel extends Panel {
 
       sections.push(safeHtml`
         <div class="fx-section-title">${t('components.fx.usdBase')}</div>
-        <div class="fx-scroll">
-          <table class="fx-table">
+        <div class="fx-scroll table-scroll table-scroll-pinned-start" role="group" tabindex="0" aria-labelledby="${this.panelId}Title">
+          <table class="wm-table fx-table">
             <thead>
               <tr>
-                <th class="fx-ccy">${t('components.fx.currency')}</th>
-                <th>${t('components.fx.perUsd')}</th>
-                <th class="fx-inverse">${t('components.fx.usdPerUnit')}</th>
+                <th scope="col" class="fx-ccy">${t('components.fx.currency')}</th>
+                <th scope="col">${t('components.fx.perUsd')}</th>
+                <th scope="col" class="fx-inverse">${t('components.fx.usdPerUnit')}</th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
@@ -384,13 +384,13 @@ export class FxPanel extends Panel {
 
       sections.push(safeHtml`
         <div class="fx-section-title">${t('components.fx.eurBase')}</div>
-        <div class="fx-scroll">
-          <table class="fx-table">
+        <div class="fx-scroll table-scroll table-scroll-pinned-start" role="group" tabindex="0" aria-labelledby="${this.panelId}Title">
+          <table class="wm-table fx-table">
             <thead>
               <tr>
-                <th class="fx-ccy">${t('components.fx.pair')}</th>
-                <th>${t('components.fx.rate')}</th>
-                <th>${t('components.fx.change1d')}</th>
+                <th scope="col" class="fx-ccy">${t('components.fx.pair')}</th>
+                <th scope="col">${t('components.fx.rate')}</th>
+                <th scope="col">${t('components.fx.change1d')}</th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
@@ -427,13 +427,13 @@ export class FxPanel extends Panel {
 
     return safeHtml`
       <div class="fx-section-title">${t('components.fx.rubBase')}</div>
-      <div class="fx-scroll">
-        <table class="fx-table">
+      <div class="fx-scroll table-scroll table-scroll-pinned-start" role="group" tabindex="0" aria-labelledby="${this.panelId}Title">
+        <table class="wm-table fx-table">
           <thead>
             <tr>
-              <th class="fx-ccy">${t('components.fx.currency')}</th>
-              <th>${t('components.fx.rubPerUnit')}</th>
-              <th>${t('components.fx.change1d')}</th>
+              <th scope="col" class="fx-ccy">${t('components.fx.currency')}</th>
+              <th scope="col">${t('components.fx.rubPerUnit')}</th>
+              <th scope="col">${t('components.fx.change1d')}</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>

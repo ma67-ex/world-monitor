@@ -1,14 +1,12 @@
+import { createTimeoutSignal } from '@/services/timeout-signal';
 import { getRpcBaseUrl } from '@/services/rpc-client';
 import type { AcledConflictEvent as ProtoAcledEvent, UcdpViolenceEvent as ProtoUcdpEvent, ListAcledEventsResponse, ListUcdpEventsResponse, IranEvent, ListIranEventsResponse } from '@/generated/client/worldmonitor/conflict/v1/service_client';
-import type { UcdpGeoEvent, UcdpEventType } from '@/types';
-import { createCircuitBreaker } from '@/utils';
+import type { ExposureCoverage, UcdpGeoEvent, UcdpEventType } from '@/types';
+import { createCircuitBreaker } from '@/utils/circuit-breaker';
 import { getHydratedData } from '@/services/bootstrap';
 import { toApiUrl } from '@/services/runtime';
 import { ConflictServiceClient } from '@/services/generated-rpc-clients';
-import { isDuplicatedByAcled } from './ucdp-dedupe';
-import type { AcledDedupEvent, UcdpDedupeIndexEntry, UcdpTabAggregate } from './ucdp-dedupe';
-export { deduplicateUcdpProjectionAggregates } from './ucdp-dedupe';
-export type { UcdpDedupeIndexEntry, UcdpTabAggregate } from './ucdp-dedupe';
+export interface UcdpTabAggregate { count: number; totalDeaths: number }
 
 // ---- Client + Circuit Breakers ----
 
@@ -92,6 +90,8 @@ function toUcdpGeoEvent(proto: ProtoUcdpEvent): UcdpGeoEvent {
     date_end: proto.dateEnd ? new Date(proto.dateEnd).toISOString().substring(0, 10) : '',
     latitude: proto.location?.latitude ?? 0,
     longitude: proto.location?.longitude ?? 0,
+    hasPreciseLocation: proto.hasPreciseLocation,
+    locationName: proto.locationName,
     country: proto.country,
     side_a: proto.sideA,
     side_b: proto.sideB,
@@ -113,22 +113,30 @@ function toUcdpGeoEvent(proto: ProtoUcdpEvent): UcdpGeoEvent {
 export type HydratedUcdpPayload = ListUcdpEventsResponse & {
   classifications?: Record<string, UcdpConflictStatus>;
   aggregates?: Record<string, UcdpTabAggregate>;
-  dedupeIndex?: UcdpDedupeIndexEntry[];
   totalEvents?: number;
+  exposureEvents?: Array<ProtoUcdpEvent & { exposureEventCount?: number }>;
+  exposureCoverage?: ExposureCoverage;
 };
+
+export type UcdpExposureEvent = UcdpGeoEvent & { eventCount?: number };
+
+// Coverage counts are only true of the full feed. The dashboard derives them
+// itself from a full-feed fetch, and takes the projection's when it gets rows.
+// A projection published before exposureCoverage existed has none to show.
+export type UcdpExposureInput =
+  | { source: 'full-feed'; events: UcdpExposureEvent[] }
+  | { source: 'projection'; events: UcdpExposureEvent[]; coverage?: ExposureCoverage };
+
+export { currentUcdpCountryName } from '../../../shared/ucdp-display';
 
 import type { UcdpConflictStatus } from './ucdp-classify';
 export { deriveConflictHistory, deriveUcdpClassifications } from './ucdp-classify';
 export type { ConflictIntensity, UcdpConflictStatus } from './ucdp-classify';
 
-// ---- AcledEvent interface for deduplication (ported from legacy) ----
-
-type AcledEvent = AcledDedupEvent;
-
 // ---- Empty fallbacks ----
 
 const emptyAcledFallback: ListAcledEventsResponse = { events: [], pagination: undefined };
-const emptyUcdpFallback: ListUcdpEventsResponse = { events: [], pagination: undefined };
+const emptyUcdpFallback: ListUcdpEventsResponse = { events: [], pagination: undefined, candidateVersion: '' };
 
 // ---- Exported Functions ----
 
@@ -162,12 +170,27 @@ interface UcdpEventsResponse {
   count: number;
   data: UcdpGeoEvent[];
   cached_at: string;
+  fromCache: boolean;
+  exposure: UcdpExposureInput;
 }
 
 export async function fetchUcdpEvents(hydrated?: HydratedUcdpPayload): Promise<UcdpEventsResponse> {
   if (hydrated?.events?.length) {
     const events = hydrated.events.map(toUcdpGeoEvent);
-    return { success: true, count: events.length, data: events, cached_at: '' };
+    return {
+      success: true,
+      count: events.length,
+      data: events,
+      cached_at: '',
+      fromCache: false,
+      exposure: hydrated.exposureEvents
+        ? {
+          source: 'projection',
+          events: hydrated.exposureEvents.map(e => ({ ...toUcdpGeoEvent(e), eventCount: e.exposureEventCount })),
+          coverage: hydrated.exposureCoverage,
+        }
+        : { source: 'projection', events },
+    };
   }
 
   const resp = await ucdpBreaker.execute(async () => {
@@ -181,17 +204,9 @@ export async function fetchUcdpEvents(hydrated?: HydratedUcdpPayload): Promise<U
     count: events.length,
     data: events,
     cached_at: '',
+    fromCache: ucdpBreaker.getDataState().mode === 'cached',
+    exposure: { source: 'full-feed', events },
   };
-}
-
-export function deduplicateAgainstAcled(ucdpEvents: UcdpGeoEvent[], acledEvents: AcledEvent[]): UcdpGeoEvent[] {
-  if (!acledEvents.length) return ucdpEvents;
-  return ucdpEvents.filter((ucdp) => !isDuplicatedByAcled({
-    latitude: ucdp.latitude,
-    longitude: ucdp.longitude,
-    dateMs: new Date(ucdp.date_start).getTime(),
-    deathsBest: ucdp.deaths_best,
-  }, acledEvents));
 }
 
 export function groupByCountry(events: UcdpGeoEvent[]): Map<string, UcdpGeoEvent[]> {
@@ -202,14 +217,6 @@ export function groupByCountry(events: UcdpGeoEvent[]): Map<string, UcdpGeoEvent
     map.get(country)!.push(e);
   }
   return map;
-}
-
-export function groupByType(events: UcdpGeoEvent[]): Record<string, UcdpGeoEvent[]> {
-  return {
-    'state-based': events.filter(e => e.type_of_violence === 'state-based'),
-    'non-state': events.filter(e => e.type_of_violence === 'non-state'),
-    'one-sided': events.filter(e => e.type_of_violence === 'one-sided'),
-  };
 }
 
 const IRAN_RED_CATEGORIES = new Set(['military', 'airstrike', 'defense']);
@@ -258,11 +265,17 @@ export function getIranEventSize(severity: string): number {
 
 export async function fetchIranEvents(): Promise<IranEvent[]> {
   const hydrated = getHydratedData('iranEvents') as ListIranEventsResponse | undefined;
-  if (hydrated?.events?.length) return hydrated.events;
+  if (hydrated?.events?.length) {
+    // Warm the breaker under the same key a later recurring call reads
+    // (#7048); a bare return drained the consume-once slot and forced a
+    // refetch of the cache-busted URL.
+    iranBreaker.recordSuccess(hydrated);
+    return hydrated.events;
+  }
 
   const resp = await iranBreaker.execute(async () => {
     const cacheBust = Math.floor(Date.now() / 120_000);
-    const r = await globalThis.fetch(toApiUrl(`/api/conflict/v1/list-iran-events?_v=${cacheBust}`));
+    const r = await globalThis.fetch(toApiUrl(`/api/conflict/v1/list-iran-events?_v=${cacheBust}`), { signal: createTimeoutSignal(15_000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json() as Promise<ListIranEventsResponse>;
   }, emptyIranFallback);

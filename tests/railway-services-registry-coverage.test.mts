@@ -74,6 +74,29 @@ const RUNBOOK_SERVICE_ROW_RE = /^\|\s*seed-[a-z0-9-]+\s*\|\s*`node\s+(scripts\/[
 const SCRIPT_HEADER_SERVICE_RE = /^\s*\/\/\s*-\s*Service name:\s*([a-z0-9-]+)\s*$/m;
 
 describe('Railway service registry coverage', () => {
+  it('contains no duplicate service names or entry paths', () => {
+    const seenServices = new Set<string>();
+    const duplicateServices: string[] = [];
+    const seenEntries = new Set<string>();
+    const duplicateEntries: string[] = [];
+    for (const item of registry) {
+      if (seenServices.has(item.service)) duplicateServices.push(item.service);
+      else seenServices.add(item.service);
+      if (seenEntries.has(item.entry)) duplicateEntries.push(item.entry);
+      else seenEntries.add(item.entry);
+    }
+    assert.deepEqual(
+      duplicateServices,
+      [],
+      `scripts/railway-services.json has duplicate service names: ${duplicateServices.join(', ')}`,
+    );
+    assert.deepEqual(
+      duplicateEntries,
+      [],
+      `scripts/railway-services.json has duplicate entry paths: ${duplicateEntries.join(', ')}`,
+    );
+  });
+
   it('pins the bootstrap publisher deployment contract', () => {
     const publisher = registry.find(
       (entry) => entry.entry === 'scripts/publish-bootstrap-tiers.mjs',
@@ -98,10 +121,9 @@ describe('Railway service registry coverage', () => {
       'UPSTASH_REDIS_REST_URL',
       'UPSTASH_REDIS_REST_TOKEN',
       'IRAN_EVENTS_ENABLED',
-      'R2_ACCOUNT_ID',
-      'R2_BOOTSTRAP_BUCKET',
-      'R2_BOOTSTRAP_ACCESS_KEY_ID',
-      'R2_BOOTSTRAP_SECRET_ACCESS_KEY',
+      'KV_BOOTSTRAP_ACCOUNT_ID',
+      'KV_BOOTSTRAP_NAMESPACE_ID',
+      'KV_BOOTSTRAP_WRITE_TOKEN',
     ]);
     assert.deepEqual(
       publisher.watchPatterns,
@@ -151,6 +173,7 @@ describe('Railway service registry coverage', () => {
       'scripts/_gdelt-fetch.mjs',
       'scripts/china-corporate-disclosures/adapters.mjs',
       'scripts/cross-strait-activity/adapters.mjs',
+      'scripts/seed-live-video-resolved.mjs',
     ]) {
       const src = readFileSync(resolve(repoRoot, file), 'utf8');
       for (const m of src.matchAll(PROXY_FALLBACK_RE)) {
@@ -158,8 +181,8 @@ describe('Railway service registry coverage', () => {
       }
     }
     assert.ok(
-      fallbackPairs.length >= 3,
-      'expected the GDELT, SZSE and Japan MOD adapters to resolve a source-specific proxy with a PROXY_URL fallback',
+      fallbackPairs.length >= 4,
+      'expected the GDELT, SZSE and Japan MOD adapters and the live video seeder to resolve a source-specific proxy with a PROXY_URL fallback',
     );
 
     for (const [specific, shared] of fallbackPairs) {
@@ -368,5 +391,24 @@ describe('Railway service registry coverage', () => {
     const m = sample.match(SCRIPT_HEADER_SERVICE_RE);
     assert.ok(m, 'SCRIPT_HEADER_SERVICE_RE failed to match canonical service header shape');
     assert.equal(m![1], 'seed-bundle-fake');
+  });
+});
+
+// The live audit gives an unregistered service a watch-path contract only when
+// its start command is a seeder (`node seed-*`): it must watch scripts/** and
+// shared/**. Any other live service outside the registry keeps whatever
+// patterns were set by hand, and nothing checks them against its imports.
+// notification-relay (`npm run notification-relay`) watched six paths while
+// seventeen files it requires went unwatched, so fixes to those never deployed (#9265).
+describe('Railway fleet registry coverage', () => {
+  it('registers every live non-seeder service', () => {
+    const fleet = JSON.parse(
+      readFileSync(resolve(repoRoot, 'scripts/railway-native-autodeploy-fleet.json'), 'utf8'),
+    ) as { services: { id: string; name: string }[] };
+    const registered = new Set(registry.map((entry) => entry.service));
+    const unregistered = fleet.services
+      .map((service) => service.name)
+      .filter((name) => !name.startsWith('seed-') && !registered.has(name));
+    assert.deepEqual(unregistered, [], 'register these services in scripts/railway-services.json');
   });
 });

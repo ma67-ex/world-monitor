@@ -9,6 +9,8 @@ import {
   markdownToTelegramHtml,
   markdownToSlackMrkdwn,
   markdownToDiscord,
+  escapeDiscordText,
+  truncateDiscordContent,
 } from '../scripts/_digest-markdown.mjs';
 
 // Representative AI summary that exercises every feature: section headers,
@@ -26,6 +28,23 @@ Signals to watch:
 * Diplomatic cables from Beirut`;
 
 // ── escapeHtml ───────────────────────────────────────────────────────────────
+
+describe('section labels in scripts without capitals', () => {
+  it('emphasises a Japanese or Arabic label in every channel format', () => {
+    for (const label of ['評価', 'التقييم']) {
+      const md = `${label}：安定\nbody`;
+      assert.match(markdownToEmailHtml(md), new RegExp(`<strong[^>]*>${label}:</strong>`));
+      assert.match(markdownToTelegramHtml(md), new RegExp(`^<b>${label}:</b>`));
+      assert.match(markdownToSlackMrkdwn(md), new RegExp(`^\\*${label}:\\*`));
+      assert.match(markdownToDiscord(md), new RegExp(`^\\*\\*${label}:\\*\\*`));
+    }
+  });
+
+  it('does not turn an uncased sentence with a colon into a label', () => {
+    const md = '外務省の報道官は記者会見で次のように述べた：協議は続く';
+    assert.doesNotMatch(markdownToTelegramHtml(md), /<b>/);
+  });
+});
 
 describe('escapeHtml', () => {
   it('escapes &, <, >, "', () => {
@@ -243,6 +262,20 @@ describe('markdownToDiscord', () => {
     assert.equal(out, 'the **Lebanon** region is *critical*');
   });
 
+  it('neutralises masked links in third-party text', () => {
+    const out = markdownToDiscord('Assessment: see [Verify account](https://evil.example/login) \\ now');
+    assert.equal(out, '**Assessment:** see \\[Verify account](https://evil.example/login) \\\\ now');
+    assert.equal(escapeDiscordText('[a](b)'), '\\[a](b)');
+  });
+
+  it('truncates at the limit without splitting an escape pair', () => {
+    const text = `${'x'.repeat(1998)}\\[tail`;
+    const out = truncateDiscordContent(text);
+    assert.ok(out.length <= 2000);
+    assert.ok(!/(^|[^\\])(\\\\)*\\\u2026$/.test(out), 'no dangling backslash before the ellipsis');
+    assert.equal(truncateDiscordContent('short'), 'short');
+  });
+
   it('converts a realistic summary end-to-end', () => {
     const out = markdownToDiscord(REALISTIC_SUMMARY);
     assert.match(out, /^\*\*Assessment:\*\* Regional/);
@@ -289,5 +322,25 @@ describe('realistic AI summary — cross-channel smoke test', () => {
     // Discord is told the raw markdown — it should NOT have the escaped entities
     assert.match(out, /<unknown>/);
     assert.match(out, / & still/);
+  });
+});
+
+describe('section headers across scripts', () => {
+  it('section headers are detected for accented and Cyrillic labels', () => {
+    assert.match(markdownToTelegramHtml('Évaluation: le détroit reste ouvert.'), /<b>Évaluation:<\/b> le détroit/);
+    assert.match(markdownToTelegramHtml('Оценка: пролив открыт.'), /<b>Оценка:<\/b> пролив/);
+    assert.match(markdownToEmailHtml('Signaux à surveiller: x'), />Signaux à surveiller:<\/strong> x/);
+    assert.match(markdownToSlackMrkdwn('Ausblick: y'), /\*Ausblick:\* y/);
+    assert.match(markdownToDiscord('Перспектива: z'), /\*\*Перспектива:\*\* z/);
+  });
+
+  it('ASCII header behaviour is unchanged', () => {
+    assert.match(markdownToTelegramHtml('Assessment: steady.'), /<b>Assessment:<\/b> steady\./);
+    assert.match(markdownToSlackMrkdwn('Signals to watch: a'), /\*Signals to watch:\* a/);
+    assert.doesNotMatch(markdownToTelegramHtml('note: lower case'), /<b>/);
+  });
+
+  it('a full-width colon is accepted', () => {
+    assert.match(markdownToTelegramHtml('Évaluation： ouvert'), /<b>Évaluation:<\/b> ouvert/);
   });
 });

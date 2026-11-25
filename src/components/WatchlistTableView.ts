@@ -17,8 +17,19 @@
 
 import { escapeHtml } from '@/utils/sanitize';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { bindActivationKeys } from '@/utils/activation';
 
 const VIRTUALIZE_ROW_THRESHOLD = 100;
+
+function ariaSortAttr(sortKey: string, activeSort: string): string {
+  if (sortKey !== activeSort) return '';
+  const direction = activeSort.endsWith('-asc')
+    ? 'ascending'
+    : activeSort.endsWith('-desc')
+      ? 'descending'
+      : 'none';
+  return ` aria-sort="${direction}"`;
+}
 // Unscaled base for the `--watchlist-row-height` custom property in panels.css.
 // Spacer generation uses this base; bind() measures the rendered row after
 // global or per-panel scaling for exact scroll-to-index mapping.
@@ -81,6 +92,8 @@ export interface WatchlistConfig<T> {
   // Shown when no items match the current filter/search.
   emptyMessage?: string;
   searchPlaceholder?: string;
+  // Id of the element that names the table's scroll region (the panel title).
+  labelledBy?: string;
 }
 
 export class WatchlistTableView<T> {
@@ -99,6 +112,9 @@ export class WatchlistTableView<T> {
   private scaleObservationGeneration = 0;
   private lastMeasuredVirtualRowHeight: number | null = null;
   private lastMeasuredTableHeaderHeight: number | null = null;
+  // Keyboard activation is delegated on the owning panel's stable content
+  // node so it survives innerHTML replace and same-HTML short-circuits.
+  private activationRoot: HTMLElement | null = null;
   private state: {
     sort: string;
     filter: string;
@@ -160,6 +176,7 @@ export class WatchlistTableView<T> {
       : '';
     const controls = this.renderControls();
     const tableBody = this.renderTableBody(list, start);
+    const labelledBy = this.config.labelledBy ? ` aria-labelledby="${escapeHtml(this.config.labelledBy)}"` : '';
     const headers = this.config.columns.map((col) => {
       const sortKey = col.sortable ? (col.sortOptionKey || col.key) : '';
       // Build a SINGLE class string — pre-fix this code emitted two
@@ -172,15 +189,18 @@ export class WatchlistTableView<T> {
       if (col.align === 'right') classes.push('watchlist-th-right');
       const classAttr = classes.length ? ` class="${classes.join(' ')}"` : '';
       const sortAttr = sortKey ? ` data-sortkey="${escapeHtml(sortKey)}"` : '';
+      const sortA11yAttr = sortKey
+        ? ` tabindex="0"${ariaSortAttr(sortKey, this.state.sort)}`
+        : '';
       const activeSortIndicator = sortKey && sortKey === this.state.sort ? ' ↓' : '';
-      return `<th${classAttr}${sortAttr}>${escapeHtml(col.label)}${activeSortIndicator}</th>`;
+      return `<th scope="col"${classAttr}${sortAttr}${sortA11yAttr}>${escapeHtml(col.label)}${activeSortIndicator}</th>`;
     }).join('');
     return `
       <div class="watchlist-table-view" data-watchlist-totalrows="${list.length}" data-watchlist-renderedrows="${this.getRenderedRowCount(list, start)}">
         ${intro}
         ${controls}
-        <div class="watchlist-table-scroll" data-watchlist-scroll="1">
-          <table class="watchlist-table">
+        <div class="watchlist-table-scroll table-scroll" data-watchlist-scroll="1" role="group" tabindex="0"${labelledBy}>
+          <table class="wm-table watchlist-table">
             <thead><tr>${headers}</tr></thead>
             <tbody>${tableBody}</tbody>
           </table>
@@ -217,7 +237,7 @@ export class WatchlistTableView<T> {
     if (baseHeight + extraHeight <= 0) return '';
     const extra = extraHeight > 0 ? ` + ${extraHeight}px` : '';
     const height = `calc(${baseHeight}px * var(--wm-panel-effective-scale, 1)${extra})`;
-    return `<tr class="watchlist-virtual-spacer watchlist-virtual-spacer-${position}" aria-hidden="true"><td colspan="${this.config.columns.length}" style="height:${height};padding:0;border:0"></td></tr>`;
+    return `<tr class="watchlist-virtual-spacer watchlist-virtual-spacer-${position}" aria-hidden="true"><td colspan="${this.config.columns.length}" style="height:${height}"></td></tr>`;
   }
 
   private shouldVirtualize(list: T[]): boolean {
@@ -279,7 +299,7 @@ export class WatchlistTableView<T> {
           data-watchlist-search="1">
         <div class="watchlist-control-row">
           <div class="watchlist-pills">${pills}</div>
-          <select class="watchlist-sort" data-watchlist-sort="1">${sortOpts}</select>
+          <select class="watchlist-sort" data-watchlist-sort="1" aria-label="Sort watchlist">${sortOpts}</select>
         </div>
       </div>
     `;
@@ -292,7 +312,7 @@ export class WatchlistTableView<T> {
       const alignClass = col.align === 'right' ? ' class="watchlist-td-right"' : '';
       return `<td${alignClass}>${col.cell(item)}</td>`;
     }).join('');
-    const row = `<tr class="watchlist-row${isExpanded ? ' watchlist-row-expanded' : ''}" data-rowkey="${escapeHtml(key)}">${cells}</tr>`;
+    const row = `<tr class="watchlist-row${isExpanded ? ' watchlist-row-expanded' : ''}" data-rowkey="${escapeHtml(key)}" tabindex="0" aria-expanded="${isExpanded ? 'true' : 'false'}">${cells}</tr>`;
     if (!isExpanded) return row;
     const detail = this.config.renderDetail(item);
     return `${row}<tr class="watchlist-detail-row"><td colspan="${this.config.columns.length}">${detail}</td></tr>`;
@@ -332,7 +352,20 @@ export class WatchlistTableView<T> {
     return list;
   }
 
+  private bindingController: AbortController | null = null;
+
   public bind(root: HTMLElement, onRerender: () => void): void {
+    if (this.activationRoot !== root) {
+      this.activationRoot = root;
+      // Bind on the panel content, not the table: `closest` still finds
+      // rows/headers after a replace, and the helper is idempotent per
+      // root+selector so a same-HTML short-circuit cannot stack listeners.
+      bindActivationKeys(root, '.watchlist-row');
+      bindActivationKeys(root, '.watchlist-th-sortable');
+    }
+    this.bindingController?.abort();
+    this.bindingController = new AbortController();
+    const { signal } = this.bindingController;
     this.disconnectScaleObserver();
     const rootEl = root.querySelector('.watchlist-table-view') as HTMLElement | null;
     if (!rootEl) return;
@@ -361,7 +394,7 @@ export class WatchlistTableView<T> {
           this.state.expandedKey = key;
         }
         onRerender();
-      });
+      }, { signal });
     }
 
     // Sortable header click → set sort option, rerender.
@@ -376,7 +409,7 @@ export class WatchlistTableView<T> {
           this.resetVirtualWindow();
           onRerender();
         }
-      });
+      }, { signal });
     });
 
     // Filter pill click.
@@ -388,7 +421,7 @@ export class WatchlistTableView<T> {
           this.resetVirtualWindow();
           onRerender();
         }
-      });
+      }, { signal });
     });
 
     // Sort dropdown change.
@@ -398,7 +431,7 @@ export class WatchlistTableView<T> {
         this.state.sort = sortSelect.value;
         this.resetVirtualWindow();
         onRerender();
-      });
+      }, { signal });
     }
 
     const scrollEl = rootEl.querySelector('[data-watchlist-scroll="1"]') as HTMLElement | null;
@@ -444,7 +477,7 @@ export class WatchlistTableView<T> {
           if (generation !== this.scaleObservationGeneration || !rootEl.isConnected) return;
           this.updateVirtualWindow(scrollEl, tbodyEl, rootEl, rowHeight);
         });
-      }, { passive: true });
+      }, { passive: true, signal });
 
       const reconcileScaledRows = (): void => {
         if (this.scaleRafGeneration === generation) return;
@@ -511,20 +544,35 @@ export class WatchlistTableView<T> {
       // element before rerender. Detection: state.search is non-empty AND
       // the input has the placeholder/value mismatch handled by setting
       // selectionStart from the current value length.
-      if (this.searchWasFocused) {
-        searchInput.focus();
-        const pos = this.state.search.length;
-        try { searchInput.setSelectionRange(pos, pos); } catch { /* ignore */ }
-        this.searchWasFocused = false;
+      // A same-markup commit rebinds without replacing the input, so it can
+      // still be the active element here.
+      const active = document.activeElement;
+      if (this.searchWasFocused && active !== searchInput) {
+        if (active && active !== document.body) {
+          // The input left the DOM without a table render behind it, and the
+          // user has since focused something else. Do not take focus back.
+          this.searchWasFocused = false;
+        } else {
+          searchInput.focus();
+          const pos = this.state.search.length;
+          try { searchInput.setSelectionRange(pos, pos); } catch { /* ignore */ }
+        }
       }
       searchInput.addEventListener('input', () => {
         this.state.search = searchInput.value;
         this.resetVirtualWindow();
         this.searchWasFocused = true;
         onRerender();
-      });
-      searchInput.addEventListener('focus', () => { this.searchWasFocused = true; });
-      searchInput.addEventListener('blur', () => { this.searchWasFocused = false; });
+      }, { signal });
+      searchInput.addEventListener('focus', () => { this.searchWasFocused = true; }, { signal });
+      // Chrome fires blur while a content commit is removing the focused
+      // input, before bind() runs for the new one. Only a blur that leaves the
+      // input in the document means the user moved focus away.
+      searchInput.addEventListener('blur', () => {
+        queueMicrotask(() => {
+          if (searchInput.isConnected) this.searchWasFocused = false;
+        });
+      }, { signal });
     }
   }
 
@@ -693,6 +741,7 @@ export class WatchlistTableView<T> {
   }
 
   public destroy(): void {
+    this.bindingController?.abort();
     this.disconnectScaleObserver();
   }
 

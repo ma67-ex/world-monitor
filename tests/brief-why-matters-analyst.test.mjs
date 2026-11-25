@@ -11,7 +11,7 @@
  * Run: node --test tests/brief-why-matters-analyst.test.mjs
  */
 
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { generateWhyMatters } from '../scripts/lib/brief-llm.mjs';
@@ -46,7 +46,8 @@ async function invokeHandlerWithCachedEnvelope(
   envelope,
   providerCompletion = null,
   primary = 'gemini',
-  fallbackProviderCompletion = null,
+  requestOverrides = {},
+  extraEnv = {},
 ) {
   const previousEnv = Object.fromEntries(HANDLER_ENV_KEYS.map((key) => [key, process.env[key]]));
   const originalFetch = globalThis.fetch;
@@ -60,7 +61,7 @@ async function invokeHandlerWithCachedEnvelope(
     delete process.env[key];
   }
   if (providerCompletion) process.env.OPENROUTER_API_KEY = 'or-test-key';
-  if (fallbackProviderCompletion) process.env.GROQ_API_KEY = 'groq-test-key';
+  Object.assign(process.env, extraEnv);
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method || 'GET';
@@ -81,12 +82,6 @@ async function invokeHandlerWithCachedEnvelope(
         headers: { 'Content-Type': 'application/json' },
       });
     }
-    if (url === 'https://api.groq.com/openai/v1/chat/completions' && fallbackProviderCompletion) {
-      return new Response(JSON.stringify(fallbackProviderCompletion), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
     throw new Error(`unexpected fetch ${method} ${url}`);
   };
 
@@ -97,8 +92,9 @@ async function invokeHandlerWithCachedEnvelope(
       headers: {
         Authorization: 'Bearer test-relay-secret',
         'Content-Type': 'application/json',
+        ...requestOverrides.headers,
       },
-      body: JSON.stringify({ story: story() }),
+      body: requestOverrides.body ?? JSON.stringify({ story: story() }),
     });
     const response = await handler(request);
     return { response, body: await response.json(), fetchCalls };
@@ -129,33 +125,8 @@ function story(overrides = {}) {
 
 describe('normalizeCountryToIso2', () => {
   let normalize;
-  it('loads from server/_shared/country-normalize.ts via tsx or compiled', async () => {
-    // The module is .ts; in the repo's test setup, node 22 can load .ts
-    // via tsx. If direct import fails under the test runner, fall back
-    // to running the logic inline by importing the JSON and a mirror
-    // function. The logic is trivial so this isn't a flaky compromise.
-    try {
-      const mod = await import('../server/_shared/country-normalize.ts');
-      normalize = mod.normalizeCountryToIso2;
-    } catch {
-      const { default: COUNTRY_NAMES } = await import('../shared/country-names.json', {
-        with: { type: 'json' },
-      });
-      const ISO2_SET = new Set(Object.values(COUNTRY_NAMES));
-      normalize = (raw) => {
-        if (typeof raw !== 'string') return null;
-        const trimmed = raw.trim();
-        if (trimmed === '') return null;
-        if (trimmed.toLowerCase() === 'global') return null;
-        if (/^[A-Za-z]{2}$/.test(trimmed)) {
-          const upper = trimmed.toUpperCase();
-          return ISO2_SET.has(upper) ? upper : null;
-        }
-        const lookup = COUNTRY_NAMES[trimmed.toLowerCase()];
-        return typeof lookup === 'string' ? lookup : null;
-      };
-    }
-    assert.ok(typeof normalize === 'function');
+  before(async () => {
+    ({ normalizeCountryToIso2: normalize } = await import('../server/_shared/country-normalize.ts'));
   });
 
   it('passes through valid ISO2 case-insensitively', () => {
@@ -199,10 +170,32 @@ describe('normalizeCountryToIso2', () => {
   });
 });
 
+describe('displayNameForIso2', () => {
+  it('resolves non-tier-1 codes such as Norway instead of leaking the ISO code', async () => {
+    const { displayNameForIso2 } = await import('../server/_shared/country-normalize.ts');
+    assert.equal(displayNameForIso2('NO'), 'Norway');
+    assert.equal(displayNameForIso2('no'), 'Norway');
+    assert.equal(displayNameForIso2('US'), 'United States');
+    assert.equal(displayNameForIso2('GB'), 'United Kingdom');
+    assert.equal(displayNameForIso2('PS'), 'Palestinian Territories');
+    assert.equal(displayNameForIso2('CD'), 'Congo - Kinshasa');
+    assert.equal(displayNameForIso2('LA'), 'Laos');
+    assert.equal(displayNameForIso2('KR'), 'South Korea');
+    assert.equal(displayNameForIso2('ZZ'), null);
+  });
+});
+
 // ── Cache-key stability ──────────────────────────────────────────────────
 
 describe('cache key identity', () => {
-  it('hashBriefStory stable across the 5-field material', async () => {
+  it('uses an unambiguous tuple and a full SHA-256 digest', async () => {
+    const a = await hashBriefStory(story({ headline: 'a||b', source: 'c' }));
+    const b = await hashBriefStory(story({ headline: 'a', source: 'b||c' }));
+    assert.notEqual(a, b);
+    assert.match(a, /^[a-f0-9]{64}$/);
+  });
+
+  it('hashBriefStory stable across the six-field material', async () => {
     const a = await hashBriefStory(story());
     const b = await hashBriefStory(story());
     assert.equal(a, b);
@@ -210,7 +203,7 @@ describe('cache key identity', () => {
 
   it('hashBriefStory differs when any hash-field differs', async () => {
     const baseline = await hashBriefStory(story());
-    for (const f of ['headline', 'source', 'threatLevel', 'category', 'country']) {
+    for (const f of ['headline', 'source', 'threatLevel', 'category', 'country', 'description']) {
       const h = await hashBriefStory(story({ [f]: `${story()[f]}X` }));
       assert.notEqual(h, baseline, `${f} must be part of cache identity`);
     }
@@ -218,7 +211,7 @@ describe('cache key identity', () => {
 });
 
 describe('brief-why-matters Edge cache acceptance', () => {
-  it('serves a complete v10 envelope as a cache hit', async () => {
+  it('serves a complete v11 envelope as a cache hit', async () => {
     const whyMatters = 'The ruling keeps the 2027 race open while reshaping coalition strategy.';
     const { response, body, fetchCalls } = await invokeHandlerWithCachedEnvelope({
       whyMatters,
@@ -233,7 +226,7 @@ describe('brief-why-matters Edge cache acceptance', () => {
     assert.equal(fetchCalls.length, 1, 'a valid cache hit must not call an LLM provider');
   });
 
-  it('treats a clipped v10 envelope as a miss when regeneration fails', async () => {
+  it('treats a clipped v11 envelope as a miss when regeneration fails', async () => {
     const { response, body, fetchCalls } = await invokeHandlerWithCachedEnvelope({
       whyMatters: ANALYST_MAX_TOKEN_CLIP,
       producedBy: 'analyst',
@@ -281,7 +274,7 @@ describe('brief-why-matters Edge cache acceptance', () => {
     assert.equal(
       fetchCalls.some(({ url }) => url.endsWith('/pipeline')),
       true,
-      'a stop-finished complete response should populate v10',
+      'a stop-finished complete response should populate v11',
     );
   });
 
@@ -305,10 +298,7 @@ describe('brief-why-matters Edge cache acceptance', () => {
     );
   });
 
-  it('walks the configured provider chain after a length-limited completion on both paths', async () => {
-    const fallback =
-      'The ruling changes alliance planning across Europe while forcing policymakers to reassess regional commitments. ' +
-      'That shift could alter near-term diplomatic and defense priorities.';
+  it('does not fall back to Groq after a length-limited completion on either path (#8885)', async () => {
     const clippedCompletion = {
       choices: [{
         message: { content: ABBREVIATION_LENGTH_CLIP },
@@ -316,31 +306,25 @@ describe('brief-why-matters Edge cache acceptance', () => {
       }],
       usage: { total_tokens: 120, completion_tokens: 80 },
     };
-    const fallbackCompletion = {
-      choices: [{ message: { content: fallback }, finish_reason: 'stop' }],
-      usage: { total_tokens: 75, completion_tokens: 35 },
-    };
 
     for (const primary of ['gemini', 'analyst']) {
       const { response, body, fetchCalls } = await invokeHandlerWithCachedEnvelope(
         null,
         clippedCompletion,
         primary,
-        fallbackCompletion,
+        {},
+        { GROQ_API_KEY: 'stale-groq-key' },
       );
 
       assert.equal(response.status, 200);
-      assert.equal(body.whyMatters, fallback);
-      assert.equal(body.producedBy, primary);
+      assert.equal(body.whyMatters, null);
+      assert.equal(body.producedBy, null);
       assert.deepEqual(
         fetchCalls
           .filter(({ url, method }) => method === 'POST' && url.includes('/chat/completions'))
           .map(({ url }) => url),
-        [
-          'https://openrouter.ai/api/v1/chat/completions',
-          'https://api.groq.com/openai/v1/chat/completions',
-        ],
-        `${primary} must retry the fallback provider in-request`,
+        ['https://openrouter.ai/api/v1/chat/completions'],
+        `${primary} must not send the prompt to Groq even when GROQ_API_KEY is still set`,
       );
     }
   });
@@ -685,12 +669,6 @@ describe('endpoint validation contract', () => {
   // test regression on the endpoint flow (see "endpoint end-to-end" below).
   const VALID_THREAT = new Set(['critical', 'high', 'medium', 'low']);
   const CAPS = { headline: 400, source: 120, category: 80, country: 80 };
-  // Must match `api/internal/_brief-why-matters.ts:116` — bumped to 8192 in
-  // PR #3269 to accommodate v2 output + description. If this ever drifts
-  // again, the bloated-fixture assertion below silently passes for
-  // payloads in the (OLD_VALUE, NEW_VALUE] range that the real endpoint
-  // now accepts (greptile P2, PR #3281).
-  const MAX_BODY_BYTES = 8192;
 
   function validate(raw) {
     if (!raw || typeof raw !== 'object') return { ok: false, msg: 'body' };
@@ -708,10 +686,6 @@ describe('endpoint validation contract', () => {
       if (s.country.length > CAPS.country) return { ok: false, msg: 'country-length' };
     }
     return { ok: true };
-  }
-
-  function measureBytes(obj) {
-    return new TextEncoder().encode(JSON.stringify(obj)).byteLength;
   }
 
   it('accepts a valid payload', () => {
@@ -752,21 +726,33 @@ describe('endpoint validation contract', () => {
     assert.deepEqual(validate({ story: withoutCountry }), { ok: true });
   });
 
-  it('body cap catches oversize payloads (both Content-Length and post-read)', () => {
-    const bloated = {
+  it('rejects oversize payloads through both endpoint body-cap paths', async () => {
+    const cachedEnvelope = {
+      whyMatters: 'The ruling keeps the 2027 race open while reshaping coalition strategy.',
+      producedBy: 'analyst',
+      at: '2026-07-10T00:00:00.000Z',
+    };
+    const oversizedBody = JSON.stringify({
       story: {
         ...story(),
-        // Artificial oversize payload — would need headline cap bypassed
-        // to reach in practice, but the total body-byte cap must still fire.
-        // Sized well above MAX_BODY_BYTES (8192) so a future bump doesn't
-        // silently invalidate the assertion.
         extra: 'x'.repeat(10_000),
       },
-    };
-    assert.ok(measureBytes(bloated) > MAX_BODY_BYTES, 'fixture is oversize');
-    // Note: body-cap is enforced at the handler level, not the validator.
-    // We assert the invariant about the measure here; the handler path is
-    // covered by the endpoint smoke test below.
+    });
+
+    for (const [path, requestOverrides] of [
+      ['Content-Length', { headers: { 'Content-Length': '10000' } }],
+      ['post-read byte length', { body: oversizedBody }],
+    ]) {
+      const { response, body, fetchCalls } = await invokeHandlerWithCachedEnvelope(
+        cachedEnvelope,
+        null,
+        'gemini',
+        requestOverrides,
+      );
+      assert.equal(response.status, 400, path);
+      assert.equal(body.error, 'body exceeds 8192 bytes', path);
+      assert.equal(fetchCalls.length, 0, `${path} must reject before cache access`);
+    }
   });
 });
 
@@ -774,10 +760,9 @@ describe('endpoint validation contract', () => {
 
 describe('buildAnalystWhyMattersPrompt — shape and budget', () => {
   let builder;
-  it('loads', async () => {
+  before(async () => {
     const mod = await import('../server/worldmonitor/intelligence/v1/brief-why-matters-prompt.ts');
     builder = mod.buildAnalystWhyMattersPrompt;
-    assert.ok(typeof builder === 'function');
   });
 
   it('uses the analyst v2 system prompt (multi-sentence, grounded, varied) + date-grounding line', async () => {
@@ -904,11 +889,10 @@ describe('buildAnalystWhyMattersPrompt — shape and budget', () => {
 describe('sectionsForCategory — structural relevance gating', () => {
   let sectionsForCategory;
   let builder;
-  it('loads', async () => {
+  before(async () => {
     const mod = await import('../server/worldmonitor/intelligence/v1/brief-why-matters-prompt.ts');
     sectionsForCategory = mod.sectionsForCategory;
     builder = mod.buildAnalystWhyMattersPrompt;
-    assert.ok(typeof sectionsForCategory === 'function');
   });
 
   it('market/commodity/finance → includes marketData + forecasts, excludes riskScores', () => {
@@ -1208,79 +1192,55 @@ describe('sectionsForCategory — structural relevance gating', () => {
 // ── Env flag parsing (endpoint config resolution) ─────────────────────
 
 describe('endpoint env flag parsing', () => {
-  // Mirror the endpoint's readConfig logic so a drift between this
-  // expectation and the handler fails one test suite.
-  function readConfig(env) {
-    const rawPrimary = (env.BRIEF_WHY_MATTERS_PRIMARY ?? '').trim().toLowerCase();
-    let primary;
-    let invalidPrimaryRaw = null;
-    if (rawPrimary === '' || rawPrimary === 'analyst') primary = 'analyst';
-    else if (rawPrimary === 'gemini') primary = 'gemini';
-    else {
-      primary = 'gemini';
-      invalidPrimaryRaw = rawPrimary;
-    }
-    const shadowEnabled = env.BRIEF_WHY_MATTERS_SHADOW === '1';
-    const rawSample = env.BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT;
-    let samplePct = 100;
-    let invalidSamplePctRaw = null;
-    if (rawSample !== undefined && rawSample !== '') {
-      const parsed = Number.parseInt(rawSample, 10);
-      if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 100 && String(parsed) === rawSample.trim()) {
-        samplePct = parsed;
-      } else {
-        invalidSamplePctRaw = rawSample;
-      }
-    }
-    return { primary, invalidPrimaryRaw, shadowEnabled, samplePct, invalidSamplePctRaw };
+  async function configFor(env) {
+    const { readConfig } = await import('../api/internal/brief-why-matters.ts');
+    return readConfig(env);
   }
 
-  it('defaults: primary=analyst, shadow=OFF (opt-in), sample=100', () => {
-    const c = readConfig({});
+  it('defaults: primary=analyst, shadow=OFF (opt-in), sample=100', async () => {
+    const c = await configFor({});
     assert.equal(c.primary, 'analyst');
     assert.equal(c.shadowEnabled, false, 'shadow must be opt-in — default-on silently doubled gemini spend (#4893)');
-    assert.equal(c.samplePct, 100);
+    assert.equal(c.sampleHardRoll('00000000ffffffff'), true);
   });
 
-  it('PRIMARY=gemini is honoured (kill switch)', () => {
-    const c = readConfig({ BRIEF_WHY_MATTERS_PRIMARY: 'gemini' });
+  it('PRIMARY=gemini is honoured (kill switch)', async () => {
+    const c = await configFor({ BRIEF_WHY_MATTERS_PRIMARY: 'gemini' });
     assert.equal(c.primary, 'gemini');
   });
 
-  it('PRIMARY=analust (typo) falls back to gemini + invalidPrimaryRaw set', () => {
-    const c = readConfig({ BRIEF_WHY_MATTERS_PRIMARY: 'analust' });
+  it('PRIMARY=analust (typo) falls back to gemini + invalidPrimaryRaw set', async () => {
+    const c = await configFor({ BRIEF_WHY_MATTERS_PRIMARY: 'analust' });
     assert.equal(c.primary, 'gemini');
     assert.equal(c.invalidPrimaryRaw, 'analust');
   });
 
-  it('SHADOW enabled only by exact "1"', () => {
+  it('SHADOW enabled only by exact "1"', async () => {
     for (const v of ['yes', '0', 'true', '', 'on']) {
-      assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW: v }).shadowEnabled, false, `value=${v}`);
+      const c = await configFor({ BRIEF_WHY_MATTERS_SHADOW: v });
+      assert.equal(c.shadowEnabled, false, `value=${v}`);
     }
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW: '1' }).shadowEnabled, true);
+    const on = await configFor({ BRIEF_WHY_MATTERS_SHADOW: '1' });
+    assert.equal(on.shadowEnabled, true);
   });
 
-  it('handler source uses the same opt-in expression as this mirror (drift pin)', async () => {
-    // The mirror above is handwritten; without this pin, flipping the
-    // handler default would leave these expectations silently asserting
-    // the wrong semantics (that is exactly how default-on shipped in
-    // the first place — #4893).
-    const { readFile } = await import('node:fs/promises');
-    const src = await readFile(new URL('../api/internal/_brief-why-matters.ts', import.meta.url), 'utf8');
-    assert.ok(
-      src.includes("env.BRIEF_WHY_MATTERS_SHADOW === '1'"),
-      'brief-why-matters.ts must gate shadow with the opt-in expression mirrored in readConfig()',
-    );
-  });
+  it('SAMPLE_PCT accepts integer 0–100; invalid stays at a full sample', async () => {
+    const quarter = await configFor({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '25' });
+    assert.equal(quarter.invalidSamplePctRaw, null);
+    assert.equal(quarter.sampleHardRoll('00000000ffffffff'), true, 'bucket 0 is inside 25%');
+    assert.equal(quarter.sampleHardRoll('00000019ffffffff'), false, 'bucket 25 is outside 25%');
 
-  it('SAMPLE_PCT accepts integer 0–100; invalid → 100', () => {
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '25' }).samplePct, 25);
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '0' }).samplePct, 0);
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '100' }).samplePct, 100);
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '101' }).samplePct, 100);
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: 'foo' }).samplePct, 100);
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '-5' }).samplePct, 100);
-    assert.equal(readConfig({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '50.5' }).samplePct, 100);
+    const none = await configFor({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '0' });
+    assert.equal(none.sampleHardRoll('00000000ffffffff'), false);
+
+    const all = await configFor({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: '100' });
+    assert.equal(all.sampleHardRoll('ffffffff00000000'), true);
+
+    for (const raw of ['101', 'foo', '-5', '50.5']) {
+      const c = await configFor({ BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT: raw });
+      assert.equal(c.invalidSamplePctRaw, raw, raw);
+      assert.equal(c.sampleHardRoll('ffffffff00000000'), true, `${raw} keeps the full sample`);
+    }
   });
 });
 

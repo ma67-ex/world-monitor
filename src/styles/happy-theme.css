@@ -23,11 +23,18 @@
   /* Text */
   --text: #2D3A2E;
   --text-secondary: #4A5A4C;
-  --text-dim: #6B7A6D;
-  --text-muted: #8A9A8C;
-  --text-faint: #A8B4AA;
-  --text-ghost: #C0C8C2;
+  --text-dim: #5F6E61; /* was #6B7A6D (4.3:1 vs --bg); AA 5.2:1 */
+  --text-muted: #647165; /* was #8A9A8C (2.8:1); AA 4.9:1 */
+  --text-faint: #69756B; /* was #A8B4AA (2.1:1); AA 4.6:1 */
+  --text-ghost: #84908A; /* was #C0C8C2 (1.6:1); 3.2:1 — decorative/large text only, never body copy */
   --accent: #3D4A3E;
+
+  /* The happy variant defaults to this light surface even without data-theme. */
+  --billing-tone-active: #15803d;
+  --billing-tone-attention: #a16207;
+  --billing-tone-ending: #2563eb;
+  --billing-tone-ended: #b91c1c;
+  --billing-tone-unknown: #4b5563;
 
   /* Overlays & shadows */
   --overlay-subtle: rgba(107, 143, 94, 0.03);
@@ -94,6 +101,19 @@
   --red: #C48B9F;
   --green: #6B8F5E;
   --yellow: #C4A35A;
+
+  /* Keep this palette for text too: undo main.css's light -text shades. */
+  --red-text: initial;
+  --green-text: initial;
+  --yellow-text: initial;
+  --semantic-critical-text: initial;
+  --semantic-high-text: initial;
+  --semantic-elevated-text: initial;
+  --semantic-positive-text: initial;
+  --semantic-low-text: initial;
+  --status-live-text: initial;
+  --status-cached-text: initial;
+  --status-unavailable-text: initial;
 }
 
 /* ---------- Happy Dark Mode ---------- */
@@ -114,10 +134,17 @@
   --text: #E8E4DC;
   --text-secondary: #D0CCC4;
   --text-dim: #A0A098;
-  --text-muted: #808880;
-  --text-faint: #606860;
-  --text-ghost: #485048;
+  --text-muted: #949C94; /* was #808880 (3.8:1 on --surface); AA 4.9:1 */
+  --text-faint: #8F978F; /* was #606860 (2.4:1); AA 4.6:1 */
+  --text-ghost: #78807A; /* was #485048 (1.7:1); 3.4:1 — decorative/large text only, never body copy */
   --accent: #E8E4DC;
+
+  /* Lighter tones retain AA contrast on the happy dark panel surface. */
+  --billing-tone-active: #8BAF7A;
+  --billing-tone-attention: #D4B36A;
+  --billing-tone-ending: #8BB5D4;
+  --billing-tone-ended: #D49BAF;
+  --billing-tone-unknown: #A0A098;
 
   /* Overlays & shadows */
   --overlay-subtle: rgba(139, 175, 122, 0.03);
@@ -305,14 +332,6 @@
 [data-variant="happy"] .panel-header-error {
   background: rgba(196, 163, 90, 0.12);
   border-bottom-color: rgba(196, 163, 90, 0.30);
-}
-
-/* ==========================================================
-   Happy Download Banner — Rounded and warm
-   ========================================================== */
-[data-variant="happy"] .wm-dl-panel {
-  border-radius: 0 0 0 14px;
-  border-left-color: var(--green);
 }
 
 /* ==========================================================
@@ -530,7 +549,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   gap: 8px;
-  padding: 10px;
+  padding: 10px 0;
 }
 
 /* ---------- Counter card ---------- */
@@ -688,8 +707,17 @@
   animation: happy-ticker-scroll 120s linear infinite;
 }
 
-[data-variant="happy"] .breakthroughs-ticker-wrapper:hover .breakthroughs-ticker-track {
+/* Pause on keyboard focus as well as hover — hover-only pause is unreachable
+   for keyboard and touch users (WCAG 2.2.2). */
+[data-variant="happy"] .breakthroughs-ticker-wrapper:hover .breakthroughs-ticker-track,
+[data-variant="happy"] .breakthroughs-ticker-wrapper:focus-within .breakthroughs-ticker-track {
   animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-variant="happy"] .breakthroughs-ticker-track {
+    animation: none;
+  }
 }
 
 [data-variant="happy"] .ticker-item {
@@ -922,7 +950,7 @@
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
-  padding: 12px;
+  padding: 12px 0;
 }
 
 @media (max-width: 768px) {
@@ -1357,3 +1385,13 @@
   border-color: var(--yellow);
   background: rgba(196, 163, 90, 0.12);
 }
+
+/* ---------- Climate Anomalies deltas (light) ----------
+   A happy user can add Climate Anomalies from settings. The deltas are 11px
+   text, and the light palette's fills are too pale for text on cream
+   (2.4–3.7:1), so they take darker shades of the same hues (5.3:1+).
+   Dark mode keeps the palette, which already clears 4.5:1. */
+:root[data-variant="happy"]:not([data-theme="dark"]) .climate-warm { color: #4F6B43; }
+:root[data-variant="happy"]:not([data-theme="dark"]) .climate-cold,
+:root[data-variant="happy"]:not([data-theme="dark"]) .climate-wet { color: #8E5168; }
+:root[data-variant="happy"]:not([data-theme="dark"]) .climate-dry { color: #52703F; }

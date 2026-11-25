@@ -1,6 +1,6 @@
-// Wiring tests for issue #5694: the three intel-history collector seeders
-// (conflict/acled-intel, military/cross-strait-activity, energy/intelligence)
-// must project their published payloads into history records and append them
+// Wiring tests for issues #5694 and #11245: every intel-history collector
+// (conflict/acled-intel, military/cross-strait-activity, energy/intelligence,
+// and the #11245 set in scripts/_intel-history-collectors.mjs) must project their published payloads into history records and append them
 // post-publish, best-effort. The append hook must NEVER throw: the canonical
 // publish already succeeded, and a throw would skip runSeed's freshness write
 // and crash a healthy run (the seed-gdelt-intel.mjs:286 hazard).
@@ -25,9 +25,42 @@ const {
   energyIntelAfterPublish,
 } = await import('../scripts/seed-energy-intelligence.mjs');
 const {
+  CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS,
+  CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS,
+  CROSS_STRAIT_HISTORY_MAX_RECORDS,
+  appendCrossStraitHistoryArchive,
   buildCrossStraitHistoryRecords,
+  crossStraitActivityLockTtlMs,
   crossStraitHistoryAfterPublish,
 } = await import('../scripts/seed-cross-strait-activity.mjs');
+const { HISTORY_MAX_RECORDS_PER_RUN } = await import('../scripts/_seed-history.mjs');
+// #11245 collectors. Builders live in one module because seed-earthquakes.mjs
+// runs runSeed on import and UCDP has two writers (relay + backup seeder).
+const {
+  aviationHistoryAfterPublish,
+  buildAviationHistoryRecords,
+  buildCyberHistoryRecords,
+  buildEarthquakeHistoryRecords,
+  buildNaturalEventHistoryRecords,
+  buildPortwatchHistoryRecords,
+  buildUcdpHistoryRecords,
+  buildUnrestHistoryRecords,
+  cyberHistoryAfterPublish,
+  earthquakeHistoryAfterPublish,
+  naturalEventHistoryAfterPublish,
+  portwatchHistoryAfterPublish,
+  ucdpHistoryAfterPublish,
+  unrestHistoryAfterPublish,
+} = await import('../scripts/_intel-history-collectors.mjs');
+const {
+  AVIATION_ALERT,
+  CYBER_C2_THREAT,
+  EARTHQUAKE,
+  NATURAL_EVENT,
+  PORTWATCH_DISRUPTION,
+  UCDP_EVENT,
+  UNREST_GDELT_EVENT,
+} = await import('./helpers/intel-history-collector-fixtures.mjs');
 
 const ACLED_EVENT = {
   id: 'acled-SUD12345',
@@ -175,11 +208,159 @@ test('buildCrossStraitHistoryRecords drops observations without id or any date',
   assert.deepEqual(records, []);
 });
 
+test('the guarded Cross-Strait recovery appends the full retained archive in bounded batches', async () => {
+  const batchSizes = [];
+  const result = await appendCrossStraitHistoryArchive({
+    domain: 'military',
+    resource: 'cross-strait-activity',
+    runId: 'run-full-archive',
+    records: Array.from({ length: CROSS_STRAIT_HISTORY_MAX_RECORDS }, (_, index) => ({
+      dedupeKey: `military:cross-strait-activity:mnd-${index}`,
+      title: `Cross-Strait activity ${index}`,
+      occurredAt: Date.parse('2026-09-05') - index * 86_400_000,
+    })),
+  }, {
+    append: async ({ records }) => {
+      batchSizes.push(records.length);
+      return {
+        inserted: records.length,
+        skipped: 0,
+        retracted: 0,
+        chunks: Math.ceil(records.length / 50),
+        abandoned: 0,
+        failedChunks: 0,
+        inputRecords: records.length,
+        normalizedRecords: records.length,
+        droppedRecords: 0,
+      };
+    },
+  });
+
+  assert.deepEqual(batchSizes, [
+    HISTORY_MAX_RECORDS_PER_RUN,
+    HISTORY_MAX_RECORDS_PER_RUN,
+    CROSS_STRAIT_HISTORY_MAX_RECORDS - 2 * HISTORY_MAX_RECORDS_PER_RUN,
+  ]);
+  assert.deepEqual(result, {
+    inserted: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    skipped: 0,
+    retracted: 0,
+    chunks: 8,
+    abandoned: 0,
+    failedChunks: 0,
+    inputRecords: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    normalizedRecords: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    droppedRecords: 0,
+  });
+});
+
+test('the guarded Cross-Strait recovery rejects records beyond canonical retention', async () => {
+  let appendCalls = 0;
+  await assert.rejects(
+    appendCrossStraitHistoryArchive({
+      records: Array.from({ length: CROSS_STRAIT_HISTORY_MAX_RECORDS + 1 }, () => ({})),
+    }, {
+      append: async () => { appendCalls += 1; },
+    }),
+    new RegExp(`${CROSS_STRAIT_HISTORY_MAX_RECORDS + 1} records; maximum is ${CROSS_STRAIT_HISTORY_MAX_RECORDS}`),
+  );
+  assert.equal(appendCalls, 0);
+});
+
+test('full-archive aggregation still reports validation drops to postflight', async () => {
+  const result = await appendCrossStraitHistoryArchive({
+    records: Array.from({ length: HISTORY_MAX_RECORDS_PER_RUN + 1 }, (_, index) => ({
+      dedupeKey: `military:cross-strait-activity:mnd-${index}`,
+      title: `Cross-Strait activity ${index}`,
+      occurredAt: Date.parse('2026-09-05') - index * 86_400_000,
+    })),
+  }, {
+    append: async ({ records }) => ({
+      inserted: Math.max(0, records.length - 1),
+      skipped: 0,
+      retracted: 0,
+      chunks: 1,
+      abandoned: 0,
+      failedChunks: 0,
+      inputRecords: records.length,
+      normalizedRecords: records.length - 1,
+      droppedRecords: 1,
+    }),
+  });
+
+  assert.equal(result.droppedRecords, 2);
+  assert.notEqual(result.inputRecords, result.normalizedRecords);
+});
+
+test('only the guarded one-off extends the Cross-Strait seed lock', () => {
+  assert.equal(crossStraitActivityLockTtlMs({}), CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS);
+  assert.equal(
+    crossStraitActivityLockTtlMs({ WM_ONE_OFF_HISTORY_RECEIPT: '1' }),
+    CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS,
+  );
+});
+
+test('the one-off history hook records one aggregate receipt for the full archive', async () => {
+  const previous = process.env.WM_ONE_OFF_HISTORY_RECEIPT;
+  const batchSizes = [];
+  const healthObservations = [];
+  process.env.WM_ONE_OFF_HISTORY_RECEIPT = '1';
+  try {
+    await crossStraitHistoryAfterPublish({
+      observations: Array.from({ length: CROSS_STRAIT_HISTORY_MAX_RECORDS }, (_, index) => ({
+        ...CROSS_STRAIT_OBSERVATION,
+        id: `mnd-${index}`,
+        sourceId: index < 365 ? 'taiwan-mnd' : 'japan-mod',
+        reportingDay: new Date(Date.parse('2026-09-05') - index * 86_400_000)
+          .toISOString()
+          .slice(0, 10),
+      })),
+    }, { runId: 'run-full-hook' }, {
+      append: async ({ records }) => {
+        batchSizes.push(records.length);
+        return {
+          inserted: records.length,
+          skipped: 0,
+          retracted: 0,
+          chunks: Math.ceil(records.length / 50),
+          abandoned: 0,
+          failedChunks: 0,
+          inputRecords: records.length,
+          normalizedRecords: records.length,
+          droppedRecords: 0,
+        };
+      },
+      recordHealth: async (observation) => { healthObservations.push(observation); },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.WM_ONE_OFF_HISTORY_RECEIPT;
+    else process.env.WM_ONE_OFF_HISTORY_RECEIPT = previous;
+  }
+
+  assert.deepEqual(batchSizes, [
+    HISTORY_MAX_RECORDS_PER_RUN,
+    HISTORY_MAX_RECORDS_PER_RUN,
+    CROSS_STRAIT_HISTORY_MAX_RECORDS - 2 * HISTORY_MAX_RECORDS_PER_RUN,
+  ]);
+  assert.equal(healthObservations.length, 1);
+  assert.equal(healthObservations[0].runId, 'run-full-hook');
+  assert.equal(healthObservations[0].result.inputRecords, CROSS_STRAIT_HISTORY_MAX_RECORDS);
+  assert.equal(healthObservations[0].result.normalizedRecords, CROSS_STRAIT_HISTORY_MAX_RECORDS);
+  assert.equal(healthObservations[0].result.droppedRecords, 0);
+});
+
 const HOOKS = [
   ['conflict', 'acled-intel', conflictIntelAfterPublish, { events: [ACLED_EVENT] }],
   ['energy', 'intelligence', energyIntelAfterPublish, { items: [ENERGY_ITEM] }],
   ['military', 'cross-strait-activity', crossStraitHistoryAfterPublish,
     { observations: [CROSS_STRAIT_OBSERVATION] }],
+  ['conflict', 'ucdp-events', ucdpHistoryAfterPublish, { events: [UCDP_EVENT] }],
+  ['unrest', 'events', unrestHistoryAfterPublish, { events: [UNREST_GDELT_EVENT] }],
+  ['cyber', 'threats', cyberHistoryAfterPublish, { threats: [CYBER_C2_THREAT] }],
+  ['maritime', 'portwatch-disruptions', portwatchHistoryAfterPublish, { events: [PORTWATCH_DISRUPTION] }],
+  ['natural', 'earthquakes', earthquakeHistoryAfterPublish, { earthquakes: [EARTHQUAKE] }],
+  ['natural', 'events', naturalEventHistoryAfterPublish, { events: [NATURAL_EVENT] }],
+  ['aviation', 'intl', aviationHistoryAfterPublish, { alerts: [AVIATION_ALERT] }],
 ];
 
 // The ingest-health recorder (#5736) is the hook's second injectable seam; stub
@@ -327,6 +508,16 @@ const WIRING = [
   ['scripts/seed-conflict-intel.mjs', 'afterPublish: conflictIntelAfterPublish'],
   ['scripts/seed-energy-intelligence.mjs', 'afterPublish: energyIntelAfterPublish'],
   ['scripts/seed-cross-strait-activity.mjs', 'afterPublish: crossStraitHistoryAfterPublish'],
+  ['scripts/seed-unrest-events.mjs', 'afterPublish: unrestHistoryAfterPublish'],
+  ['scripts/seed-cyber-threats.mjs', 'afterPublish: cyberHistoryAfterPublish'],
+  ['scripts/seed-portwatch-disruptions.mjs', 'afterPublish: portwatchHistoryAfterPublish'],
+  ['scripts/seed-earthquakes.mjs', 'afterPublish: withHistoryAfterPublish(earthquakesAfterPublish, earthquakeHistoryAfterPublish)'],
+  ['scripts/seed-natural-events.mjs', 'afterPublish: withHistoryAfterPublish(naturalEventsAfterPublish, naturalEventHistoryAfterPublish)'],
+  ['scripts/seed-aviation.mjs', 'afterPublish: withHistoryAfterPublish(afterPublishIntl, aviationHistoryAfterPublish)'],
+  // UCDP publishes outside runSeed on both writers, so the pin is the call
+  // after the canonical write rather than an opts entry.
+  ['scripts/seed-ucdp-events.mjs', 'await ucdpHistoryAfterPublish(payload,'],
+  ['scripts/ais-relay.cjs', 'await ucdpHistoryAfterPublish(payload,'],
 ];
 
 for (const [file, needle] of WIRING) {
@@ -355,6 +546,13 @@ test('every history dedupeKey is a pure function of the upstream item', () => {
     ['conflict', buildConflictHistoryRecords, { events: [ACLED_EVENT] }],
     ['energy', buildEnergyHistoryRecords, { items: [ENERGY_ITEM] }],
     ['military', buildCrossStraitHistoryRecords, { observations: [CROSS_STRAIT_OBSERVATION] }],
+    ['conflict/ucdp', buildUcdpHistoryRecords, { events: [UCDP_EVENT] }],
+    ['unrest', buildUnrestHistoryRecords, { events: [UNREST_GDELT_EVENT] }],
+    ['cyber', buildCyberHistoryRecords, { threats: [CYBER_C2_THREAT] }],
+    ['maritime', buildPortwatchHistoryRecords, { events: [PORTWATCH_DISRUPTION] }],
+    ['natural/earthquakes', buildEarthquakeHistoryRecords, { earthquakes: [EARTHQUAKE] }],
+    ['natural/events', buildNaturalEventHistoryRecords, { events: [NATURAL_EVENT] }],
+    ['aviation', buildAviationHistoryRecords, { alerts: [AVIATION_ALERT] }],
   ];
 
   for (const [label, build, payload] of CASES) {

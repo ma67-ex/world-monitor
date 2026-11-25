@@ -730,3 +730,156 @@ describe('VisibilityHub', () => {
     hub.destroy();
   });
 });
+
+describe('runLaneWithLease (#6683)', () => {
+  const schedulerRaw = readFileSync(resolve(__dirname, '..', 'src', 'app', 'refresh-scheduler.ts'), 'utf-8');
+  const schedulerSrc = stripTS(schedulerRaw)
+    .replace(/:\s*ReturnType<typeof\s+setTimeout>\s*\|\s*undefined/g, '')
+    .replace(/new Promise<\{ expired: true \}>/g, 'new Promise')
+    .replace(/\s+as\s+const\b/g, '')
+    .replace(/:\s*Promise<boolean\s*\|\s*void>/g, '')
+    .replace(/fn:\s*\(signal\?\)/g, 'fn')
+    .replace(/:\s*AbortSignal\s*\|\s*undefined/g, '')
+    .replace(/:\s*Set<string>/g, '')
+    .replace(/warn:\s*\(message\)\s*=>\s*void\s*=\s*console\.warn/g, 'warn = console.warn');
+
+  function buildRunLaneWithLease(timers) {
+    const leaseBody = extractBody(schedulerSrc, 'runLaneWithLease');
+    const factory = new Function(
+      'setTimeout', 'clearTimeout', 'console',
+      `
+      const LANE_LEASE_FLOOR_MS = 15000;
+      const LANE_LEASE_GRACE_MS = 5000;
+      function laneLeaseMs(intervalMs) { return Math.max(intervalMs, LANE_LEASE_FLOOR_MS) + LANE_LEASE_GRACE_MS; }
+      return async function runLaneWithLease(name, fn, signal, intervalMs, inFlight, warn) { ${leaseBody} };
+      `,
+    );
+    return factory(
+      timers.setTimeout.bind(timers),
+      timers.clearTimeout.bind(timers),
+      console,
+    );
+  }
+
+  it('releases the latch when the callback never settles, and re-runs are possible', async () => {
+    const timers = createFakeTimers();
+    const runLane = buildRunLaneWithLease(timers);
+    const inFlight = new Set();
+    const warns = [];
+    const ac = new AbortController();
+    let started = 0;
+    let passedSignal ;
+    const neverSettles = (sig) => {
+      started += 1;
+      passedSignal = sig;
+      return new Promise(() => {});
+    };
+
+    const first = runLane('lane', neverSettles, ac.signal, 1000, inFlight, (m) => warns.push(m));
+    assert.ok(inFlight.has('lane'), 'latch held while running');
+    assert.ok(passedSignal instanceof AbortSignal, 'a per-run AbortSignal is passed to the callback');
+    assert.notEqual(passedSignal, ac.signal, 'the callback receives a per-run child signal, not the raw parent signal');
+    assert.equal(passedSignal.aborted, false, 'child signal is not aborted before lease expiry');
+    timers.advanceBy(20001);
+    await first;
+    assert.ok(!inFlight.has('lane'), 'latch released despite the callback never settling');
+    assert.equal(started, 1);
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /lease expired after 20000ms/);
+    assert.equal(passedSignal.aborted, true, 'lease expiry aborts the per-run child signal');
+    assert.equal(passedSignal.reason?.name, 'AbortError');
+    assert.match(String(passedSignal.reason?.message), /Refresh lane lease expired/);
+    assert.equal(ac.signal.aborted, false, 'lease expiry does not abort the parent signal');
+
+    const second = runLane('lane', async () => true, undefined, 1000, inFlight, (m) => warns.push(m));
+    assert.equal(await second, true);
+    assert.equal(warns.length, 1, 'healthy re-run does not warn');
+  });
+
+  it('forwards parent signal aborts (both already-aborted and mid-run) and cleans up listeners', async () => {
+    const timers = createFakeTimers();
+    const runLane = buildRunLaneWithLease(timers);
+    const inFlight = new Set();
+
+    // 1. Already-aborted parent signal produces an already-aborted child signal without leaking listeners.
+    const preAborted = new AbortController();
+    const preReason = new DOMException('Tab hidden', 'AbortError');
+    preAborted.abort(preReason);
+    let preChildSignal;
+    await runLane('pre', async (sig) => { preChildSignal = sig; }, preAborted.signal, 1000, inFlight);
+    assert.equal(preChildSignal.aborted, true);
+    assert.equal(preChildSignal.reason, preReason);
+
+    // 2. Mid-run parent abort propagates to the child signal.
+    const midParent = new AbortController();
+    let midChildSignal;
+    let releaseRun;
+    const midPromise = runLane('mid', (sig) => {
+      midChildSignal = sig;
+      return new Promise((resolve) => { releaseRun = resolve; });
+    }, midParent.signal, 1000, inFlight);
+    assert.equal(midChildSignal.aborted, false);
+    const midReason = new DOMException('Loop stopped', 'AbortError');
+    midParent.abort(midReason);
+    assert.equal(midChildSignal.aborted, true);
+    assert.equal(midChildSignal.reason, midReason);
+    releaseRun();
+    await midPromise;
+
+    // 3. Normal settlement and rejection remove the abort listener from a long-lived parent signal.
+    const longLived = new AbortController();
+    const attached = new Set();
+    const origAdd = longLived.signal.addEventListener.bind(longLived.signal);
+    const origRemove = longLived.signal.removeEventListener.bind(longLived.signal);
+    longLived.signal.addEventListener = (type, listener, opts) => {
+      if (type === 'abort') attached.add(listener);
+      return origAdd(type, listener, opts);
+    };
+    longLived.signal.removeEventListener = (type, listener, opts) => {
+      if (type === 'abort') attached.delete(listener);
+      return origRemove(type, listener, opts);
+    };
+
+    await runLane('ok', async () => true, longLived.signal, 1000, inFlight);
+    assert.equal(attached.size, 0, 'abort listener removed after normal settlement');
+
+    await assert.rejects(
+      () => runLane('err', async () => { throw new Error('fail'); }, longLived.signal, 1000, inFlight),
+      /fail/,
+    );
+    assert.equal(attached.size, 0, 'abort listener removed after rejection');
+  });
+
+  it('healthy callback: value passes through, no warn, latch released', async () => {
+    const timers = createFakeTimers();
+    const runLane = buildRunLaneWithLease(timers);
+    const inFlight = new Set();
+    const warns = [];
+    const out = await runLane('lane', async () => false, undefined, 30000, inFlight, (m) => warns.push(m));
+    assert.equal(out, false, 'backoff sentinel passes through untouched');
+    assert.equal(warns.length, 0);
+    assert.ok(!inFlight.has('lane'));
+  });
+
+  it('rejected callback: the rejection propagates and the latch still releases', async () => {
+    const timers = createFakeTimers();
+    const runLane = buildRunLaneWithLease(timers);
+    const inFlight = new Set();
+    const warns = [];
+    await assert.rejects(
+      () => runLane('lane', async () => { throw new Error('boom'); }, undefined, 1000, inFlight, (m) => warns.push(m)),
+      /boom/,
+    );
+    assert.ok(!inFlight.has('lane'));
+    assert.equal(warns.length, 0, 'a real rejection is not a lease expiry');
+  });
+
+  it('an already-latched lane is a no-op', async () => {
+    const timers = createFakeTimers();
+    const runLane = buildRunLaneWithLease(timers);
+    const inFlight = new Set(['lane']);
+    let started = 0;
+    await runLane('lane', async () => { started += 1; }, undefined, 1000, inFlight);
+    assert.equal(started, 0);
+  });
+});

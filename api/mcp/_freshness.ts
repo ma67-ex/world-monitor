@@ -1,6 +1,8 @@
 import type { FreshnessCheck } from './_types';
 // @ts-expect-error — JS module, no declaration file
 import { buildContentFreshnessAssessment, getActiveContentFreshnessActivationWindow } from '../_content-freshness.js';
+// @ts-expect-error — JS module, no declaration file
+import { assessContentAge } from '../_content-age.js';
 
 function parseFiniteRecordCount(raw: unknown): number | null {
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
@@ -50,12 +52,33 @@ export function evaluateFreshness(
     hasAnyValidMeta = true;
     oldestFetchedAt = Math.min(oldestFetchedAt, fetchedAt);
     stale ||= (now - fetchedAt) / 60_000 > check.maxStaleMin;
+    // A failed refresh stamps a fresh fetchedAt while the last good payload
+    // stays served. api/health.js readSeedMeta reads status 'error' as
+    // seedStale and classifyKey reports it as SEED_ERROR; MCP follows so the
+    // two cannot disagree.
+    const { status, sourceState } = meta as { status?: unknown; sourceState?: unknown };
+    stale ||= status === 'error' || (check.honorSourceError === true && sourceState === 'error');
 
     if (check.minRecordCount != null) {
       const recordCount = meta && typeof meta === 'object' && 'recordCount' in meta
         ? parseFiniteRecordCount((meta as { recordCount: unknown }).recordCount)
         : null;
       stale ||= recordCount == null || recordCount < check.minRecordCount;
+    }
+
+    if (check.honorContentAge) {
+      // House-standard content-age contract (#3845 / #7141). Same shared
+      // assessor api/health.js classifyKey uses, so the two surfaces cannot
+      // drift on parsing, on the future-dated rule, or on re-aging: a fresh
+      // fetchedAt with stale observations is stale on both. Without this MCP
+      // answers stale:false for the exact key health calls STALE_CONTENT —
+      // the #6080 divergence on this simpler newestItemAt clock.
+      //
+      // A key that declares honorContentAge but whose seed-meta carries no
+      // maxContentAgeMin gets `null` back — the producer has not opted into
+      // the contract, so there is nothing to age and the check is a no-op.
+      const contentAge = assessContentAge(meta, now);
+      stale ||= contentAge?.contentStale === true;
     }
 
     if (check.requireContentFreshness) {

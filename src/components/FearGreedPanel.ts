@@ -1,7 +1,11 @@
 import { Panel } from './Panel';
+import { createLazyClient, getRpcBaseUrl, rpcFetch } from '@/services/rpc-client';
+import { MarketServiceClient } from '@/services/generated-rpc-clients';
 import { t } from '@/services/i18n';
 import { escapeHtml, unsafeRawHtml } from '@/utils/sanitize';
 import { getHydratedData } from '@/services/bootstrap';
+
+const getMarketClient = createLazyClient(() => new MarketServiceClient(getRpcBaseUrl(), { fetch: rpcFetch }));
 
 interface FearGreedData {
   compositeScore: number;
@@ -200,9 +204,7 @@ export class FearGreedPanel extends Panel {
 
   private async refreshFromRpc(): Promise<boolean> {
     try {
-      const { MarketServiceClient } = await import('@/generated/client/worldmonitor/market/v1/service_client');
-      const { getRpcBaseUrl } = await import('@/services/rpc-client');
-      const client = new MarketServiceClient(getRpcBaseUrl(), { fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args) });
+      const client = getMarketClient();
       const resp = await client.getFearGreedIndex({});
       if (resp.unavailable) {
         if (!this.data) this.showError(t('common.noDataShort'), () => void this.fetchData());
@@ -279,7 +281,7 @@ export class FearGreedPanel extends Panel {
       : '';
 
     const html = `
-      <div style="padding:12px 14px">
+      <div style="padding:12px 0">
         <div style="text-align:center;margin-bottom:12px">
           <div style="text-align:center;font-size:calc(11px * var(--wm-panel-effective-scale, 1));font-weight:600;color:${regime.color};letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">${escapeHtml(regime.state)}</div>
           ${renderGauge(score, label, delta, color)}

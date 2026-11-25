@@ -91,6 +91,14 @@ export function runGit(args, options = {}) {
 // turns one unresponsive API call into a cancelled monitor.
 export const RAILWAY_CALL_TIMEOUT_MS = 60_000;
 
+// `railway service list` returns the whole project (~90 services, ~78 KB) in
+// one call, and Railway's latency on it swings far more than on a per-service
+// read: on 2026-10-22 the same call took 2 s to 72 s, and three Deploy Drift
+// runs died at the per-call ceiling above with valid credentials. Every slow
+// call completed, so a longer bound fixes it where a retry would not. Callers
+// with a run deadline still cap this by their remaining budget.
+export const RAILWAY_INVENTORY_TIMEOUT_MS = 3 * 60_000;
+
 // One `railway deployment list` per service, run serially, took over ten
 // minutes against the 77-service production fleet — longer than the interval
 // these checks run on. The calls are independent read-only round trips, so they
@@ -122,7 +130,13 @@ export function runRailway(args, options = {}, spawnImpl = spawnSync) {
     maxBuffer: 10 * 1024 * 1024,
     timeout,
     ...spawnOptions,
-    env: createRailwayCliEnv(sourceEnv),
+    // The CLI applies its own per-request HTTP timeout (90 s in 5.30.1) and
+    // fails with "operation timed out" before a longer bound here expires.
+    // Match it to this call's bound so `timeout` is the one that decides.
+    env: {
+      ...createRailwayCliEnv(sourceEnv),
+      RAILWAY_HTTP_TIMEOUT: String(Math.ceil(timeout / 1000)),
+    },
   });
   if (result.signal) {
     throw new Error(`railway ${args.join(' ')} timed out after ${timeout}ms`);
@@ -148,7 +162,11 @@ export function isRepositoryService(service) {
 /** Every service in the environment, unfiltered. */
 export function readServices(
   environment,
-  { projectId = process.env.RAILWAY_PROJECT_ID } = {},
+  {
+    projectId = process.env.RAILWAY_PROJECT_ID,
+    timeoutMs = RAILWAY_INVENTORY_TIMEOUT_MS,
+    spawnImpl,
+  } = {},
 ) {
   const services = JSON.parse(runRailway([
     'service',
@@ -157,7 +175,7 @@ export function readServices(
     '--environment',
     environment,
     '--json',
-  ]));
+  ], { timeout: timeoutMs }, spawnImpl));
   if (!Array.isArray(services)) throw new Error('railway service list must return an array');
   return services;
 }
@@ -399,7 +417,7 @@ const FLEET_QUERY = `query FleetDeployments($input: DeploymentListInput!, $first
   }
 }`;
 
-function parseRailwayApiOutput(stdout) {
+export function parseRailwayApiOutput(stdout) {
   // `railway api` can print advisory lines before the payload; the JSON document
   // is the first line that parses.
   for (const line of stdout.split('\n')) {

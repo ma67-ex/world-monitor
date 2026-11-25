@@ -33,9 +33,12 @@ import { readRawJsonFromUpstash } from './_upstash-json.js';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from './_sentry-edge.js';
 import { validateBearerToken } from '../server/auth-session';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from './_rate-limit.js';
 import { checkProEntitlement } from '../server/_shared/pro-entitlement';
 import { signBriefUrl, BriefUrlError } from '../server/_shared/brief-url';
-import { assertBriefEnvelope } from '../server/_shared/brief-render.js';
+import { assertBriefEnvelope, selectBriefEnvelope } from '../server/_shared/brief-render.js';
+import { briefLocalizedKey, type BriefEnvelope } from '../shared/brief-envelope.js';
 
 // Slot format written by the digest cron. Must match ISSUE_DATE_RE in
 // server/_shared/brief-url.ts — the signer rejects anything else.
@@ -85,6 +88,7 @@ export async function readWithOneRetry<T>(
       console.warn(`[api/latest-brief] ${label} aborted on timeout — retrying once (${RETRY_ATTEMPT_MS}ms)`);
       captureSilentError(err, {
         tags: { route: 'api/latest-brief', step: 'upstash-retry-attempt', label },
+        fingerprint: ['api/latest-brief', 'upstash-retry-attempt', err instanceof Error ? err.name : 'Error'],
         ctx,
       });
       return await attempt(RETRY_ATTEMPT_MS);
@@ -102,6 +106,7 @@ type BriefPreview = {
   dateLong: string;
   greeting: string;
   threadCount: number;
+  lang: string;
 };
 
 async function readBriefPreview(
@@ -110,7 +115,13 @@ async function readBriefPreview(
   timeoutMs: number,
   ctx?: { waitUntil: (p: Promise<unknown>) => void },
 ): Promise<BriefPreview | null> {
-  const raw = await readRawJsonFromUpstash(`brief:${userId}:${issueSlot}`, timeoutMs);
+  // Seeder-owned keys (#7674): the Railway digest composer writes
+  // brief:{userId}:{slot} and brief:latest:{userId} bare — read them raw in
+  // every environment so preview resolves the real envelopes.
+  // The localized sibling is optional: any failure falls back to canonical.
+  const siblingPromise = readRawJsonFromUpstash(briefLocalizedKey(userId, issueSlot), Math.min(timeoutMs, 3_000), true)
+    .catch(() => null);
+  const raw = await readRawJsonFromUpstash(`brief:${userId}:${issueSlot}`, timeoutMs, true);
   if (raw == null) return null;
   // Reuse the renderer's strict validator so a "ready" preview never
   // points at an envelope that the hosted magazine route will reject.
@@ -125,16 +136,19 @@ async function readBriefPreview(
     );
     captureSilentError(err, {
       tags: { route: 'api/latest-brief', step: 'envelope-assertion', issueSlot },
+      fingerprint: ['api/latest-brief', 'envelope-assertion', err instanceof Error ? err.name : 'Error'],
       ctx,
     });
     return null;
   }
-  const { data } = raw;
+  const selected = selectBriefEnvelope(raw, await siblingPromise) as BriefEnvelope;
+  const { data } = selected;
   return {
     issueDate: data.date,
     dateLong: data.dateLong,
     greeting: data.digest.greeting,
     threadCount: data.stories.length,
+    lang: selected.lang ?? 'en',
   };
 }
 
@@ -145,7 +159,7 @@ async function readBriefPreview(
  * brief, or the pointer has expired past its 7d TTL).
  */
 async function readLatestPointer(userId: string, timeoutMs: number): Promise<string | null> {
-  const raw = await readRawJsonFromUpstash(`brief:latest:${userId}`, timeoutMs);
+  const raw = await readRawJsonFromUpstash(`brief:latest:${userId}`, timeoutMs, true);
   if (raw == null) return null;
   const slot = (raw as { issueSlot?: unknown } | null)?.issueSlot;
   if (typeof slot !== 'string' || !ISSUE_SLOT_RE.test(slot)) return null;
@@ -179,7 +193,7 @@ export default async function handler(
     return new Response(null, { status: 204, headers: cors });
   }
   if (req.method !== 'GET') {
-    return jsonResponse({ error: 'Method not allowed' }, 405, cors);
+    return jsonResponse({ error: 'Method not allowed' }, 405, { ...cors, Allow: 'GET, OPTIONS' });
   }
 
   const authHeader = req.headers.get('Authorization') ?? '';
@@ -188,6 +202,15 @@ export default async function handler(
     return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
   }
 
+  // Verify locally and charge the limit before the plan lookup, which is a Clerk call.
+  const identity = await validateBearerToken(jwt, { resolvePlan: false });
+  if (!identity.valid || !identity.userId) {
+    return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
+  }
+  const limited = await checkRateLimit(req, cors, {
+    scope: 'latest-brief', identifier: `user:${identity.userId}`, limit: 60, window: '60 s',
+  });
+  if (limited) return limited;
   const session = await validateBearerToken(jwt);
   if (!session.valid || !session.userId) {
     return jsonResponse({ error: 'UNAUTHENTICATED' }, 401, cors);
@@ -265,7 +288,7 @@ export default async function handler(
     // this into "composing", which would falsely signal empty state
     // to the dashboard panel. 503 lets the client show a retry path.
     console.error('[api/latest-brief] Upstash read failed:', (err as Error).message);
-    captureSilentError(err, { tags: { route: 'api/latest-brief', step: 'upstash-read' }, ctx });
+    captureSilentError(err, { tags: { route: 'api/latest-brief', step: 'upstash-read' }, fingerprint: ['api/latest-brief', 'upstash-read', err instanceof Error ? err.name : 'Error'], ctx });
     return jsonResponse({ error: 'service_unavailable' }, 503, cors);
   }
 
@@ -320,6 +343,7 @@ export default async function handler(
       dateLong: preview.dateLong,
       greeting: preview.greeting,
       threadCount: preview.threadCount,
+      lang: preview.lang,
       magazineUrl,
     },
     200,

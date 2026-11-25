@@ -22,11 +22,11 @@ process.env.RESILIENCE_EDUCATION_ENABLED = 'true';
 const { default: handler } = await import('../api/_seed-health.js');
 
 const META_KEY = 'seed-meta:resilience:intervals';
-const PROBE_KEY = 'resilience:intervals:v11:US';
+const PROBE_KEY = 'resilience:intervals:v12:US';
 const EDUCATION_META_KEY = 'seed-meta:resilience:education-attainment';
 const EDUCATION_DATA_KEY = 'resilience:education-attainment:v1';
 const METHODOLOGY = 'weight-perturbation-sensitivity-v3';
-const SOURCE_VERSION = `resilience-intervals:resilience:intervals:v11:${METHODOLOGY}`;
+const SOURCE_VERSION = `resilience-intervals:resilience:intervals:v12:${METHODOLOGY}`;
 
 function intervalMeta(overrides = {}) {
   return {
@@ -82,7 +82,13 @@ function installPipelineMock(values) {
       // #4927: activation-gated entries add EXISTS probes on their
       // seed-activated:* markers; absent unless a test seeds them.
       if (op === 'EXISTS') {
-        assert.match(String(key), /^seed-activated:/, 'EXISTS is only used for activation markers');
+        // military:bases is the one activation key outside the seed-activated:*
+        // namespace: it gates on its active-version pointer (#6845).
+        assert.match(
+          String(key),
+          /^seed-activated:|^military:bases:active$/,
+          'EXISTS is only used for activation markers',
+        );
         return { result: values.has(key) ? 1 : 0 };
       }
       assert.equal(op, 'GET');

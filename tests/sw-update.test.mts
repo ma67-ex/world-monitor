@@ -1,6 +1,9 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { installSwUpdateHandler, OPEN_MODAL_SELECTOR, readServiceWorkerContainer } from '../src/bootstrap/sw-update.ts';
+import { installSwUpdateHandler, RELOAD_BLOCKING_MODAL_SELECTOR, TOAST_SNOOZE_MS, readServiceWorkerContainer } from '../src/bootstrap/sw-update.ts';
+import { RELOAD_POLICY_ATTR } from '../src/utils/open-modal.ts';
+import { _resetPageUnloadSignalForTests, isPageUnloading } from '../src/bootstrap/page-unload-signal.ts';
+import type { SoftReloadHold } from '../src/bootstrap/soft-reload-policy.ts';
 
 // ---------------------------------------------------------------------------
 // Fake environment
@@ -19,6 +22,7 @@ interface FakeElement {
   closest(sel: string): { dataset: Record<string, string> } | null;
   checkVisibility?: () => boolean;
   getClientRects?: () => { length: number };
+  getAttribute?: (name: string) => string | null;
 }
 
 interface FakeEnv {
@@ -30,7 +34,7 @@ interface FakeEnv {
      * `position: fixed`, so `offsetParent` would always be null — the
      * visibility check must use `checkVisibility()` or `getClientRects()`.
      *
-     * - modalMounted: element exists in DOM (matches OPEN_MODAL_SELECTOR
+     * - modalMounted: element exists in DOM (matches RELOAD_BLOCKING_MODAL_SELECTOR
      *   on query). Maps to UnifiedSettings, SignalModal, etc. — mounted in
      *   their constructor at app startup and left in the DOM for the whole
      *   session.
@@ -42,6 +46,12 @@ interface FakeEnv {
      */
     modalMounted: boolean;
     modalVisible: boolean;
+    /**
+     * The overlay's declared reload contract. null models silence (the Clerk
+     * backdrop); 'safe' models the onboarding popover or the SignalModal, which
+     * the real DOM drops from the `:not(...)` result set entirely.
+     */
+    modalReloadPolicy: 'safe' | 'blocking' | null;
     supportsCheckVisibility: boolean;
     _removedListeners: Array<() => void>;
     querySelector(sel: string): FakeElement | null;
@@ -50,7 +60,7 @@ interface FakeEnv {
     body: {
       appendChild(el: FakeElement): void;
       contains(el: FakeElement | null): boolean;
-    };
+    } | null;
     addEventListener(type: string, cb: () => void): void;
     removeEventListener(type: string, cb: () => void): void;
   };
@@ -79,6 +89,7 @@ function makeEnv(): FakeEnv {
     setVisibilityState(v: string) { _visibilityState = v; },
     modalMounted: false,
     modalVisible: false,
+    modalReloadPolicy: null,
     supportsCheckVisibility: true,
     _removedListeners: [],
 
@@ -88,12 +99,16 @@ function makeEnv(): FakeEnv {
     },
 
     querySelectorAll(sel: string): Iterable<FakeElement> {
-      if (sel !== OPEN_MODAL_SELECTOR) return [];
+      if (sel !== RELOAD_BLOCKING_MODAL_SELECTOR) return [];
+      // The real DOM applies `:not([data-reload-policy="safe"])` for this
+      // selector, so a declared-safe overlay is simply absent from the result set.
+      if (this.modalReloadPolicy === 'safe') return [];
       if (!this.modalMounted && !this.modalVisible) return [];
       const isVisible = this.modalVisible;
+      const policy = this.modalReloadPolicy;
       const el: FakeElement = {
         tagName: 'DIV',
-        className: '',
+        className: policy === 'blocking' ? 'modal-overlay' : 'cl-modalBackdrop',
         innerHTML: '',
         dataset: {},
         _listeners: {},
@@ -105,6 +120,7 @@ function makeEnv(): FakeEnv {
         remove() {},
         addEventListener() {},
         closest() { return null; },
+        getAttribute: (name: string) => (name === RELOAD_POLICY_ATTR ? policy : null),
         // getClientRects is always available in real DOM; mirrors `display: none`
         // semantics (empty list when hidden, non-empty when rendered — including
         // `position: fixed` elements, unlike offsetParent).
@@ -180,8 +196,16 @@ function makeEnv(): FakeEnv {
   return { doc, swContainer, reload, reloadCalls, appendedToasts, visibilityListeners, pendingTimers };
 }
 
-function install(env: FakeEnv) {
+function install(
+  env: FakeEnv,
+  options: { debug?: boolean; softReloadHold?: () => SoftReloadHold | null; now?: () => number } = {},
+) {
   installSwUpdateHandler({
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.debug ? { debug: true } : {}),
+    // Nothing holds the reload unless a test says so; the real default reads
+    // the page's age and sound, which a fake document does not model.
+    softReloadHold: options.softReloadHold ?? (() => null),
     swContainer: env.swContainer,
     document: env.doc,
     reload: env.reload,
@@ -213,6 +237,25 @@ function fireDwellTimer(env: FakeEnv) {
   const cb = env.pendingTimers.shift();
   assert.ok(cb !== undefined, 'No pending dwell timer to fire');
   cb();
+}
+
+/**
+ * Collect the `[SWDEBUG]` entries `logSw` prints while `run` executes. The
+ * debug log is the only place the suppression branch says who blocked it, so
+ * it is the observable for the reload-policy field.
+ */
+function captureSwLog(run: () => void): Array<Record<string, unknown>> {
+  const entries: Array<Record<string, unknown>> = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    if (args[0] === '[SWDEBUG]') entries.push(args[1] as Record<string, unknown>);
+  };
+  try {
+    run();
+  } finally {
+    console.log = original;
+  }
+  return entries;
 }
 
 /** Simulate a button click inside the latest toast. */
@@ -262,6 +305,27 @@ describe('installSwUpdateHandler', () => {
     env.swContainer.fireControllerChange();
     clickToastButton(env, 'reload');
     assert.equal(env.reloadCalls.length, 1);
+  });
+
+  it('marks the page as unloading before each reload path runs', () => {
+    for (const path of ['button', 'auto'] as const) {
+      _resetPageUnloadSignalForTests();
+      env = makeEnv();
+      const seen: boolean[] = [];
+      env.reload = () => { seen.push(isPageUnloading()); };
+      env.swContainer._controller = {};
+      install(env);
+      env.swContainer.fireControllerChange();
+      if (path === 'button') {
+        clickToastButton(env, 'reload');
+      } else {
+        fireDwellTimer(env);
+        env.doc.setVisibilityState('hidden');
+        fireVisibility(env);
+      }
+      assert.deepEqual(seen, [true], path);
+    }
+    _resetPageUnloadSignalForTests();
   });
 
   // --- dismiss button ---------------------------------------------------------
@@ -346,9 +410,31 @@ describe('installSwUpdateHandler', () => {
 
   // --- PRIMARY: multi-deploy same-tab scenario --------------------------------
 
-  it('shows a new toast for deploy N+1 after deploy N was dismissed', () => {
+  it('does NOT show the toast again for a later deploy while a dismissal is still fresh', () => {
+    let clock = 1_000_000;
     env.swContainer._controller = {};
-    install(env);
+    install(env, { now: () => clock });
+
+    env.swContainer.fireControllerChange();
+    clickToastButton(env, 'dismiss');
+
+    // Deploys land roughly hourly on a working day. Each one must not bring
+    // the notice back to a viewer who just closed it.
+    clock += 60 * 60_000;
+    env.swContainer.fireControllerChange();
+    clock += TOAST_SNOOZE_MS - 60 * 60_000 - 1;
+    env.swContainer.fireControllerChange();
+    assert.equal(env.appendedToasts.length, 1, 'no new toast inside the snooze');
+
+    env.doc.setVisibilityState('hidden');
+    fireVisibility(env);
+    assert.equal(env.reloadCalls.length, 0, 'and no auto-reload from a toast that was never shown');
+  });
+
+  it('shows a new toast for deploy N+1 after deploy N was dismissed, once the snooze has passed', () => {
+    let clock = 1_000_000;
+    env.swContainer._controller = {};
+    install(env, { now: () => { const t = clock; clock += TOAST_SNOOZE_MS; return t; } });
 
     // Deploy N
     env.swContainer.fireControllerChange();
@@ -364,8 +450,9 @@ describe('installSwUpdateHandler', () => {
   });
 
   it('hidden-tab fallback fires for deploy N+1 after deploy N was dismissed', () => {
+    let clock = 1_000_000;
     env.swContainer._controller = {};
-    install(env);
+    install(env, { now: () => { const t = clock; clock += TOAST_SNOOZE_MS; return t; } });
 
     // Deploy N — dismiss (dwell timer cleared)
     env.swContainer.fireControllerChange();
@@ -539,6 +626,61 @@ describe('installSwUpdateHandler', () => {
     assert.equal(env.reloadCalls.length, 0, 'reload suppressed while modal is visibly open');
   });
 
+  it('DOES auto-reload over an overlay that declared itself safe', () => {
+    // WORLDMONITOR-15X / 15Z: the onboarding popover auto-opens for every
+    // preset-less user and the SignalModal auto-opens from background analysis;
+    // both carry role="dialog". Both automatic reload paths must ignore them —
+    // they hold nothing a reload would lose.
+    env.swContainer._controller = {};
+    install(env);
+    env.swContainer.fireControllerChange();
+    fireDwellTimer(env);
+
+    env.doc.modalMounted = true;
+    env.doc.modalVisible = true;
+    env.doc.modalReloadPolicy = 'safe';
+
+    env.doc.setVisibilityState('hidden');
+    fireVisibility(env);
+    assert.equal(env.reloadCalls.length, 1, 'a reload-safe overlay must not suppress the update reload');
+  });
+
+  it('logs the blocker label and undeclared policy when a silent overlay suppresses the reload', () => {
+    env.swContainer._controller = {};
+    install(env, { debug: true });
+    env.swContainer.fireControllerChange();
+    fireDwellTimer(env);
+
+    env.doc.modalMounted = true;
+    env.doc.modalVisible = true;
+    env.doc.setVisibilityState('hidden');
+    const entries = captureSwLog(() => fireVisibility(env));
+
+    assert.equal(env.reloadCalls.length, 0);
+    const suppressed = entries.filter((e) => e.event === 'auto-reload-suppressed-modal-open');
+    assert.equal(suppressed.length, 1, 'exactly one suppression entry');
+    assert.equal(suppressed[0]?.blockedBy, 'cl-modalBackdrop');
+    assert.equal(suppressed[0]?.reloadPolicy, 'undeclared');
+  });
+
+  it('suppresses over an overlay that declared itself blocking, with policy blocking in the log', () => {
+    env.swContainer._controller = {};
+    install(env, { debug: true });
+    env.swContainer.fireControllerChange();
+    fireDwellTimer(env);
+
+    env.doc.modalMounted = true;
+    env.doc.modalVisible = true;
+    env.doc.modalReloadPolicy = 'blocking';
+    env.doc.setVisibilityState('hidden');
+    const entries = captureSwLog(() => fireVisibility(env));
+
+    assert.equal(env.reloadCalls.length, 0, 'a declared-blocking overlay holds the reload off');
+    const suppressed = entries.filter((e) => e.event === 'auto-reload-suppressed-modal-open');
+    assert.equal(suppressed[0]?.blockedBy, 'modal-overlay');
+    assert.equal(suppressed[0]?.reloadPolicy, 'blocking');
+  });
+
   it('DOES auto-reload when a modal is mounted-but-hidden (persistent dialog case)', () => {
     // Regression for the reviewer-flagged bug: UnifiedSettings mounts in its
     // constructor with role="dialog" and stays in the DOM forever, but hides
@@ -628,6 +770,34 @@ describe('installSwUpdateHandler', () => {
     assert.equal(env.reloadCalls.length, 1, 'reload fires when fallback reports not-rendered');
   });
 
+  it('skips the toast when document.body is null and still appends when body exists', () => {
+    env.swContainer._controller = {};
+    install(env);
+    const body = env.doc.body;
+    assert.ok(body);
+
+    env.doc.body = null;
+    assert.doesNotThrow(() => env.swContainer.fireControllerChange());
+    assert.equal(env.appendedToasts.length, 0, 'no toast when body is missing');
+
+    env.doc.body = body;
+    env.swContainer.fireControllerChange();
+    assert.equal(env.appendedToasts.length, 1, 'toast appends once body is present');
+  });
+
+  it('does not auto-reload when document.body is gone after the toast is shown', () => {
+    env.swContainer._controller = {};
+    install(env);
+    env.swContainer.fireControllerChange();
+    assert.equal(env.appendedToasts.length, 1);
+    fireDwellTimer(env);
+
+    env.doc.body = null;
+    env.doc.setVisibilityState('hidden');
+    assert.doesNotThrow(() => fireVisibility(env));
+    assert.equal(env.reloadCalls.length, 0, 'auto-reload skipped when body is gone');
+  });
+
   // --- listener leak regression -----------------------------------------------
 
   it('removes the previous visibilitychange handler when a newer deploy replaces the toast', () => {
@@ -648,6 +818,67 @@ describe('installSwUpdateHandler', () => {
 // ---------------------------------------------------------------------------
 // readServiceWorkerContainer — sandboxed-iframe SecurityError (WORLDMONITOR-Y5)
 // ---------------------------------------------------------------------------
+
+describe('installSwUpdateHandler — quiet auto-reload', () => {
+  let env: FakeEnv;
+  beforeEach(() => {
+    env = makeEnv();
+    _resetPageUnloadSignalForTests();
+  });
+
+  /** Toast shown, dwell elapsed, tab hidden: everything the older rules ask for. */
+  function hideAfterDwell(): void {
+    fireDwellTimer(env);
+    env.doc.setVisibilityState('hidden');
+    fireVisibility(env);
+  }
+
+  for (const hold of ['audible-media', 'recently-loaded'] as const) {
+    it(`does NOT auto-reload on tab hide while the reload is held (${hold})`, () => {
+      env.swContainer._controller = {};
+      install(env, { softReloadHold: () => hold });
+      env.swContainer.fireControllerChange();
+      hideAfterDwell();
+      assert.equal(env.reloadCalls.length, 0);
+      assert.equal(isPageUnloading(), false);
+    });
+  }
+
+  it('auto-reloads on a later tab hide once the hold clears', () => {
+    let hold: SoftReloadHold | null = 'audible-media';
+    env.swContainer._controller = {};
+    install(env, { softReloadHold: () => hold });
+    env.swContainer.fireControllerChange();
+    hideAfterDwell();
+    assert.equal(env.reloadCalls.length, 0);
+
+    env.doc.setVisibilityState('visible');
+    fireVisibility(env);
+    hold = null;
+    env.doc.setVisibilityState('hidden');
+    fireVisibility(env);
+    assert.equal(env.reloadCalls.length, 1);
+  });
+
+  it('logs why the reload was held', () => {
+    env.swContainer._controller = {};
+    const entries = captureSwLog(() => {
+      install(env, { debug: true, softReloadHold: () => 'recently-loaded' });
+      env.swContainer.fireControllerChange();
+      hideAfterDwell();
+    });
+    const held = entries.find((entry) => entry.event === 'auto-reload-held');
+    assert.equal(held?.hold, 'recently-loaded');
+  });
+
+  it('the Reload button ignores the hold', () => {
+    env.swContainer._controller = {};
+    install(env, { softReloadHold: () => 'audible-media' });
+    env.swContainer.fireControllerChange();
+    clickToastButton(env, 'reload');
+    assert.equal(env.reloadCalls.length, 1);
+  });
+});
 
 describe('readServiceWorkerContainer', () => {
   it('returns null when the serviceWorker getter throws (sandboxed iframe)', () => {
@@ -678,6 +909,15 @@ describe('readServiceWorkerContainer', () => {
     // walks on to `options.document ?? document` and dereferences a container
     // that was never there.
     assert.doesNotThrow(() => installSwUpdateHandler({}));
+  });
+
+  it('returns null when the container is a stub without addEventListener (WORLDMONITOR-1FB)', () => {
+    // An automation browser replaced navigator.serviceWorker with a plain
+    // object. Returning it let installSwUpdateHandler throw at module scope.
+    for (const stub of [{}, { controller: null }, { controller: null, addEventListener: 'nope' }]) {
+      const nav = { serviceWorker: stub } as unknown as Navigator;
+      assert.equal(readServiceWorkerContainer(nav), null);
+    }
   });
 
   it('returns the container when it is readable', () => {

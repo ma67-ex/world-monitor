@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Generate public product facts and synchronize current acquisition surfaces.
+ * Generate stable commercial product facts and catalogs.
  *
  * Source chain:
  *   convex/config/productCatalog.ts (lifecycle, plans, prices, public copy)
- *   api/mcp/registry/_index.ts        (live MCP tool registry)
- *   scripts/docs-stats.mjs           (repository-derived stable counts)
+ *   api/mcp/registry/index.ts        (machine-readable MCP server card)
  *
- * Outputs are committed so Edge, Railway, static Markdown/JSON, structured
- * data, the Pro bundle, and agent-discovery clients all publish the same facts.
+ * These outputs are committed because lifecycle, prices, entitlements, and
+ * catalog identities are reviewed product contracts. Extensible inventory
+ * counts are emitted separately by scripts/generate-inventory-facts.mjs.
  *
  * Usage:
  *   npm run product:facts
@@ -19,11 +19,38 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PRODUCT_CATALOG, PUBLIC_PRODUCT_METADATA } from '../convex/config/productCatalog.ts';
-import { TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
+import { AI_DATA_CENTERS } from '../src/config/ai-datacenters.ts';
+import { CHOKEPOINT_REGISTRY } from '../src/config/chokepoint-registry.ts';
+import { UNDERSEA_CABLES } from '../src/config/geo-map.ts';
+import { getCompleteLayerCatalogKeys } from '../src/config/map-layer-definitions.ts';
+import { INTEL_HOTSPOTS } from '../shared/geo-data.ts';
+import { PIPELINES } from '../shared/pipelines-data.ts';
+import { ORBITAL_WATCH_PLAN_LINES, orbitalWatchAccess } from '../shared/orbital-watch-pricing.ts';
+import { TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
+import { MCP_DOMAIN_SUMMARY, MCP_TAGS, MCP_TOOL_CATEGORIES } from '../api/mcp/domains.ts';
+import { serverCardTools } from '../api/mcp/server-card-tools.ts';
+import { UI_RESOURCE_LIST_RESPONSE } from '../api/mcp/ui/registry.ts';
+import { FREE_ACCOUNT_CALLS_PER_DAY } from '../api/mcp/upgrade-constants.ts';
+import { publishedRankedCountries } from './build-crawlable-corpus.mjs';
+import { commandPaletteCommandCount } from './lib/command-palette-count.mjs';
+import { defaultOnLayerStats } from './lib/default-map-layer-count.mjs';
+import {
+  AGENT_CARD_DOMAIN_SURFACE,
+  JSON_DOMAIN_SURFACES,
+  MARKDOWN_DOMAIN_SURFACES,
+  SERVER_CARD_DOMAIN_SURFACE,
+  renderJsonDomainSurface,
+  renderMarkdownDomainSurface,
+} from './lib/mcp-domain-summary.mjs';
+import { lngFacilityCount } from './_storage-facility-registry.mjs';
 import { computeStats } from './docs-stats.mjs';
+import { loadManifest, scanUpstreamHosts, sourceAttributionStats } from './source-attribution.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CHECK = process.argv.includes('--check');
+// Newest published resilience snapshot: the depth band's ranked slot and the
+// {ranked, universe} pair the blog glossary interpolates read this one value.
+const resilience = publishedRankedCountries(ROOT);
 const failures = [];
 
 const read = (path) => readFileSync(join(ROOT, path), 'utf8');
@@ -61,50 +88,6 @@ function priceText(price) {
   return Number.isInteger(price) ? String(price) : price.toFixed(2);
 }
 
-function replaceMcpToolCounts(source, count) {
-  return source
-    .replace(/\b\d+(?=-tool MCP server\b)/g, String(count))
-    .replace(/\b\d+(?=\s+MCP tools\b)/g, String(count))
-    .replace(/\b\d+(?=\s+(?:live\s+)?(?:geopolitical intelligence\s+)?tools\b)/g, String(count))
-    .replace(/\b\d+\+(?=\s+(?:MCP\s+)?tools\b)/g, String(count))
-    .replace(/\b\d+(?=\s+\[MCP tools\])/g, String(count))
-    .replace(/\b\d+(?=\s+tool definitions\b)/g, String(count))
-    // docs/mcp-quickstart.mdx phrasing — pinned by scripts/docs-stats.mjs
-    // (`receives (\d+) compressed tool descriptions`), so it must be rewritten
-    // here or every count bump reds the docs check.
-    .replace(/\b\d+(?=\s+compressed tool descriptions\b)/g, String(count))
-    .replace(/\b\d+(?=\s*个\s*(?:MCP\s*)?(?:实时|压缩的)?工具)/g, String(count));
-}
-
-function replaceSourceAttributionCounts(source, { hostCount, providerCount }) {
-  return source
-    .replace(/\b\d+\+(?=\s+(?:external data sources|sources|observed upstream hosts)\b)/gi, `${hostCount}+`)
-    .replace(/\b\d+(?=\s+observed upstream hosts\b)/gi, String(hostCount))
-    .replace(/\b\d+\+(?=\s+(?:data providers|(?:other\s+)?live providers|providers)\b)/gi, `${providerCount}+`)
-    .replace(/\b\d+(?=\s+active providers\b)/gi, String(providerCount))
-    // The prerendered Pro stat tile puts the label in a sibling element rather
-    // than next to the number, so keep that generated surface in sync too.
-    .replace(/\b\d+\+(?=<\/div><div[^>]*>Data providers\b)/gi, `${providerCount}+`);
-}
-
-function replaceProviderCountClaim(source, count) {
-  // The FAQ copy is translated, so the provider suffix varies ("+", Japanese
-  // "以上", Korean "개 이상", etc.). In every locale the provider claim is
-  // the first numeric-plus token; the later 500+ token belongs to news feeds.
-  return source.replace(/\d+(?=\+|以上|개\s*이상)/, String(count));
-}
-
-function rewriteStrings(value, update) {
-  if (typeof value === 'string') return update(value);
-  if (Array.isArray(value)) return value.map((item) => rewriteStrings(item, update));
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, rewriteStrings(item, update)]),
-  );
-}
-
-const stats = computeStats();
-const mcpToolCount = TOOL_REGISTRY.length;
 const generatedTiers = readJson('pro-test/src/generated/tiers.json');
 const previousFacts = existsSync(join(ROOT, 'shared/product-facts.generated.json'))
   ? readJson('shared/product-facts.generated.json')
@@ -171,11 +154,16 @@ const plans = publicCatalogEntries.map(([planKey, entry]) => ({
   // freshness gate — which only diffs the generator against its own output —
   // could never see the drift.
   dashboardAiCallsPerDay: entry.features?.planLimits?.dashboardAiCallsPerDay,
+  travelRiskAssessment: entry.features?.travelRiskAssessment === true,
   description: [
     ...entry.marketingFeatures,
     ...(entry.highlightFeatures ?? []),
   ].join(', '),
 }));
+
+// One attribution scan feeds the hero rail and the restated inventory phrases below.
+const sourceAttribution = sourceAttributionStats(scanUpstreamHosts(ROOT), loadManifest(ROOT));
+const heroProofStats = buildHeroProofStats();
 
 const facts = {
   _generated: 'scripts/generate-public-product-facts.mjs — do not edit by hand; run `npm run product:facts`',
@@ -188,18 +176,64 @@ const facts = {
   },
   currency: PUBLIC_PRODUCT_METADATA.currency,
   plans,
-  capabilities: {
-    mcpTools: mcpToolCount,
-    locales: stats.locales,
-    variants: stats.variantCount,
-    mapLayers: stats.layerDefinitions,
-    panelImplementations: stats.panelClasses,
-    feedDefinitions: stats.feedDefinitions,
-    freshnessTrackedSourceGroups: stats.freshnessSources,
-    sourceAttributionHosts: stats.sourceAttributionHosts,
-    sourceAttributionProviders: stats.sourceAttribution.providerCount,
-  },
+  heroProofStats,
+  depthProofStats: buildDepthProofStats(heroProofStats),
+  // Resilience ranking coverage from the newest published snapshot, so copy
+  // that cannot run the snapshot helper (the blog glossary) can still state
+  // "{ranked} of {universe} countries" without hard-coding either number.
+  resilienceCoverage: { ranked: resilience.ranked, universe: resilience.universe },
 };
+
+/**
+ * Definitional homepage proof figures, measured rather than hardcoded:
+ * mapLayers counts non-sunset layers in the full-variant catalog, feeds and
+ * providers come from the validated attribution inventory, and alertOrigins
+ * is the definitional count of independent alert-origin systems (kept literal
+ * and pinned by tests/public-product-facts.test.mjs).
+ */
+function buildHeroProofStats() {
+  const stats = sourceAttribution;
+  return {
+    mapLayers: getCompleteLayerCatalogKeys('full').length,
+    feeds: stats.feedHosts,
+    providers: stats.providerCount,
+    alertOrigins: 5,
+  };
+}
+
+/**
+ * "Under the hood" band proof figures (#7745). The subhead promises "Every
+ * number below is live in the dashboard today — not a roadmap", so every slot
+ * is measured from the same registries that produce ai-search.md's coverage
+ * block and the hero rail, and generation fails closed on any non-numeric
+ * value — the band shipped with adjectives in 14 of 15 slots for exactly the
+ * reason this validation exists.
+ */
+function buildDepthProofStats(hero) {
+  const stats = computeStats();
+  const candidate = {
+    // The first four slots carry the same labels — and therefore the same
+    // published figures — as the hero rail.
+    ...hero,
+    chokepoints: CHOKEPOINT_REGISTRY.length,
+    instabilityCountries: stats.tier1Countries,
+    resilienceRanked: resilience.ranked,
+    submarineCables: UNDERSEA_CABLES.length,
+    pipelinesLng: PIPELINES.length + lngFacilityCount(),
+    aiDatacenters: AI_DATA_CENTERS.length,
+    hotspots: INTEL_HOTSPOTS.length,
+    stockExchanges: stats.stockExchangeCount,
+    mcpTools: TOOL_REGISTRY.length,
+    commands: commandPaletteCommandCount(),
+    languages: stats.locales,
+  };
+  for (const [key, value] of Object.entries(candidate)) {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`depth proof stat ${key} must be a positive integer, got ${JSON.stringify(value)}`);
+    }
+  }
+  return candidate;
+}
 
 const catalogBundle = {
   _generated: facts._generated,
@@ -212,11 +246,25 @@ const catalogBundle = {
 
 emit('shared/product-facts.generated.json', json(facts));
 emit('scripts/shared/product-facts.generated.json', json(facts));
-emit('public/product-facts.json', json(facts));
+// Slim homepage proof numerals. Hero.tsx imports this file — not the full
+// facts bundle — so the welcome JS payload grows by bytes, not kilobytes.
+emit('pro-test/src/generated/hero-stats.json', json(facts.heroProofStats));
+// Same rationale for the "Under the hood" band numerals that Depth.tsx renders.
+emit('pro-test/src/generated/depth-stats.json', json(facts.depthProofStats));
+// Welcome copy figures that are not band slots (the first-five tenth card,
+// the Pro price, the country-risk card's ranked share).
+const proMonthlyPrice = plans.find((plan) => plan.planKey === 'pro_monthly')?.price;
+if (typeof proMonthlyPrice !== 'number' || proMonthlyPrice <= 0) throw new Error(`pro_monthly price must be a positive number, got ${proMonthlyPrice}`);
+emit('pro-test/src/generated/copy-stats.json', json({
+  ...defaultOnLayerStats(read('src/config/panels.ts'), getCompleteLayerCatalogKeys('full')),
+  proMonthlyPrice,
+  resilienceUniverse: resilience.universe,
+  resilienceRankedPct: Math.round((resilience.ranked / resilience.universe) * 100),
+}));
 emit('shared/product-catalog.generated.json', json(catalogBundle));
 emit('scripts/shared/product-catalog.generated.json', json(catalogBundle));
 
-const edgeModule = `// AUTO-GENERATED from convex/config/productCatalog.ts and the MCP registry.
+const edgeModule = `// AUTO-GENERATED from convex/config/productCatalog.ts.
 // Do not edit manually. Run: npm run product:facts
 // @ts-check
 
@@ -232,6 +280,13 @@ export const FALLBACK_PRICES = ${JSON.stringify(fallbackPrices, null, 2)};
 `;
 emit('api/_product-catalog.generated.js', edgeModule);
 
+// Annual catalog entries carry no marketing copy of their own; their Offer
+// describes the same plan as the monthly entry of the same tier group.
+function offerDescription(plan) {
+  if (plan.description) return plan.description;
+  return plans.find((other) => other.tierGroup === plan.tierGroup && other.description)?.description ?? '';
+}
+
 function offerFor(plan) {
   const offer = {
     '@type': 'Offer',
@@ -240,7 +295,7 @@ function offerFor(plan) {
     priceCurrency: plan.priceCurrency,
     availability: plan.availability,
     url: plan.url,
-    description: plan.description,
+    description: offerDescription(plan),
   };
   if (plan.billingDuration) {
     offer.priceSpecification = {
@@ -269,7 +324,6 @@ function rewriteApplicationJsonLd(source, includedGroups) {
         plan.price != null && (!includedGroups || includedGroups.includes(plan.tierGroup))
       ));
       block.offers = selectedPlans.map(offerFor);
-      block = rewriteStrings(block, (text) => replaceMcpToolCounts(text, mcpToolCount));
       const indented = JSON.stringify(block, null, 2)
         .split('\n')
         .map((line) => `    ${line}`)
@@ -279,139 +333,175 @@ function rewriteApplicationJsonLd(source, includedGroups) {
   );
 }
 
+/**
+ * Hand-written copy that states the source inventory restates the measured
+ * figures. docs/about.mdx is the canonical product description directories
+ * lift (#9405); the other files are the homepage JSON-LD, the architecture
+ * diagram, the llms-full brief, the evergreen "what is" post and the OAuth
+ * consent screens, which had each drifted to a different total. Each phrase
+ * must occur exactly `occurrences` times: copy that drifts from the wording
+ * fails here instead of going stale. `keys` fill the phrase's leading numerals
+ * in order; later digits (the "1" in "Tier-1") are left alone.
+ */
+const PROVIDERS_ACROSS_HOSTS = { pattern: /\b\d+ attributed providers across \d+ observed source hosts\b/g, occurrences: 1, keys: ['providers', 'sourceHosts'] };
+const CONSENT_PROVIDERS = { pattern: /\bIntelligence data from \d+ attributed providers\b/g, occurrences: 1, keys: ['providers'] };
+const RESTATED_FACT_PHRASES = new Map([
+  ['docs/about.mdx', [
+    { pattern: /\b\d+ news and OSINT feed hosts from \d+ attributed providers\b/g, occurrences: 1, keys: ['feeds', 'providers'] },
+    { pattern: /\ball \d+ attributed providers\b/g, occurrences: 1, keys: ['providers'] },
+    { pattern: /\b\d+ (?:toggleable )?layer types\b/g, occurrences: 2, keys: ['mapLayers'] },
+    { pattern: /\b\d+ Tier-1 countries\b/g, occurrences: 1, keys: ['instabilityCountries'] },
+    { pattern: /\b\d+ scored hotspots\b/g, occurrences: 1, keys: ['hotspots'] },
+    { pattern: /\b\d+ live-AIS maritime chokepoints\b/g, occurrences: 1, keys: ['chokepoints'] },
+    { pattern: /\b\d+ subsea cables\b/g, occurrences: 1, keys: ['submarineCables'] },
+  ]],
+  ['index.html', [
+    { pattern: /\b\d+ news and OSINT feed hosts from \d+ attributed providers across \d+ observed source hosts\b/g, occurrences: 1, keys: ['feeds', 'providers', 'sourceHosts'] },
+  ]],
+  ['ARCHITECTURE.md', [{ pattern: /\b\d+ observed source hosts\b/g, occurrences: 1, keys: ['sourceHosts'] }]],
+  ['public/llms-full.txt', [PROVIDERS_ACROSS_HOSTS]],
+  ['public/llms.txt', [{ pattern: /\b\d+ crisis trackers\b/g, occurrences: 1, keys: ['crisisTrackers'] }]],
+  ['blog-site/src/content/blog/what-is-worldmonitor-real-time-global-intelligence.md', [PROVIDERS_ACROSS_HOSTS]],
+  ['api/oauth/authorize.js', [CONSENT_PROVIDERS]],
+  ['mcp-grant.html', [CONSENT_PROVIDERS]],
+]);
+const RESTATED_FACT_VALUES = {
+  ...facts.depthProofStats,
+  sourceHosts: sourceAttribution.activeHosts,
+  crisisTrackers: readJson('shared/crawlable-crises.json').length,
+};
+
+function restateFacts(path, source) {
+  let result = source;
+  for (const { pattern, occurrences, keys } of RESTATED_FACT_PHRASES.get(path) ?? []) {
+    const found = result.match(pattern)?.length ?? 0;
+    if (found !== occurrences) {
+      throw new Error(`${path}: expected ${occurrences} match(es) of ${pattern}, found ${found}`);
+    }
+    result = result.replace(pattern, (phrase) => {
+      let slot = 0;
+      return phrase.replace(/\d+/g, (digits) => (slot < keys.length ? String(RESTATED_FACT_VALUES[keys[slot++]]) : digits));
+    });
+  }
+  return result;
+}
+
 const applicationJsonLdGroups = new Map([
   ['index.html', ['free', 'pro']],
   ['pro-test/welcome.html', ['free', 'pro']],
   ['pro-test/index.html', null],
 ]);
 
-// Every pro-test locale publishes the MCP tool count (guarded by
-// tests/public-product-facts.test.mjs across the full locale sweep), so
-// enumerate the directory instead of hand-listing a subset.
+// Every Pro locale carries lifecycle and pricing copy, so enumerate the
+// directory rather than hand-listing a subset.
 const proLocalePaths = readdirSync(join(ROOT, 'pro-test/src/locales'))
   .filter((name) => name.endsWith('.json'))
   .map((name) => `pro-test/src/locales/${name}`)
   .sort();
 
-const mcpCountSurfaces = [
-  'server.json',
-  'cli/README.md',
-  'pro-test/prerender.mjs',
-  'blog-site/src/content/blog/ask-claude-whats-happening-worldmonitor-mcp.md',
-  'blog-site/src/content/blog/build-geopolitical-risk-agent-worldmonitor-mcp.md',
-  'blog-site/src/content/blog/daily-intelligence-briefing-workflow-15-minutes.md',
-  'blog-site/src/content/blog/free-vs-paid-real-time-intelligence-dashboards.md',
-  'blog-site/src/content/blog/build-on-worldmonitor-developer-api-open-source.md',
-  'blog-site/src/content/blog/worldmonitor-mcp-server-ai-agents-real-time-intelligence.md',
-  'blog-site/src/content/blog/worldmonitor-is-not-palantir.md',
-  // Says "a Model Context Protocol server with 59 live tools" — its only
-  // "<n> tools" occurrence, so replaceMcpToolCounts heals it here instead of
-  // leaving a tool-count bump to red the blog contract test and be hand-fixed.
-  'blog-site/src/content/blog/what-is-worldmonitor-real-time-global-intelligence.md',
-  'docs/cli.mdx',
-  'docs/mcp-overview.mdx',
-  'docs/mcp-quickstart.mdx',
-  'docs/pricing.mdx',
-  'docs/zh/cli.mdx',
-  'docs/zh/mcp-overview.mdx',
-  'docs/zh/mcp-quickstart.mdx',
-  'docs/zh/pricing.mdx',
-  'public/agents.md',
-  'public/agent.txt',
-  'public/ai-search.md',
-  'public/developers.md',
-  'public/llms.txt',
-  'public/llms-full.txt',
-  'public/home.md',
-  'public/mcp-server.md',
-  'public/pricing.md',
-  'public/sdks.md',
-];
-for (const path of mcpCountSurfaces) {
-  transform(path, (source) => replaceMcpToolCounts(source, mcpToolCount));
+for (const [path, groups] of applicationJsonLdGroups) {
+  transform(path, (source) => restateFacts(path, rewriteApplicationJsonLd(source, groups)));
 }
 
-// The audited upstream-host/provider counts are generated product facts just
-// like the MCP/tool and map-layer counts.  Compose all transforms for the
-// overlapping HTML surfaces in one read/write so the large prerendered files
-// do not get parsed repeatedly.
-const htmlProductFactSurfaces = new Set([
-  'index.html',
-  'pro-test/welcome.html',
-  'public/pro/welcome.html',
-]);
-for (const path of htmlProductFactSurfaces) {
-  transform(path, (source) => {
-    let updated = source;
-    const groups = applicationJsonLdGroups.get(path);
-    if (groups !== undefined) updated = rewriteApplicationJsonLd(updated, groups);
-    updated = replaceMcpToolCounts(updated, mcpToolCount);
-    updated = replaceSourceAttributionCounts(updated, {
-      hostCount: stats.sourceAttributionHosts,
-      providerCount: stats.sourceAttribution.providerCount,
-    });
-    return updated;
-  });
-}
-for (const [path, groups] of applicationJsonLdGroups) {
-  if (htmlProductFactSurfaces.has(path)) continue;
-  transform(path, (source) => rewriteApplicationJsonLd(source, groups));
-}
+// Keep the hand-authored A2A routing copy's catalog total derived from the
+// registry. The rest of the description is editorial, but a stale number
+// would misrepresent what agents can discover through MCP.
+transform('public/.well-known/agent-card.json', (source) => {
+  const card = JSON.parse(source);
+  const routingSkill = card.skills?.find((skill) => skill.id === 'route-to-tool');
+  if (!routingSkill?.description) {
+    throw new Error('agent-card routing skill must have a description');
+  }
+  if ([...routingSkill.description.matchAll(/\b\d+-tool catalog\b/g)].length !== 1) {
+    throw new Error('agent-card routing skill must advertise exactly one N-tool catalog');
+  }
+  if ([...source.matchAll(/\b\d+-tool catalog\b/g)].length !== 1) {
+    throw new Error('agent-card must contain exactly one N-tool catalog claim');
+  }
+  const next = source.replace(/\b\d+-tool catalog\b/, `${TOOL_REGISTRY.length}-tool catalog`);
+  return renderJsonDomainSurface(next, AGENT_CARD_DOMAIN_SURFACE, MCP_DOMAIN_SUMMARY);
+});
 
 // The server card is the machine-readable tool catalog consumed by docs-stats
 // and external MCP discovery. Generate it from the same registry as the count
 // so adding tools cannot leave a syntactically valid but incomplete card.
 transform('public/.well-known/mcp/server-card.json', (source) => {
   const card = JSON.parse(source);
-  card.tools = TOOL_REGISTRY.map(({ name, description }) => ({ name, description }));
-  return json(card);
+  const disasterTool = TOOL_REGISTRY.find((tool) => tool.name === 'get_natural_disasters');
+  if (!disasterTool) throw new Error('get_natural_disasters must exist in TOOL_REGISTRY');
+  const disasterFilename = disasterTool._uiResourceUri?.match(/^ui:\/\/worldmonitor\/(natural-disasters(?:-v\d+)?\.html)$/)?.[1];
+  if (!disasterFilename) throw new Error('get_natural_disasters must advertise a ui://worldmonitor/natural-disasters HTML resource');
+  const viewFilename = (toolName, stem) => {
+    const filename = TOOL_REGISTRY.find((tool) => tool.name === toolName)?._uiResourceUri?.match(new RegExp(`^ui://worldmonitor/(${stem}(?:-v\\d+)?\\.html)$`))?.[1];
+    if (!filename) throw new Error(`${toolName} must advertise a ui://worldmonitor/${stem} HTML resource`);
+    return filename;
+  };
+  card.metadata.mcpApps.note = card.metadata.mcpApps.note.replace(
+    /get_market_data → market-radar(?:-v\d+)?\.html/,
+    'get_market_data → market-radar-v3.html',
+  ).replace(
+    /get_country_brief → country-brief(?:-v\d+)?\.html/,
+    'get_country_brief → country-brief-v3.html',
+  ).replace(
+    /get_natural_disasters → natural-disasters(?:-v\d+)?\.html/,
+    `get_natural_disasters → ${disasterFilename}`,
+  ).replace(
+    /get_news_intelligence → news-intelligence(?:-v\d+)?\.html/,
+    'get_news_intelligence → news-intelligence-v3.html',
+  ).replace(
+    /get_conflict_events → conflict-events(?:-v\d+)?\.html/,
+    'get_conflict_events → conflict-events-v2.html',
+  ).replace(
+    /get_prediction_markets → prediction-markets(?:-v\d+)?\.html/,
+    'get_prediction_markets → prediction-markets-v3.html',
+  ).replace(
+    /get_forecast_predictions → forecasts(?:-v\d+)?\.html/,
+    'get_forecast_predictions → forecasts-v4.html',
+  ).replace(
+    /get_chokepoint_status → chokepoint-monitor(?:-v\d+)?\.html/,
+    'get_chokepoint_status → chokepoint-monitor-v2.html',
+  ).replace(
+    /get_world_brief → world-brief(?:-v\d+)?\.html/,
+    'get_world_brief → world-brief-v2.html',
+  ).replace(
+    /get_country_risk → country-risk(?:-v\d+)?\.html/,
+    'get_country_risk → country-risk-v3.html',
+  ).replace(
+    /open_news_dashboard → news-dashboard(?:-v\d+)?\.html/,
+    `open_news_dashboard → ${viewFilename('open_news_dashboard', 'news-dashboard')}`,
+  ).replace(
+    /open_country_brief → country-view(?:-v\d+)?\.html/,
+    `open_country_brief → ${viewFilename('open_country_brief', 'country-view')}`,
+  );
+  card.metadata.mcpApps.uiResources = UI_RESOURCE_LIST_RESPONSE.map(resource => resource.uri);
+  // Categories and tags come from api/mcp/domains.ts. The per-tool category is
+  // card-only; the live tools/list _meta stays access + weight (no wire change).
+  // ui.resourceUri mirrors the live MCP Apps link so a scanner that cannot
+  // authenticate still sees which tools render an app.
+  card.toolCategories = MCP_TOOL_CATEGORIES.map((category) => category.id);
+  card.tags = [...MCP_TAGS];
+  card.tools = serverCardTools();
+  const uncategorised = card.tools.filter((tool) => !tool._meta['worldmonitor/category']).map((tool) => tool.name);
+  if (uncategorised.length) throw new Error(`${uncategorised.join(', ')} has no category in api/mcp/domains.ts`);
+  return renderJsonDomainSurface(json(card), SERVER_CARD_DOMAIN_SURFACE, MCP_DOMAIN_SUMMARY);
 });
 
-transform('public/agent-view.json', (source) => {
-  const view = JSON.parse(source);
-  view.endpoints.mcp.tools = mcpToolCount;
-  return json(view);
-});
+// The domain list on the other discovery surfaces. The card and agent-card
+// rows render inside their own transforms above, because a second transform
+// of the same file would read the unwritten original in --check mode.
+for (const surface of JSON_DOMAIN_SURFACES) {
+  if (surface === SERVER_CARD_DOMAIN_SURFACE || surface === AGENT_CARD_DOMAIN_SURFACE) continue;
+  transform(surface.path, (source) => renderJsonDomainSurface(source, surface, MCP_DOMAIN_SUMMARY));
+}
+for (const surface of MARKDOWN_DOMAIN_SURFACES) {
+  transform(surface.path, (source) => renderMarkdownDomainSurface(source, surface, MCP_DOMAIN_SUMMARY));
+}
 
-// Every locale publishes the MCP tool count in one stat tile and four
-// localized prose claims. The prose phrasings vary per language, so they
-// cannot be matched by replaceMcpToolCounts — instead rewrite any 2+ digit
-// integer inside exactly these keys (verified: the only other number in any
-// locale is a single-digit "1" in ja.json). Source/provider counts and the
-// legacy-key cleanup happen in this same pass to keep each locale read once.
-const LOCALE_TOOL_COUNT_PROSE_KEYS = [
-  ['welcome', 'agents', 'b1'],
-  ['welcome', 'agents', 'promise'],
-  ['welcome', 'pricing', 'proF4'],
-  ['welcome', 'faq', 'a7'],
-];
+// Keep lifecycle cleanup here. Inventory totals in these locale files are not
+// generator-owned acceptance criteria.
 for (const path of proLocalePaths) {
   transform(path, (source) => {
-    const locale = JSON.parse(replaceMcpToolCounts(source, mcpToolCount));
-    if (typeof locale.welcome?.depth?.s12v === 'string') {
-      locale.welcome.depth.s12v = String(mcpToolCount);
-    }
-    for (const keys of LOCALE_TOOL_COUNT_PROSE_KEYS) {
-      let node = locale;
-      for (const key of keys.slice(0, -1)) node = node?.[key];
-      const leaf = keys[keys.length - 1];
-      if (node && typeof node[leaf] === 'string') {
-        node[leaf] = node[leaf].replace(/\b\d{2,}\b/g, String(mcpToolCount));
-      }
-    }
-    const freeF2 = locale.twoPath?.freeF2;
-    if (typeof freeF2 === 'string') {
-      let occurrence = 0;
-      locale.twoPath.freeF2 = freeF2.replace(/\b\d+\+/g, (match) => (
-        ++occurrence === 2 ? `${stats.sourceAttributionHosts}+` : match
-      ));
-    }
-    if (typeof locale.welcome?.depth?.s3v === 'string') {
-      locale.welcome.depth.s3v = `${stats.sourceAttribution.providerCount}+`;
-    }
-    if (typeof locale.welcome?.faq?.a3 === 'string') {
-      locale.welcome.faq.a3 = replaceProviderCountClaim(locale.welcome.faq.a3, stats.sourceAttribution.providerCount);
-    }
+    const locale = JSON.parse(source);
     delete locale.nav?.reserveAccess;
     delete locale.hero?.reserveEarlyAccess;
     delete locale.hero?.emailPlaceholder;
@@ -421,36 +511,13 @@ for (const path of proLocalePaths) {
     delete locale.footer?.beFirstInLine;
     delete locale.form;
     delete locale.referral;
+    // The "Under the hood" band renders measured numerals (depth-stats.json),
+    // so the retired adjective value slots are lifecycle-cleaned like the
+    // waitlist copy above. Labels (sNl) stay — they remain the localized copy.
+    for (let slot = 1; slot <= 15; slot += 1) delete locale.welcome?.depth?.[`s${slot}v`];
     return json(locale);
   });
 }
-
-transform('scripts/locale-baselines/pro-test.json', (source) => {
-  const baseline = JSON.parse(source);
-  const freeF2 = baseline['twoPath.freeF2'];
-  if (typeof freeF2 === 'string') {
-    let occurrence = 0;
-    baseline['twoPath.freeF2'] = freeF2.replace(/\b\d+\+/g, (match) => (
-      ++occurrence === 2 ? `${stats.sourceAttributionHosts}+` : match
-    ));
-  }
-  if (typeof baseline['welcome.depth.s3v'] === 'string') {
-    baseline['welcome.depth.s3v'] = `${stats.sourceAttribution.providerCount}+`;
-  }
-  if (typeof baseline['welcome.faq.a3'] === 'string') {
-    baseline['welcome.faq.a3'] = replaceProviderCountClaim(baseline['welcome.faq.a3'], stats.sourceAttribution.providerCount);
-  }
-  if (typeof baseline['welcome.depth.s12v'] === 'string') {
-    baseline['welcome.depth.s12v'] = String(mcpToolCount);
-  }
-  for (const keys of LOCALE_TOOL_COUNT_PROSE_KEYS) {
-    const flatKey = keys.join('.');
-    if (typeof baseline[flatKey] === 'string') {
-      baseline[flatKey] = baseline[flatKey].replace(/\b\d{2,}\b/g, String(mcpToolCount));
-    }
-  }
-  return json(baseline);
-});
 
 function replacePreviousPrices(source) {
   if (!previousFacts) return source;
@@ -478,10 +545,29 @@ function replacePreviousPrices(source) {
   return result;
 }
 
+const ORBITAL_WATCH_DOCS_START = '{/* orbital-watch-pricing:start */}';
+const ORBITAL_WATCH_DOCS_END = '{/* orbital-watch-pricing:end */}';
+const ORBITAL_WATCH_DOCS_COPY = {
+  'docs/pricing.mdx': `- **Orbital Watch** — on Free, satellite passes over any point (looked up in your browser; the point is not sent to World Monitor) and the latest image and date on watched sites. Pro and Pro Business add imaging-window alerts, plus satellite passes and watched-site imagery over MCP; API Starter, API Business and Enterprise also get them over the REST API.`,
+  'docs/zh/pricing.mdx': `- **Orbital Watch** — Free 可查询任意地点的卫星过境（在浏览器中完成，地点不会发送到 World Monitor），并查看监测站点的最新影像及日期。Pro 和 Pro Business 另含成像窗口提醒，并可通过 MCP 获取卫星过境和监测站点影像；API Starter、API Business 和 Enterprise 还可通过 REST API 获取。`,
+};
+
+/** The Orbital Watch plan bullet between the doc's markers, empty until launch (#10768). */
+function withOrbitalWatchDocs(path, source) {
+  const start = source.indexOf(ORBITAL_WATCH_DOCS_START);
+  const end = source.indexOf(ORBITAL_WATCH_DOCS_END);
+  if (start < 0 || end < start) throw new Error(`${path}: missing the Orbital Watch pricing markers`);
+  const body = orbitalWatchAccess('free') ? `\n${ORBITAL_WATCH_DOCS_COPY[path]}\n` : '\n';
+  return source.slice(0, start + ORBITAL_WATCH_DOCS_START.length) + body + source.slice(end);
+}
+
+for (const path of Object.keys(ORBITAL_WATCH_DOCS_COPY)) {
+  transform(path, (source) => withOrbitalWatchDocs(path, replacePreviousPrices(source)));
+}
+
 for (const path of new Set([
   'public/pricing.md',
-  'docs/pricing.mdx',
-  'docs/zh/pricing.mdx',
+  'docs/zh/about.mdx',
   'docs/api-commerce.mdx',
   'docs/zh/api-commerce.mdx',
   'blog-site/src/content/blog/free-vs-paid-real-time-intelligence-dashboards.md',
@@ -492,6 +578,43 @@ for (const path of new Set([
 ])) {
   transform(path, replacePreviousPrices);
 }
+
+// One transform per file: a second one would read the unwritten original in
+// --check mode, so the Pro price rewrite rides along here.
+transform('docs/about.mdx', (source) => restateFacts('docs/about.mdx', replacePreviousPrices(source)));
+for (const path of RESTATED_FACT_PHRASES.keys()) {
+  if (path !== 'docs/about.mdx' && !applicationJsonLdGroups.has(path)) transform(path, (source) => restateFacts(path, source));
+}
+
+/**
+ * The free-tier sentence every agent-facing file states verbatim (markdown
+ * wrapping and JSON escaping aside). A file that drops or rewords it fails the
+ * derived check instead of drifting back to "every data tool needs a paid plan".
+ * tests/agent-files-free-tier.test.mjs reads this constant from source.
+ */
+const FREE_TIER_SENTENCE = "`get_sources` needs no account. A free World Monitor account can call the cached-data tools (marked `free-account` in the server card) within a daily allowance; the remaining tools need a paid plan. Sign in with OAuth — no API key needed.";
+const FREE_TIER_FILES = [
+  'public/agents.md',
+  'public/developers.md',
+  'public/mcp-server.md',
+  'public/api/llms.txt',
+  'public/agent.txt',
+  'public/agent-view.json',
+  'public/llms.txt',
+  'public/developers/llms.txt',
+];
+for (const path of FREE_TIER_FILES) {
+  transform(path, (source) => {
+    const flat = (text) => text.replace(/\s+/g, ' ');
+    if (!flat(source).includes(flat(FREE_TIER_SENTENCE))) {
+      throw new Error(`${path}: must state the free-tier sentence verbatim: ${FREE_TIER_SENTENCE}`);
+    }
+    return source;
+  });
+}
+
+/** The free-account MCP allowance, worded once for every pricing surface (#9144). */
+const FREE_ACCOUNT_MCP_LINE = `${FREE_ACCOUNT_CALLS_PER_DAY} cached-data MCP calls/day with a free account`;
 
 function pricingSummary() {
   const byKey = Object.fromEntries(plans.map((plan) => [plan.planKey, plan]));
@@ -504,6 +627,16 @@ function pricingSummary() {
     }
     return `${limit.toLocaleString('en-US')} dashboard-AI requests/day`;
   };
+  const TRAVEL_RISK_SUMMARY = 'travel risk assessment drafts in the dashboard and over MCP';
+  const TIER_BY_PLAN_KEY = { free: 'free', pro_monthly: 'pro', pro_business_monthly: 'proBusiness', api_starter: 'api', api_business: 'apiBusiness', enterprise: 'enterprise' };
+  const withOrbitalWatch = (planKey, features) => {
+    const access = orbitalWatchAccess(TIER_BY_PLAN_KEY[planKey]);
+    return access ? [...features, ORBITAL_WATCH_PLAN_LINES[access]] : features;
+  };
+  const withTravelRisk = (planKey, features) => (
+    byKey[planKey]?.travelRiskAssessment === true ? [...features, TRAVEL_RISK_SUMMARY] : features
+  );
+  const planFeatures = (planKey, features) => withOrbitalWatch(planKey, withTravelRisk(planKey, features));
   return {
     product: PUBLIC_PRODUCT_METADATA.name,
     lifecycle: PUBLIC_PRODUCT_METADATA.lifecycle,
@@ -515,40 +648,37 @@ function pricingSummary() {
         name: 'Free',
         price_usd_monthly: 0,
         signup_required: false,
-        // De-paywalled on this fork (task 03, 2026-08-22): resilienceScore
-        // carries no 'locked' marker any more, so Free gets every map layer.
-        // See docs-stats.mjs's validatePlanLayerEntitlementCopy / PLAN_LAYER_PRO_ONLY_KEY.
-        features: [`${stats.layerDefinitions} map layers`, '500+ feeds', 'country briefs', 'chokepoints', 'instability scores', 'watchlists', '3 dashboard tabs'],
+        features: planFeatures('free', ['global map coverage (Resilience is Pro)', 'curated feeds', 'country briefs', 'chokepoints', 'instability scores', 'watchlists', '3 dashboard tabs', FREE_ACCOUNT_MCP_LINE]),
       },
       {
         name: 'Pro',
         price_usd_monthly: byKey.pro_monthly.price,
         price_usd_yearly: byKey.pro_annual.price,
-        features: ['WM Analyst', 'Scenario Engine', 'Route Explorer', 'AI digest', 'custom widget builder', dashboardAi('pro_monthly'), 'MCP', '10 custom dashboards', 'personal license'],
+        features: planFeatures('pro_monthly', ['WM Analyst', 'Scenario Engine', 'Route Explorer', 'AI digest', 'custom widget builder', dashboardAi('pro_monthly'), 'MCP', '10 custom dashboards', 'personal license']),
       },
       {
         name: 'Pro Business',
         price_usd_monthly: byKey.pro_business_monthly.price,
         price_usd_yearly: byKey.pro_business_annual.price,
-        features: ['Everything in Pro', 'commercial license', 'data export — CSV, JSON & PDF reports', '25 custom dashboards', dashboardAi('pro_business_monthly'), '250 MCP calls/day', 'priority support'],
+        features: planFeatures('pro_business_monthly', ['Everything in Pro', 'commercial license', 'data export — CSV, JSON & PDF reports', '25 custom dashboards', dashboardAi('pro_business_monthly'), '250 MCP calls/day', 'priority support']),
       },
       {
         name: 'API',
         price_usd_monthly: byKey.api_starter.price,
         price_usd_yearly: byKey.api_starter_annual.price,
-        features: ['REST API', 'license / API key included', '1,000 requests/day starter limit', dashboardAi('api_starter'), 'webhooks', 'structured JSON', 'OpenAPI docs', 'commercial license — for your organization'],
+        features: planFeatures('api_starter', ['full Pro dashboard (1 named user)', 'REST API', 'license / API key included', '1,000 requests/day starter limit (REST + MCP combined; a live MCP call counts as 2-3)', dashboardAi('api_starter'), 'webhooks', 'structured JSON', 'OpenAPI docs', 'commercial license — internal use in your organization, not customer-facing products']),
       },
       {
         name: 'API Business',
         price_usd_monthly: byKey.api_business.price,
         price_usd_yearly: byKey.api_business_annual.price,
-        features: ['Everything in API Starter', '300 requests/minute', '10,000 requests/day', dashboardAi('api_business'), '5 Pro licenses included', 'same company email required', 'commercial license — for your customers', 'priority support'],
+        features: planFeatures('api_business', ['Everything in API Starter', '300 requests/minute', '10,000 requests/day (REST + MCP combined; a live MCP call counts as 2-3)', dashboardAi('api_business'), '5 Pro licenses — invite users at any corporate email domain', 'team dashboards (up to 25 per variant)', 'commercial license — for your customers', 'priority support']),
       },
       {
         name: 'Enterprise',
         price: 'Custom',
         contact: 'enterprise@worldmonitor.app',
-        features: ['SSO/MFA/RBAC', 'team workspaces', 'white-label', 'on-premises', 'air-gapped', 'dedicated support'],
+        features: planFeatures('enterprise', ['team dashboards (up to 25 per variant)', 'team workspaces', 'white-label', 'on-premises', 'air-gapped', 'dedicated support', 'SSO/MFA/RBAC (by contract)']),
       },
     ],
   };
@@ -560,6 +690,10 @@ transform('public/pricing.md', (source) => {
   if (!next.includes(generatedNote)) {
     next = next.replace('# Pricing - World Monitor\n', `# Pricing - World Monitor\n\n${generatedNote}\n`);
   }
+  const freeMcp = `- MCP: ${FREE_ACCOUNT_MCP_LINE}; other MCP tools require a paid plan\n`;
+  next = /^- MCP: .* with a free account.*\n/m.test(next)
+    ? next.replace(/^- MCP: .* with a free account.*\n/m, freeMcp)
+    : next.replace(/(## Free\n[\s\S]*?^- Limits: .*\n)/m, `$1${freeMcp}`);
   return next.replace(
     /```json\n[\s\S]*?```/,
     `\`\`\`json\n${JSON.stringify(pricingSummary(), null, 2)}\n\`\`\``,

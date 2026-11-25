@@ -25,7 +25,7 @@ function restoreEnv(): void {
 
 async function importFreshNotificationChannels() {
   process.env.CONVEX_SITE_URL = 'https://convex.test';
-  process.env.RELAY_SHARED_SECRET = 'relay-secret';
+  process.env.CONVEX_TENANT_RELAY_SECRET = 'relay-secret';
   process.env.UPSTASH_REDIS_REST_URL = 'https://upstash.test';
   process.env.UPSTASH_REDIS_REST_TOKEN = 'upstash-token';
   return import(`../api/_notification-channels.ts?test=${Date.now()}-${Math.random()}`);
@@ -43,6 +43,24 @@ function makeSetChannelRequest(): Request {
       action: 'set-channel',
       channelType: 'email',
       email: 'buyer@example.com',
+    }),
+  });
+}
+
+// A channel past the free ladder (#4273): the one shape the gate still
+// terminally denies for a confirmed free caller, without reaching the relay.
+function makeProChannelRequest(): Request {
+  return new Request('https://worldmonitor.app/api/notification-channels', {
+    method: 'POST',
+    headers: {
+      Origin: 'https://worldmonitor.app',
+      Authorization: 'Bearer clerk-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'set-channel',
+      channelType: 'slack',
+      webhookEnvelope: 'enc',
     }),
   });
 }
@@ -100,6 +118,7 @@ describe('/api/notification-channels POST billing-verification capture', () => {
     const captures: Capture[] = [];
     mod.__resetDenialCaptureDedupForTests();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-capture' }),
       getEntitlements: async () => freeShapedEntitlements({ verificationUnavailable: true }),
       fetch: async () => {
@@ -128,22 +147,23 @@ describe('/api/notification-channels POST billing-verification capture', () => {
     assert.equal(captures.length, 1, 'second denial inside the dedup window must not re-emit');
   });
 
-  it('does NOT report a confirmed lapse — that is ordinary churn, already visible in Convex', async () => {
+  for (const terminal of ['subscription_lapsed', 'payment_failed'] as const) it(`does NOT report a confirmed ${terminal} — that is ordinary churn, already visible in Convex`, async () => {
     const mod = await importFreshNotificationChannels();
     const captures: Capture[] = [];
     mod.__resetDenialCaptureDedupForTests();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-lapsed-nocapture' }),
-      getEntitlements: async () => freeShapedEntitlements({ billingStatus: 'subscription_lapsed' }),
-      fetch: async () => {
-        throw new Error('relay must not be reached for a denied request');
-      },
+      getEntitlements: async () => freeShapedEntitlements({ billingStatus: terminal }),
+      fetch: async () => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }),
       captureSilentError: makeCaptureSpy(captures),
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    // Past-the-ladder channel: denied like any free caller, never captured.
+    const res = await mod.default(makeProChannelRequest(), ctx);
     assert.equal(res.status, 403);
+    assert.notEqual(res.headers.get('X-Billing-Verification'), terminal);
     assert.deepEqual(captures, []);
   });
 
@@ -152,6 +172,7 @@ describe('/api/notification-channels POST billing-verification capture', () => {
     const captures: Capture[] = [];
     mod.__resetDenialCaptureDedupForTests();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-free-nocapture' }),
       getEntitlements: async () => freeShapedEntitlements({}),
       fetch: async () => {
@@ -161,19 +182,40 @@ describe('/api/notification-channels POST billing-verification capture', () => {
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    // #4273: the terminal denial for a plain free user is now the
+    // past-the-ladder channel; a free-ladder write would proceed instead.
+    const res = await mod.default(makeProChannelRequest(), ctx);
     assert.equal(res.status, 403);
     assert.deepEqual(captures, []);
   });
 });
 
 describe('/api/notification-channels POST billing-verification contract', () => {
+  it('rejects an expired paid verification marker before any delivery write', async () => {
+    const mod = await importFreshNotificationChannels();
+    let writes = 0;
+    mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
+      validateBearerToken: async () => ({ valid: true, userId: 'user-expired' }),
+      getEntitlements: async () => freeShapedEntitlements({
+        features: { ...freeShapedEntitlements({}).features, tier: 1 },
+        validUntil: Date.now() - 1,
+        billingStatus: 'renewal_verification_pending',
+      }),
+      fetch: async () => { writes++; return Response.json({ ok: true }); },
+      captureSilentError: () => {},
+    });
+    const res = await mod.default(makeSetChannelRequest(), ctx);
+    assert.equal(writes, 0);
+    assert.equal(res.status, 503);
+  });
   it('answers a transient verification failure with a retryable 503, not pro_required', async () => {
     const mod = await importFreshNotificationChannels();
     const relayFetch = mock.fn(async () => {
       throw new Error('relay must not be reached for a denied request');
     });
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-verification-unavailable' }),
       getEntitlements: async () => freeShapedEntitlements({ verificationUnavailable: true }),
       fetch: relayFetch,
@@ -197,6 +239,7 @@ describe('/api/notification-channels POST billing-verification contract', () => 
   it('answers a pending renewal verification with a retryable 503 carrying the provider hint', async () => {
     const mod = await importFreshNotificationChannels();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-renewal-pending' }),
       getEntitlements: async () => freeShapedEntitlements({
         billingStatus: 'renewal_verification_pending',
@@ -220,33 +263,45 @@ describe('/api/notification-channels POST billing-verification contract', () => 
     });
   });
 
-  it('keeps the lapsed subscription denial a 403 with its own code', async () => {
+  for (const terminal of ['subscription_lapsed', 'payment_failed'] as const) it(`admits a ${terminal} subscriber to the free ladder so leftover alerts can be turned off`, async () => {
+    // #4273: the relay now delivers a tier-0 account's scoped rule. A terminal
+    // 403 here left a churned subscriber receiving alerts with no way to
+    // disable them in-app, so a confirmed lapse is a free caller instead.
     const mod = await importFreshNotificationChannels();
+    const relayBodies: unknown[] = [];
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-lapsed' }),
       getEntitlements: async () => freeShapedEntitlements({
-        billingStatus: 'subscription_lapsed',
+        billingStatus: terminal,
       }),
-      fetch: async () => {
-        throw new Error('relay must not be reached for a denied request');
+      fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+        relayBodies.push(JSON.parse(String(init?.body ?? '{}')));
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
       },
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    const res = await mod.default(new Request('https://worldmonitor.app/api/notification-channels', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://worldmonitor.app',
+        Authorization: 'Bearer clerk-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'set-notification-config', variant: 'full', enabled: false }),
+    }), ctx);
 
-    assert.equal(res.status, 403);
-    assert.equal(res.headers.get('X-Billing-Verification'), 'subscription_lapsed');
-    assert.deepEqual(await res.json(), {
-      error: 'Subscription lapsed',
-      code: 'subscription_lapsed',
-      requiredTier: 1,
-    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('X-Billing-Verification'), null);
+    assert.equal(relayBodies.length, 1, 'the disable reaches the relay');
+    assert.equal((relayBodies[0] as { enabled?: boolean }).enabled, false);
   });
 
   it('answers a failed renewal verification with a retryable 503', async () => {
     const mod = await importFreshNotificationChannels();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-renewal-failed' }),
       getEntitlements: async () => freeShapedEntitlements({
         billingStatus: 'renewal_verification_failed',
@@ -270,17 +325,18 @@ describe('/api/notification-channels POST billing-verification contract', () => 
     });
   });
 
-  it('leaves the day-0 no-history marker on the terminal 403 path', async () => {
-    // Scope pin for #5600: the poisoned-marker cohort arrives as a PLAIN tier-0
-    // answer — `renewalVerificationFreshness` is not part of
-    // getBillingVerificationDenial's input, so it cannot and must not become a
-    // 503 here (that would hand every never-subscribed free user a retryable
-    // error instead of a clean upsell). This endpoint deliberately keeps the
-    // 403; the wrongful-denial window is bounded by
-    // NOT_APPLICABLE_VERIFICATION_TTL_SECONDS instead. If someone later widens
-    // the helper to react to this marker, this test tells them it was a choice.
+  it('leaves the day-0 no-history marker on the free-ladder path, never a 503', async () => {
+    // Scope pin for #5600, updated for #4273: the poisoned-marker cohort
+    // arrives as a PLAIN tier-0 answer — `renewalVerificationFreshness` is
+    // not part of getBillingVerificationDenial's input, so it cannot and
+    // must not become a 503 here. Under the free alert ladder that cohort is
+    // treated as a free caller: free-channel writes proceed, and a channel
+    // past the ladder gets the clean terminal 403 below — bounded by
+    // NOT_APPLICABLE_VERIFICATION_TTL_SECONDS, after which the refreshed
+    // entitlement restores the paid ladder.
     const mod = await importFreshNotificationChannels();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-day0-marker' }),
       getEntitlements: async () => freeShapedEntitlements({
         renewalVerificationFreshness: { status: 'not_applicable', checkedAt: Date.now() },
@@ -291,20 +347,23 @@ describe('/api/notification-channels POST billing-verification contract', () => 
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    const res = await mod.default(makeProChannelRequest(), ctx);
 
     assert.equal(res.status, 403);
     assert.equal(res.headers.get('X-Billing-Verification'), null);
     assert.deepEqual(await res.json(), {
       error: 'pro_required',
-      message: 'Real-time alerts are available on the Pro plan.',
+      reason: 'channel_not_in_plan',
+      channel: 'slack',
+      message: 'The slack channel is available on the Pro plan.',
       upgradeUrl: 'https://worldmonitor.app/pro',
     });
   });
 
-  it('still hard-denies a genuine free user with the pro_required upsell', async () => {
+  it('still hard-denies a free user asking for a channel past the ladder (#4273)', async () => {
     const mod = await importFreshNotificationChannels();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-free' }),
       getEntitlements: async () => freeShapedEntitlements({}),
       fetch: async () => {
@@ -313,15 +372,82 @@ describe('/api/notification-channels POST billing-verification contract', () => 
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    const res = await mod.default(makeProChannelRequest(), ctx);
 
     assert.equal(res.status, 403);
     assert.equal(res.headers.get('X-Billing-Verification'), null);
     assert.deepEqual(await res.json(), {
       error: 'pro_required',
-      message: 'Real-time alerts are available on the Pro plan.',
+      reason: 'channel_not_in_plan',
+      channel: 'slack',
+      message: 'The slack channel is available on the Pro plan.',
       upgradeUrl: 'https://worldmonitor.app/pro',
     });
+  });
+
+  it('a free user asking for a teams send-test is denied before the queue (#4273, Strix review 7)', async () => {
+    // send-test never reaches Convex — the edge queues the welcome itself —
+    // so the free precheck is the only gate on this teams-only action. A
+    // downgraded account with a legacy verified Teams row must not keep
+    // driving that paid channel.
+    const mod = await importFreshNotificationChannels();
+    mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
+      validateBearerToken: async () => ({ valid: true, userId: 'user-free-send-test' }),
+      getEntitlements: async () => freeShapedEntitlements({}),
+      fetch: async () => {
+        throw new Error('the welcome queue must not be reached for a denied request');
+      },
+    });
+    mock.method(console, 'warn', () => {});
+
+    const res = await mod.default(new Request('https://worldmonitor.app/api/notification-channels', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://worldmonitor.app',
+        Authorization: 'Bearer clerk-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'send-test', channelType: 'teams' }),
+    }), ctx);
+
+    assert.equal(res.status, 403);
+    assert.deepEqual(await res.json(), {
+      error: 'pro_required',
+      reason: 'channel_not_in_plan',
+      channel: 'teams',
+      message: 'The teams channel is available on the Pro plan.',
+      upgradeUrl: 'https://worldmonitor.app/pro',
+    });
+  });
+
+  it('a free user writing a free-ladder email channel reaches the relay (#4273)', async () => {
+    const mod = await importFreshNotificationChannels();
+    const relayFetch = mock.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { action?: string };
+      if (body.action === 'welcome-scheduling-capability') {
+        return new Response(JSON.stringify({ durableWelcomeScheduling: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ isNew: true, welcomeScheduled: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
+      validateBearerToken: async () => ({ valid: true, userId: 'user-free-ladder' }),
+      getEntitlements: async () => freeShapedEntitlements({}),
+      fetch: relayFetch as never,
+    });
+    mock.method(console, 'warn', () => {});
+
+    const res = await mod.default(makeSetChannelRequest(), ctx);
+
+    assert.equal(res.status, 200, 'a free-ladder channel write must pass the gate AND complete');
+    assert.ok(relayFetch.mock.calls.length > 0, 'the write must reach the relay');
   });
 
   /**
@@ -346,26 +472,33 @@ describe('/api/notification-channels POST billing-verification contract', () => 
    * notification delivery to role-only accounts has to change the Convex gates
    * too — #5646.
    */
-  it('a Clerk role=pro session with no billed row still gets the clean upsell, not a deferred failure', async () => {
+  it('a Clerk role=pro session with no billed row still gets the clean upsell for a pro channel', async () => {
+    // #4273 narrows #5622's decision without reversing it: the free ladder
+    // (web push + email) is open to every account, billed row or not, but a
+    // channel PAST the ladder still requires the billed row — and the Clerk
+    // role never substitutes for one.
     const mod = await importFreshNotificationChannels();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-clerk-pro', role: 'pro' }),
       getEntitlements: async () => freeShapedEntitlements({}),
       fetch: async () => {
         throw new Error(
-          'the relay must not be reached: Convex would reject with PRO_REQUIRED, '
-          + 'which degrades to 500 on this action',
+          'the relay must not be reached: Convex would reject with the ladder denial, '
+          + 'which degrades through the outer error arm on this action',
         );
       },
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    const res = await mod.default(makeProChannelRequest(), ctx);
 
     assert.equal(res.status, 403);
     assert.deepEqual(await res.json(), {
       error: 'pro_required',
-      message: 'Real-time alerts are available on the Pro plan.',
+      reason: 'channel_not_in_plan',
+      channel: 'slack',
+      message: 'The slack channel is available on the Pro plan.',
       upgradeUrl: 'https://worldmonitor.app/pro',
     });
   });
@@ -378,6 +511,7 @@ describe('/api/notification-channels POST billing-verification contract', () => 
       const mod = await importFreshNotificationChannels();
       const entitlementCalls: string[] = [];
       mod.__setNotificationChannelsDepsForTests({
+        checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
         validateBearerToken: async () => ({
           valid: true,
           userId: `user-role-${String(role)}`,
@@ -393,7 +527,7 @@ describe('/api/notification-channels POST billing-verification contract', () => 
       });
       mock.method(console, 'warn', () => {});
 
-      const res = await mod.default(makeSetChannelRequest(), ctx);
+      const res = await mod.default(makeProChannelRequest(), ctx);
 
       assert.equal(res.status, 403, `role=${String(role)} must still be denied`);
       assert.deepEqual(
@@ -403,6 +537,53 @@ describe('/api/notification-channels POST billing-verification contract', () => 
       );
       mock.restoreAll();
     }
+  });
+
+  it('a stale-paid edge cache meeting a Convex capability 402 passes the body through (#4273, Greptile P2)', async () => {
+    // The edge sees tier 1 (cached), so no precheck fires; Convex has since
+    // downgraded the account and its ladder gate answers 402. That body must
+    // reach the client — not degrade to `500 Operation failed` — or the
+    // upgrade reason is lost exactly where it matters.
+    const mod = await importFreshNotificationChannels();
+    const relayFetch = mock.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { action?: string };
+      if (body.action === 'welcome-scheduling-capability') {
+        return new Response(JSON.stringify({ durableWelcomeScheduling: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        error: 'ALERT_CHANNEL_UPGRADE_REQUIRED',
+        message: 'The email channel is available on the Pro plan.',
+        upgradeUrl: 'https://worldmonitor.app/pro',
+        value: 'email',
+      }), { status: 402, headers: { 'Content-Type': 'application/json' } });
+    });
+    mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
+      validateBearerToken: async () => ({ valid: true, userId: 'user-stale-paid-cache' }),
+      getEntitlements: async () => ({
+        ...freeShapedEntitlements({}),
+        features: { ...freeShapedEntitlements({}).features, tier: 1 },
+        validUntil: Date.now() + 86_400_000,
+      }),
+      fetch: relayFetch as never,
+    });
+    mock.method(console, 'error', () => {});
+
+    // The email arm exercises finishDurableWelcomeRelay without the webhook
+    // URL validation/encryption machinery; the passthrough under test is
+    // status-generic.
+    const res = await mod.default(makeSetChannelRequest(), ctx);
+
+    assert.equal(res.status, 402);
+    assert.deepEqual(await res.json(), {
+      error: 'ALERT_CHANNEL_UPGRADE_REQUIRED',
+      message: 'The email channel is available on the Pro plan.',
+      upgradeUrl: 'https://worldmonitor.app/pro',
+      value: 'email',
+    });
   });
 
   it('a Clerk role=pro session with a BILLED row is allowed, as any tier-1 user is', async () => {
@@ -428,6 +609,7 @@ describe('/api/notification-channels POST billing-verification contract', () => 
       });
     });
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-clerk-pro-billed', role: 'pro' }),
       getEntitlements: async () => ({
         ...freeShapedEntitlements({}),
@@ -464,6 +646,7 @@ describe('/api/notification-channels POST billing-verification contract', () => 
     const mod = await importFreshNotificationChannels();
     const entitlementCalls: string[] = [];
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-get-ungated' }),
       getEntitlements: async (userId: string) => {
         entitlementCalls.push(userId);
@@ -496,6 +679,7 @@ describe('/api/notification-channels POST billing-verification contract', () => 
   it('fails closed with pro_required when the entitlement lookup returns null', async () => {
     const mod = await importFreshNotificationChannels();
     mod.__setNotificationChannelsDepsForTests({
+      checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
       validateBearerToken: async () => ({ valid: true, userId: 'user-null-entitlement' }),
       getEntitlements: async () => null,
       fetch: async () => {
@@ -504,12 +688,17 @@ describe('/api/notification-channels POST billing-verification contract', () => 
     });
     mock.method(console, 'warn', () => {});
 
-    const res = await mod.default(makeSetChannelRequest(), ctx);
+    // #4273: a null lookup is treated as a free-ladder caller — Convex's
+    // capability gate stays authoritative for free-channel writes — so the
+    // terminal edge denial to pin here is the past-the-ladder channel.
+    const res = await mod.default(makeProChannelRequest(), ctx);
 
     assert.equal(res.status, 403);
     assert.deepEqual(await res.json(), {
       error: 'pro_required',
-      message: 'Real-time alerts are available on the Pro plan.',
+      reason: 'channel_not_in_plan',
+      channel: 'slack',
+      message: 'The slack channel is available on the Pro plan.',
       upgradeUrl: 'https://worldmonitor.app/pro',
     });
   });

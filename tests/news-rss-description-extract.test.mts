@@ -121,6 +121,21 @@ describe('extractDescription — RSS', () => {
     assert.ok(desc.includes('comfortably above'));
   });
 
+  it('preserves a CDATA summary after encoded publisher thumbnail markup', () => {
+    // Times of India emits an entity-encoded thumbnail anchor followed by a
+    // literal CDATA section inside the same <description> body. Decoding the
+    // entities before unwrapping CDATA used to make the HTML-strip regex
+    // consume the summary together with the CDATA wrapper.
+    const block = `
+      <title>India policy update</title>
+      <description>&lt;a href="https://timesofindia.indiatimes.com/india/example/articleshow/123456.cms"&gt;&lt;img src="https://static.toiimg.com/photo/123456.cms" /&gt;&lt;/a&gt;<![CDATA[The policy update includes enough original context for the digest summary and downstream analysis surfaces.]]></description>
+    `;
+    const desc = extractDescription(block, false, 'India policy update');
+
+    assert.ok(desc.includes('enough original context'));
+    assert.doesNotMatch(desc, /<img|toiimg|CDATA/i);
+  });
+
   it('malformed CDATA with a premature ]]> sequence falls back to the plain regex', () => {
     // Feeds in the wild sometimes malform CDATA by embedding a literal ]]>
     // that is not the terminator (spec-violating). Our CDATA regex is
@@ -188,7 +203,7 @@ describe('parseRssXml — integration with description', () => {
     `);
     const result = parseRssXml(xml, FEED, 'full');
     assert.ok(result, 'parseRssXml returns non-null for populated feed');
-    const items = result!.items;
+    const items = [...result!.items].reverse(); // feed order: the parser ranks newest first
     assert.strictEqual(items.length, 2);
     assert.ok(items[0]!.description.length > 0, 'first item has a real description');
     assert.ok(items[0]!.description.includes('substantive'));
@@ -212,7 +227,7 @@ describe('parseRssXml — integration with description', () => {
     `);
     const result = parseRssXml(xml, FEED, 'full');
     assert.ok(result);
-    const items = result!.items;
+    const items = [...result!.items].reverse(); // feed order: the parser ranks newest first
     assert.strictEqual(items.length, 2);
     assert.strictEqual(items[0]!.isOpinion, false, 'hard-news item is not opinion');
     assert.strictEqual(items[1]!.isOpinion, true, 'Opinion:-prefixed item under /opinion/ is opinion');
@@ -235,7 +250,7 @@ describe('parseRssXml — integration with description', () => {
     `);
     const result = parseRssXml(xml, FEED, 'full');
     assert.ok(result);
-    const items = result!.items;
+    const items = [...result!.items].reverse(); // feed order: the parser ranks newest first
     assert.strictEqual(items.length, 2);
     assert.strictEqual(items[0]!.isFeelGood, false, 'hard-news Sarmat item is not feel-good');
     assert.strictEqual(items[1]!.isFeelGood, true, 'Veterans-warplanes item is feel-good (STRONG /features/ URL)');
@@ -258,7 +273,7 @@ describe('parseRssXml — integration with description', () => {
     `);
     const result = parseRssXml(xml, FEED, 'full');
     assert.ok(result);
-    const items = result!.items;
+    const items = [...result!.items].reverse(); // feed order: the parser ranks newest first
     assert.strictEqual(items.length, 2);
     assert.strictEqual(items[0]!.isEphemeralLiveCoverage, true, 'WATCH LIVE teaser is ephemeral');
     assert.strictEqual(items[1]!.isEphemeralLiveCoverage, false, 'live-update hard news is preserved');

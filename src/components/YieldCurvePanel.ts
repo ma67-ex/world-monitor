@@ -1,17 +1,10 @@
-import type { EconomicServiceClient } from '@/generated/client/worldmonitor/economic/v1/service_client';
 import { Panel } from './Panel';
+import { createLazyClient, getRpcBaseUrl, rpcFetch } from '@/services/rpc-client';
+import { EconomicServiceClient } from '@/services/generated-rpc-clients';
 import { t } from '@/services/i18n';
 import { escapeHtml, unsafeRawHtml } from '@/utils/sanitize';
 
-let _client: EconomicServiceClient | null = null;
-async function getEconomicClient(): Promise<EconomicServiceClient> {
-  if (!_client) {
-    const { EconomicServiceClient } = await import('@/generated/client/worldmonitor/economic/v1/service_client');
-    const { getRpcBaseUrl } = await import('@/services/rpc-client');
-    _client = new EconomicServiceClient(getRpcBaseUrl(), { fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args) });
-  }
-  return _client;
-}
+const getEconomicClient = createLazyClient(() => new EconomicServiceClient(getRpcBaseUrl(), { fetch: rpcFetch }));
 
 type Tab = 'curve' | 'rates';
 
@@ -155,7 +148,7 @@ function renderChart(current: YieldPoint[], prior: YieldPoint[], ecbRates: Recor
   const ecbDots = ecbRates ? buildEcbCircles(ecbRates, yMin, yMax) : '';
 
   return `
-    <svg viewBox="0 0 ${SVG_W} ${SVG_H}" width="100%" style="display:block;overflow:visible">
+    <svg viewBox="0 0 ${SVG_W} ${SVG_H}" width="100%" role="img" aria-label="Treasury yield curve by maturity" style="display:block;overflow:visible">
       ${buildYAxisLabels(yMin, yMax)}
       ${buildXAxisLabels(current.length)}
       ${priorLine}
@@ -166,15 +159,15 @@ function renderChart(current: YieldPoint[], prior: YieldPoint[], ecbRates: Recor
     </svg>`;
 }
 
-function renderTable(points: YieldPoint[]): string {
-  const headers = points.map(p => `<th style="font-size:calc(9px * var(--wm-panel-effective-scale, 1));font-weight:600;color:var(--text-dim);padding:4px 6px;text-align:center">${escapeHtml(p.tenor)}</th>`).join('');
+function renderTable(points: YieldPoint[], labelledBy: string): string {
+  const headers = points.map(p => `<th scope="col" style="text-align:center">${escapeHtml(p.tenor)}</th>`).join('');
   const cells = points.map(p => {
     const val = p.value !== null ? `${p.value.toFixed(2)}%` : 'N/A';
-    return `<td style="font-size:calc(11px * var(--wm-panel-effective-scale, 1));color:var(--text);padding:4px 6px;text-align:center">${escapeHtml(val)}</td>`;
+    return `<td style="text-align:center">${escapeHtml(val)}</td>`;
   }).join('');
   return `
-    <div style="overflow-x:auto;margin-top:8px">
-      <table style="width:100%;border-collapse:collapse">
+    <div class="table-scroll" role="group" tabindex="0" aria-labelledby="${escapeHtml(labelledBy)}" style="margin-top:8px">
+      <table class="wm-table">
         <thead><tr>${headers}</tr></thead>
         <tbody><tr>${cells}</tr></tbody>
       </table>
@@ -199,7 +192,7 @@ function miniRateSparkline(obs: RateObs[], color: string, w = 80, h = 22): strin
     const y = h - ((v - min) / range) * (h - 2) - 1;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
-  return `<svg width="${w}" height="${h}" style="display:inline-block;vertical-align:middle"><polyline points="${pts}" fill="none" stroke="${escapeHtml(color)}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return `<svg width="${w}" height="${h}" aria-hidden="true" style="display:inline-block;vertical-align:middle"><polyline points="${pts}" fill="none" stroke="${escapeHtml(color)}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 function renderRatesTab(rows: RateRow[]): string {
@@ -249,7 +242,7 @@ export class YieldCurvePanel extends Panel {
   public async fetchData(): Promise<boolean> {
     this.showLoading();
     try {
-      const client = await getEconomicClient();
+      const client = getEconomicClient();
       const [fredResp, ecbResp] = await Promise.allSettled([
         client.getFredSeriesBatch({
           seriesIds: [...SERIES_IDS, 'ESTR', 'EURIBOR3M', 'EURIBOR6M', 'EURIBOR1Y'],
@@ -274,7 +267,7 @@ export class YieldCurvePanel extends Panel {
         : null;
 
       this._rateRows = [
-        { id: 'ESTR', label: '€STR', obs: results['ESTR']?.observations ?? [], color: '#2ecc71' },
+        { id: 'ESTR', label: 'Euro short-term rate', obs: results['ESTR']?.observations ?? [], color: '#2ecc71' },
         { id: 'EURIBOR3M', label: 'EURIBOR 3M', obs: results['EURIBOR3M']?.observations ?? [], color: '#3498db' },
         { id: 'EURIBOR6M', label: 'EURIBOR 6M', obs: results['EURIBOR6M']?.observations ?? [], color: '#9b59b6' },
         { id: 'EURIBOR1Y', label: 'EURIBOR 1Y', obs: results['EURIBOR1Y']?.observations ?? [], color: '#e67e22' },
@@ -302,7 +295,7 @@ export class YieldCurvePanel extends Panel {
     </div>`;
 
     if (this._tab === 'rates') {
-      this.setSafeContent(unsafeRawHtml(`<div style="padding:10px 14px 6px">${tabBar}${renderRatesTab(this._rateRows)}</div>`, 'legacy Panel.setContent() migration'));
+      this.setSafeContent(unsafeRawHtml(`<div style="padding:10px 0 6px">${tabBar}${renderRatesTab(this._rateRows)}</div>`, 'legacy Panel.setContent() migration'));
       return;
     }
 
@@ -325,13 +318,13 @@ export class YieldCurvePanel extends Panel {
       : '';
 
     this.setSafeContent(unsafeRawHtml(`
-      <div style="padding:10px 14px 6px">
+      <div style="padding:10px 0 6px">
         ${tabBar}
         <div style="display:flex;align-items:center;margin-bottom:10px;gap:4px">
           ${statusBadge}${spreadHtml}
         </div>
         <div style="margin:0 -4px">${renderChart(this._current, this._prior, this._ecbRates)}</div>
-        ${renderTable(this._current)}
+        ${renderTable(this._current, `${this.panelId}Title`)}
         <div style="margin-top:8px;font-size:calc(9px * var(--wm-panel-effective-scale, 1));color:var(--text-dim);display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           <span><svg width="20" height="4" style="vertical-align:middle"><line x1="0" y1="2" x2="20" y2="2" stroke="#3498db" stroke-width="2"/></svg> US (Current)</span>
           <span><svg width="20" height="4" style="vertical-align:middle"><line x1="0" y1="2" x2="20" y2="2" stroke="rgba(255,255,255,0.3)" stroke-width="1.5" stroke-dasharray="4,3"/></svg> US (Prior)</span>

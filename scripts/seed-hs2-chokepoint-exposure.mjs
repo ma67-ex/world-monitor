@@ -11,8 +11,12 @@ import {
   logSeedResult,
   releaseLock,
 } from './_seed-utils.mjs';
+import { bilateralTransitShares, hasModeledSeaRoute } from './shared/bilateral-chokepoint-transit.mjs';
 
 loadEnvFile(import.meta.url);
+
+const require = createRequire(import.meta.url);
+const SUPPLY_VULNERABILITY_COMMODITIES = require('./shared/supply-vulnerability-commodities.json');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -27,7 +31,7 @@ const LOCK_TTL_MS = 5 * 60 * 1000;
 const COMTRADE_KEY_PREFIX = 'comtrade:bilateral-hs4:';
 
 // Top 10 HS2 chapters by global trade volume and strategic importance.
-const HS2_CODES = [
+const BASE_HS2_CODES = [
   '27', // Mineral Fuels (energy)
   '84', // Machinery & Mechanical Appliances
   '85', // Electrical Machinery & Electronics
@@ -40,6 +44,11 @@ const HS2_CODES = [
   '62', // Apparel (textiles)
 ];
 
+export const HS2_CODES = Array.from(new Set([
+  ...BASE_HS2_CODES,
+  ...SUPPLY_VULNERABILITY_COMMODITIES.commodities.map((commodity) => commodity.transitHs2),
+])).sort((a, b) => Number(a) - Number(b));
+
 // Lightweight copy of the chokepoint registry fields needed for exposure computation.
 // Kept in sync with src/config/chokepoint-registry.ts — update both together.
 /** @type {Array<{id: string, displayName: string, routeIds: string[], shockModelSupported: boolean}>} */
@@ -48,7 +57,7 @@ const CHOKEPOINT_REGISTRY = [
   { id: 'malacca_strait',  displayName: 'Strait of Malacca',     shockModelSupported: true,  routeIds: ['china-europe-suez','china-us-east-suez','gulf-asia-oil','qatar-asia-lng','india-se-asia','china-africa','cpec-route'] },
   { id: 'hormuz_strait',   displayName: 'Strait of Hormuz',      shockModelSupported: true,  routeIds: ['gulf-europe-oil','gulf-asia-oil','qatar-europe-lng','qatar-asia-lng','gulf-americas-cape'] },
   { id: 'bab_el_mandeb',   displayName: 'Bab el-Mandeb',         shockModelSupported: true,  routeIds: ['china-europe-suez','china-us-east-suez','gulf-europe-oil','qatar-europe-lng','singapore-med','india-europe'] },
-  { id: 'panama',          displayName: 'Panama Canal',          shockModelSupported: false, routeIds: ['china-us-east-panama','panama-transit'] },
+  { id: 'panama',          displayName: 'Panama Canal',          shockModelSupported: false, routeIds: ['china-us-east-panama','panama-transit','us-gulf-asia-panama'] },
   { id: 'taiwan_strait',   displayName: 'Taiwan Strait',         shockModelSupported: false, routeIds: ['china-us-west','intra-asia-container'] },
   { id: 'cape_of_good_hope', displayName: 'Cape of Good Hope',   shockModelSupported: false, routeIds: ['brazil-china-bulk','gulf-americas-cape','asia-europe-cape'] },
   { id: 'gibraltar',       displayName: 'Strait of Gibraltar',   shockModelSupported: false, routeIds: ['gulf-europe-oil','singapore-med','india-europe','asia-europe-cape'] },
@@ -61,9 +70,17 @@ const CHOKEPOINT_REGISTRY = [
 
 // ── Load country-port-clusters ────────────────────────────────────────────────
 
-const require = createRequire(import.meta.url);
 /** @type {Record<string, {nearestRouteIds: string[], coastSide: string}>} */
 const COUNTRY_PORT_CLUSTERS = require('./shared/country-port-clusters.json');
+/** @type {Record<string, string>} */
+const COUNTRY_REGIONS = require('./shared/iso2-to-region.json');
+const TRANSIT_CONTEXT = { clusters: COUNTRY_PORT_CLUSTERS, regions: COUNTRY_REGIONS, chokepoints: CHOKEPOINT_REGISTRY };
+
+// The country universe this seeder writes for. Derived from static config, so it is
+// knowable even when a run fails — writeMeta() publishes it on every path so a failed
+// seed cannot erase the manifest the scenario worker depends on.
+const SEEDED_COUNTRY_IDS = Object.keys(COUNTRY_PORT_CLUSTERS)
+  .filter(k => k !== '_comment' && k.length === 2);
 
 // ── Exposure computation ──────────────────────────────────────────────────────
 
@@ -82,7 +99,7 @@ function hs4ToHs2(hs4) {
 
 /**
  * Flow-weighted exposure — mirrors chokepoint-exposure-utils.ts:computeFlowWeightedExposures.
- * Uses importerRoutes OR exporterRoutes union for route coverage (same as handler).
+ * A supplier's share counts toward a chokepoint only when the bilateral route crosses it.
  * @param {string} importerIso2
  * @param {string} hs2
  * @param {ComtradeProduct[]} products
@@ -95,33 +112,27 @@ export function computeFlowWeightedExposures(importerIso2, hs2, products) {
 
   if (matchingProducts.length === 0) return [];
 
-  const importerCluster = COUNTRY_PORT_CLUSTERS[importerIso2];
-  const importerRoutes = new Set(importerCluster?.nearestRouteIds ?? []);
   const totalSectorValue = matchingProducts.reduce((s, p) => s + p.totalValue, 0);
 
   /** @type {Map<string, number>} */
   const cpScores = new Map();
   for (const cp of CHOKEPOINT_REGISTRY) cpScores.set(cp.id, 0);
 
+  let modeled = false;
   for (const product of matchingProducts) {
     const productWeight = totalSectorValue > 0 ? product.totalValue / totalSectorValue : 0;
 
     for (const exporter of product.topExporters) {
       if (!exporter.partnerIso2) continue;
-      const exporterCluster = COUNTRY_PORT_CLUSTERS[exporter.partnerIso2];
-      const exporterRoutes = new Set(exporterCluster?.nearestRouteIds ?? []);
-
-      for (const cp of CHOKEPOINT_REGISTRY) {
-        let overlap = 0;
-        for (const r of cp.routeIds) {
-          if (importerRoutes.has(r) || exporterRoutes.has(r)) overlap++;
-        }
-        const routeCoverage = overlap / Math.max(cp.routeIds.length, 1);
-        const contribution = routeCoverage * exporter.share * productWeight * 100;
-        cpScores.set(cp.id, (cpScores.get(cp.id) ?? 0) + contribution);
+      if (hasModeledSeaRoute(importerIso2, exporter.partnerIso2, TRANSIT_CONTEXT.clusters)) modeled = true;
+      for (const [cpId, fraction] of bilateralTransitShares(importerIso2, exporter.partnerIso2, TRANSIT_CONTEXT)) {
+        cpScores.set(cpId, (cpScores.get(cpId) ?? 0) + fraction * exporter.share * productWeight * 100);
       }
     }
   }
+
+  // No supplier pair has a modeled sea route, so zero would be unevaluated rather than measured.
+  if (!modeled) return [];
 
   const entries = CHOKEPOINT_REGISTRY.map(cp => {
     let score = cpScores.get(cp.id) ?? 0;
@@ -172,8 +183,9 @@ export function computeCountryLevelExposure(nearestRouteIds, coastSide, hs2) {
 
   return {
     exposures: entries,
-    primaryChokepointId: entries[0]?.chokepointId ?? '',
+    primaryChokepointId: entries[0]?.exposureScore > 0 ? entries[0].chokepointId : '',
     vulnerabilityIndex,
+    coverage: 'country_route_fallback',
   };
 }
 
@@ -244,8 +256,7 @@ export async function main() {
   const lock = await acquireLockSafely(LOCK_DOMAIN, runId, LOCK_TTL_MS, { label: LOCK_DOMAIN });
 
   if (lock.skipped) {
-    const allKeys = Object.keys(COUNTRY_PORT_CLUSTERS)
-      .filter(k => k !== '_comment' && k.length === 2)
+    const allKeys = SEEDED_COUNTRY_IDS
       .flatMap(iso2 => HS2_CODES.map(hs2 => `${KEY_PREFIX}${iso2}:${hs2}:v1`));
     await extendExistingTtl([...allKeys, META_KEY], TTL_SECONDS)
       .catch(e => console.warn('[chokepoint-exposure] TTL extension (skipped) failed:', e.message));
@@ -256,9 +267,25 @@ export async function main() {
     return;
   }
 
-  /** @param {number} count @param {string} [status] */
+  /**
+   * Publish seed metadata. The manifest fields describe the country/sector UNIVERSE,
+   * which comes from static config and is therefore still true after a failed run —
+   * so they are emitted on every path. Only `status` and `recordCount` report the run.
+   * Dropping them on the error path would blank the scenario worker (which gates all
+   * computation on manifestVersion) even though the exposure keys it reads are
+   * deliberately TTL-extended by the same catch block.
+   *
+   * @param {number} count @param {string} [status]
+   */
   const writeMeta = async (count, status = 'ok') => {
-    const meta = JSON.stringify({ fetchedAt: Date.now(), recordCount: count, status });
+    const meta = JSON.stringify({
+      fetchedAt: Date.now(),
+      recordCount: count,
+      status,
+      manifestVersion: 1,
+      countryIds: SEEDED_COUNTRY_IDS,
+      hs2Codes: HS2_CODES,
+    });
     await redisPipeline([['SET', META_KEY, meta, 'EX', TTL_SECONDS * 3]])
       .catch(e => console.warn('[chokepoint-exposure] Failed to write seed-meta:', e.message));
   };
@@ -267,7 +294,7 @@ export async function main() {
     const countries = Object.entries(COUNTRY_PORT_CLUSTERS).filter(
       ([k]) => k !== '_comment' && k.length === 2,
     );
-    const iso2List = countries.map(([iso2]) => iso2);
+    const iso2List = SEEDED_COUNTRY_IDS;
 
     console.log(`[chokepoint-exposure] Loading Comtrade bilateral data for ${iso2List.length} countries...`);
     const comtradeMap = await loadComtradeData(iso2List);
@@ -294,13 +321,14 @@ export async function main() {
 
         if (comtradeProducts && comtradeProducts.length > 0) {
           const exposures = computeFlowWeightedExposures(iso2, hs2, comtradeProducts);
-          if (exposures.length > 0 && exposures.some(e => e.exposureScore > 0)) {
+          if (exposures.length > 0) {
             const coastSide = cluster.coastSide ?? '';
-            if (exposures[0]) exposures[0] = { ...exposures[0], coastSide };
+            exposures[0] = { ...exposures[0], coastSide };
             result = {
               exposures,
-              primaryChokepointId: exposures[0]?.chokepointId ?? '',
+              primaryChokepointId: exposures[0].exposureScore > 0 ? exposures[0].chokepointId : '',
               vulnerabilityIndex: buildVulnIndex(exposures),
+              coverage: 'flow_weighted',
             };
             flowWeightedCount++;
           } else {
@@ -325,7 +353,7 @@ export async function main() {
 
     commands.push([
       'SET', META_KEY,
-      JSON.stringify({ fetchedAt: Date.now(), recordCount: writtenCount, status: 'ok' }),
+      JSON.stringify({ fetchedAt: Date.now(), recordCount: writtenCount, status: 'ok', manifestVersion: 1, countryIds: SEEDED_COUNTRY_IDS, hs2Codes: HS2_CODES }),
       'EX', TTL_SECONDS * 3,
     ]);
 
@@ -346,8 +374,7 @@ export async function main() {
     console.log(`[chokepoint-exposure] Seeded ${writtenCount} keys (${flowWeightedCount} flow-weighted, ${fallbackCount} fallback)`);
   } catch (err) {
     console.error('[chokepoint-exposure] Seed failed:', err.message || err);
-    const existingKeys = Object.keys(COUNTRY_PORT_CLUSTERS)
-      .filter(k => k !== '_comment' && k.length === 2)
+    const existingKeys = SEEDED_COUNTRY_IDS
       .flatMap(iso2 => HS2_CODES.map(hs2 => `${KEY_PREFIX}${iso2}:${hs2}:v1`));
     await extendExistingTtl([...existingKeys, META_KEY], TTL_SECONDS)
       .catch(e => console.warn('[chokepoint-exposure] TTL extension failed:', e.message));

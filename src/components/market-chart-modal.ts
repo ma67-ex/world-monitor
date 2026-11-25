@@ -7,7 +7,7 @@
 
 import type { MarketData } from '@/types';
 import { t } from '@/services/i18n';
-import { formatPrice, formatChange, getChangeClass } from '@/utils';
+import { formatQuotePrice, formatChange, getChangeClass } from '@/utils';
 import { escapeHtml } from '@/utils/sanitize';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import { terminalChart } from '@/utils/terminal-chart';
@@ -16,6 +16,7 @@ import {
   createMarketChartFocusController,
   type MarketChartFocusController,
 } from './market-chart-interactions';
+import { declareOverlay } from '@/utils/open-modal';
 
 let modalEl: HTMLElement | null = null;
 let focusController: MarketChartFocusController | null = null;
@@ -36,7 +37,7 @@ export function openMarketChartModal(stock: MarketData): void {
     change: stock.change,
     width: 520,
     height: 240,
-    formatValue: (v) => formatPrice(v),
+    formatValue: (v) => formatQuotePrice(stock.symbol, v),
     ariaLabel: t('components.markets.chart.title', { symbol: stock.display }),
   });
   if (!chart) return; // no plottable series
@@ -55,6 +56,8 @@ export function openMarketChartModal(stock: MarketData): void {
   modalEl.className = 'market-chart-overlay';
   modalEl.setAttribute('role', 'dialog');
   modalEl.setAttribute('aria-modal', 'true');
+  // Generated SVG from data already on the page.
+  declareOverlay(modalEl, { reload: 'safe' });
   modalEl.setAttribute('aria-label', t('components.markets.chart.title', { symbol: stock.display }));
 
   const changeClass = getChangeClass(stock.change);
@@ -72,7 +75,7 @@ export function openMarketChartModal(stock: MarketData): void {
             <div class="market-chart-symbol">${escapeHtml(stock.display)}</div>
           </div>
           <div class="market-chart-quote">
-            <span class="market-chart-price">${formatPrice(stock.price)}</span>
+            <span class="market-chart-price">${escapeHtml(formatQuotePrice(stock.symbol, stock.price))}</span>
             <span class="market-change ${changeClass}">${formatChange(stock.change)}</span>
           </div>
         </div>

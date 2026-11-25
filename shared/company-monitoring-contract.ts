@@ -36,7 +36,6 @@ export const COMPANY_MONITORING_LIMITS = {
 
 export const COMPANY_MONITORING_CURSOR_VERSION = 1 as const;
 export const COMPANY_MONITORING_IMPORT_VERSION = 'cm-import-v1' as const;
-export const COMPANY_MONITORING_IMPORT_PATH = '/api/company-monitoring/v1/import-monitored-company-batch' as const;
 
 export const COMPANY_MONITORING_RPC_SCOPES = {
   CreateMonitoredCompany: 'company_monitoring:write',
@@ -454,12 +453,14 @@ const MATERIAL_IMPACT_LIFECYCLE_BY_INPUT: Readonly<Record<string, string>> = {
 };
 const COVERAGE_STATE_BY_INPUT: Readonly<Record<string, string>> = {
   awaiting_first_scan: 'awaiting_first_scan',
+  identity_unresolved: 'identity_unresolved',
   adequate: 'adequate',
   partial: 'partial',
   stale: 'stale',
   unavailable: 'unavailable',
   needs_confirmation: 'needs_confirmation',
   COMPANY_COVERAGE_STATE_AWAITING_FIRST_SCAN: 'awaiting_first_scan',
+  COMPANY_COVERAGE_STATE_IDENTITY_UNRESOLVED: 'identity_unresolved',
   COMPANY_COVERAGE_STATE_ADEQUATE: 'adequate',
   COMPANY_COVERAGE_STATE_PARTIAL: 'partial',
   COMPANY_COVERAGE_STATE_STALE: 'stale',
@@ -507,7 +508,7 @@ export const normalizeImpactDirectionFilters = (values: readonly string[]): stri
 );
 
 export interface CompanyMonitoringCoverageContract {
-  coverage: 'awaiting_first_scan' | 'adequate' | 'partial' | 'stale' | 'unavailable' | 'needs_confirmation';
+  coverage: 'awaiting_first_scan' | 'identity_unresolved' | 'adequate' | 'partial' | 'stale' | 'unavailable' | 'needs_confirmation';
   observation: 'events_observed' | 'no_events_observed' | 'unknown';
   providers: Array<{
     provider: 'exa' | 'x';
@@ -519,7 +520,7 @@ export interface CompanyMonitoringCoverageContract {
 }
 
 export function assertCoverageObservation(contract: CompanyMonitoringCoverageContract): void {
-  const coverageStates = new Set(['awaiting_first_scan', 'adequate', 'partial', 'stale', 'unavailable', 'needs_confirmation']);
+  const coverageStates = new Set(['awaiting_first_scan', 'identity_unresolved', 'adequate', 'partial', 'stale', 'unavailable', 'needs_confirmation']);
   const observationStates = new Set(['events_observed', 'no_events_observed', 'unknown']);
   const providerNames = new Set(['exa', 'x']);
   const providerStates = new Set(['complete', 'partial', 'failed']);

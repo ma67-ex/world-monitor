@@ -1,9 +1,21 @@
-export const DEBUGBEAR_RUM_SCRIPT_SRC = 'https://cdn.debugbear.com/lpMwA9KpC6pf.js';
-// 10% sampling. 100% overran the DebugBear RUM monthly quota (~529k/500k, 2026-07). The R2-origin
-// experiment that justified full sampling is a no-go (KTD7 feasibility failure); ongoing web-vitals
-// RUM needs only a fraction. Keep in sync with pro-test/src/debugbear-rum.ts (asserted by the test).
+// Versioned collector pinned by subresource integrity. The unversioned
+// per-project URL (cdn.debugbear.com/lpMwA9KpC6pf.js) served attacker code on
+// 2026-10-29 after DebugBear's registrar account was hijacked; an SRI pin makes
+// the browser refuse any byte change. Bumping the version means taking the new
+// URL and hash from the DebugBear RUM embed snippet and updating both loaders.
+export const DEBUGBEAR_RUM_SCRIPT_SRC = 'https://cdn.debugbear.com/rum-1.1.2.js';
+export const DEBUGBEAR_RUM_SCRIPT_INTEGRITY = 'sha384-8uZB5Im5AGW6nfv8sNNYXyMW8Cu+ENZElwP0SUZKqBBQay51uLwrG4cVeQfwHGD9';
+/** The collector reads this attribute off its own tag to fetch the project config. */
+export const DEBUGBEAR_RUM_SNIPPET_KEY = 'lpMwA9KpC6pf';
+// 10% sampling. 100% overran the DebugBear RUM monthly quota (~529k/500k, 2026-07).
+// Bootstrap transfer evidence and ongoing web-vitals RUM need only a fraction.
+// Keep in sync with pro-test/src/debugbear-rum.ts (asserted by the test).
 export const DEBUGBEAR_RUM_SAMPLE_RATE = 10;
-const DEBUGBEAR_RUM_SCRIPT_PATHNAME = new URL(DEBUGBEAR_RUM_SCRIPT_SRC).pathname;
+const DEBUGBEAR_RUM_SCRIPT_PATHNAMES = [
+  new URL(DEBUGBEAR_RUM_SCRIPT_SRC).pathname,
+  // Pre-SRI collector path; tabs opened on an older bundle still run it.
+  '/lpMwA9KpC6pf.js',
+];
 /** Every production host the RUM script loads on. Exported so
  * `tests/sentry-allow-urls.test.mts` can assert the Sentry ingest allowlist
  * covers the same population instead of restating it (#6545). */
@@ -17,13 +29,15 @@ export const DEBUGBEAR_RUM_HOSTS = new Set([
   'energy.worldmonitor.app',
 ]);
 
-import type { BootstrapR2RumSample } from './bootstrap-r2-rum';
+import type { BootstrapTransferRumSample } from './bootstrap-transfer-rum';
+import { whenUrlFreeOfSensitiveParams } from '../../shared/sensitive-url-params';
+import { getDeviceTier } from '../utils/device-tier';
 
 type DebugBearRumEvent =
   | ['presampling', number]
   | ['error' | 'unhandledrejection', Event]
   | ['metric1' | 'metric2' | 'metric3', number]
-  | ['tag1' | 'tag2' | 'tag3', string];
+  | ['tag1' | 'tag2' | 'tag3' | 'tag4', string];
 
 declare global {
   interface Window {
@@ -32,6 +46,8 @@ declare global {
 }
 
 let debugBearRumStarted = false;
+let removeErrorListeners: (() => void) | undefined;
+const MAX_BUFFERED_ERRORS = 50;
 
 export function shouldEnableDebugBearRum(hostname: string): boolean {
   return DEBUGBEAR_RUM_HOSTS.has(hostname.toLowerCase());
@@ -39,7 +55,7 @@ export function shouldEnableDebugBearRum(hostname: string): boolean {
 
 /** Identifies a Sentry frame emitted by the configured DebugBear collector. */
 export function isDebugBearRumScriptFrame(filename: string): boolean {
-  return filename.endsWith(DEBUGBEAR_RUM_SCRIPT_PATHNAME) || /debugbear/i.test(filename);
+  return DEBUGBEAR_RUM_SCRIPT_PATHNAMES.some((path) => filename.endsWith(path)) || /debugbear/i.test(filename);
 }
 
 function loadDebugBearRumScript(): void {
@@ -48,11 +64,29 @@ function loadDebugBearRumScript(): void {
 
   const script = document.createElement('script');
   script.async = true;
+  // SRI on a cross-origin script requires a CORS fetch; the CDN answers ACAO: *.
+  script.crossOrigin = 'anonymous';
+  script.integrity = DEBUGBEAR_RUM_SCRIPT_INTEGRITY;
+  script.setAttribute('snippetKey', DEBUGBEAR_RUM_SNIPPET_KEY);
   script.src = DEBUGBEAR_RUM_SCRIPT_SRC;
   if ('fetchPriority' in script) {
     script.fetchPriority = 'low';
   }
+  script.onerror = abandonDebugBearRum;
   document.head.appendChild(script);
+}
+
+/** Drop the pre-script error buffer and listeners when the collector will
+ * never run (load failure, or a URL that never sheds its sensitive params). */
+function abandonDebugBearRum(): void {
+  removeErrorListeners?.();
+  const queue = window.dbbRum;
+  if (Array.isArray(queue)) {
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (queue[i]?.[0] === 'error' || queue[i]?.[0] === 'unhandledrejection') queue.splice(i, 1);
+    }
+  }
+  debugBearRumStarted = false;
 }
 
 export function initDebugBearRum(): void {
@@ -64,33 +98,86 @@ export function initDebugBearRum(): void {
   const queue = window.dbbRum ?? [];
   window.dbbRum = queue;
   queue.push(['presampling', DEBUGBEAR_RUM_SAMPLE_RATE]);
+  // tag4 = device tier, so low-end-mode INP can be compared against the
+  // pre-change baseline (tags 1-3 belong to the bootstrap transfer sample).
+  queue.push(['tag4', getDeviceTier()]);
 
-  for (const type of ['error', 'unhandledrejection'] as const) {
-    window.addEventListener(type, (event) => {
-      queue.push([type, event]);
-    });
-  }
+  const target = window;
+  const onError = (event: Event) => {
+    const current = target.dbbRum;
+    if (!current) return;
+    if (Array.isArray(current)
+      && current.filter(([type]) => type === 'error' || type === 'unhandledrejection').length >= MAX_BUFFERED_ERRORS) return;
+    current.push([event.type as 'error' | 'unhandledrejection', event]);
+  };
+  target.addEventListener('error', onError);
+  target.addEventListener('unhandledrejection', onError);
+  removeErrorListeners = () => {
+    target.removeEventListener('error', onError);
+    target.removeEventListener('unhandledrejection', onError);
+    removeErrorListeners = undefined;
+  };
 
-  loadDebugBearRumScript();
+  // The collector reads location.search/href once, when it evaluates, and
+  // has no redaction hook. Referral, invite, checkout-intent and Clerk params
+  // have deferred readers that remove them, so hold the script until they
+  // are gone rather than strip them from under their consumers.
+  whenUrlFreeOfSensitiveParams(() => window.location.href, loadDebugBearRumScript, abandonDebugBearRum);
+}
+
+export function isDebugBearRumActive(): boolean {
+  return debugBearRumStarted;
+}
+
+// The pinned collector reports the URLs of resources that start within
+// max(10 s, TTFB + 3 s) of navigation, query strings included, and its
+// beforeSend hook cannot edit them. Re-derive this before bumping the version.
+const COLLECTOR_REQUEST_WINDOW_MS = 10_000;
+const COLLECTOR_REQUEST_WINDOW_AFTER_TTFB_MS = 3_000;
+const COLLECTOR_REQUEST_WINDOW_MARGIN_MS = 1_000;
+
+/** When a request started now falls outside what the collector reports, in page time. */
+export function debugBearRequestWindowEndMs(responseStartMs: number): number {
+  return Math.max(COLLECTOR_REQUEST_WINDOW_MS, responseStartMs + COLLECTOR_REQUEST_WINDOW_AFTER_TTFB_MS) + COLLECTOR_REQUEST_WINDOW_MARGIN_MS;
+}
+
+/** Resolves once a request URL that names a user-picked place would stay out of the RUM payload. */
+export function afterDebugBearRequestWindow(signal: AbortSignal): Promise<void> {
+  if (!debugBearRumStarted) return Promise.resolve();
+  const navigation = performance.getEntriesByType?.('navigation')[0] as PerformanceNavigationTiming | undefined;
+  const waitMs = debugBearRequestWindowEndMs(navigation?.responseStart ?? 0) - performance.now();
+  if (waitMs <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, waitMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
- * Temporary U3a page-level custom fields. One tier is selected per page so a
- * later tier cannot overwrite the same DebugBear custom slots. These fields
- * contain only closed tags and numeric durations; no request or stable ID.
+ * Page-level bootstrap transfer fields. One tier is selected per page so a
+ * later tier cannot overwrite the same DebugBear custom slots. The payload
+ * contains only closed tags and numeric measurements; no request or stable ID.
  */
-export function reportBootstrapR2Rum(sample: BootstrapR2RumSample): void {
+export function reportBootstrapTransferRum(sample: BootstrapTransferRumSample): void {
   if (!debugBearRumStarted || typeof window === 'undefined' || !window.dbbRum) return;
   window.dbbRum.push(
-    ['metric1', sample.total_duration_ms],
-    ['metric2', sample.redis_duration_ms],
-    ['metric3', sample.non_r2_overhead_ms],
-    ['tag1', sample.bootstrap_tier],
+    ['metric1', sample.duration_ms],
+    ['metric2', sample.decoded_bytes],
+    ['metric3', sample.encoded_bytes],
+    ['tag1', sample.tier],
     ['tag2', sample.outcome],
     ['tag3', sample.device_class],
   );
 }
 
 export function resetDebugBearRumForTesting(): void {
+  removeErrorListeners?.();
   debugBearRumStarted = false;
 }

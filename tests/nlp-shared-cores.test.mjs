@@ -24,6 +24,7 @@ import {
   stripSourceAttribution,
 } from '../shared/keyword-spike-core.js';
 import {
+  MAX_CLUSTER_NEWS_ITEMS,
   clusterNewsCore,
   effectivePubDateMs,
   topClusterKeywords,
@@ -102,6 +103,24 @@ describe('keyword-spike-core', () => {
     );
   });
 
+  it('bounds the terms one title can produce, for every caller', () => {
+    // A feed title of thousands of words would otherwise become thousands of
+    // terms: the dashboard rescans each per spike check, and get_keyword_spikes
+    // walks and returns them all.
+    const words = Array.from({ length: 10_000 }, (_, i) => `zq${i.toString(36).padStart(5, 'a')}`).join(' ');
+    assert.ok(buildBaseTermCandidates(words).size < 1_000);
+    assert.ok(buildBaseTermCandidates(`Zaporizhzhia ${words}`).has('zaporizhzhia'), 'the start of the title still counts');
+
+    const nowMs = 1_800_000_000_000;
+    const stories = Array.from({ length: 6 }, (_, i) => ({
+      title: `${words} ${i}`,
+      lastSeenMs: nowMs - i * 60_000,
+      sources: [`source-${i % 3}`],
+    }));
+    const spikes = computeKeywordSpikesFromStories(stories, { nowMs, baselineDurationMs: 46 * 60 * 60 * 1000 });
+    assert.ok(spikes.length > 0 && spikes.length < 1_000, `got ${spikes.length} spikes`);
+  });
+
   it('stripSourceAttribution removes trailing outlet suffixes only', () => {
     assert.equal(stripSourceAttribution('Markets rally - Reuters'), 'Markets rally');
     assert.equal(
@@ -160,6 +179,132 @@ describe('keyword-spike-core', () => {
     assert.equal(spike.count, 5);
     assert.equal(spike.uniqueSources, 3);
     assert.ok(spike.sampleHeadlines.length > 0 && spike.sampleHeadlines.length <= 3);
+    assert.deepEqual(
+      [...spike.sourceNames].sort(),
+      ['source-0', 'source-1', 'source-2'],
+      'sourceNames must name the publishers uniqueSources counts',
+    );
+    assert.equal(spike.sourceNames.length, spike.uniqueSources);
+    for (const sample of spike.sampleHeadlines) {
+      assert.equal(typeof sample, 'object', 'sample headlines must be attributed objects, not title strings');
+      assert.equal(typeof sample.title, 'string');
+      assert.equal(typeof sample.source, 'string');
+      assert.equal(typeof sample.link, 'string');
+      assert.match(sample.source, /^source-[012]$/);
+      assert.equal(sample.link, '');
+    }
+  });
+
+  it('attributes sample headlines with publisher name and link', () => {
+    const HOUR = 60 * 60 * 1000;
+    const nowMs = 1_800_000_000_000;
+    const windowMs = 2 * HOUR;
+    const stories = [
+      {
+        title: 'Zaporizhzhia plant shelling escalates (0)',
+        lastSeenMs: nowMs - 10 * 60 * 1000,
+        sources: ['Reuters World'],
+        link: 'https://example.test/reuters-0',
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (1)',
+        lastSeenMs: nowMs - 20 * 60 * 1000,
+        sources: ['BBC World'],
+        link: 'https://example.test/bbc-1',
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (2)',
+        lastSeenMs: nowMs - 30 * 60 * 1000,
+        sources: ['Al Jazeera'],
+        link: 'https://example.test/aj-2',
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (3)',
+        lastSeenMs: nowMs - 40 * 60 * 1000,
+        sources: ['Reuters US'],
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (4)',
+        lastSeenMs: nowMs - 50 * 60 * 1000,
+        sources: ['BBC Africa'],
+        link: 'https://example.test/bbc-4',
+      },
+    ];
+    for (let i = 0; i < 30; i++) {
+      stories.push({
+        title: `Weather outlook stays calm (${i})`,
+        lastSeenMs: nowMs - windowMs - (i * 90 * 60 * 1000),
+        sources: ['weather-wire'],
+      });
+    }
+
+    const spikes = computeKeywordSpikesFromStories(stories, {
+      nowMs, windowMs, baselineDurationMs: 46 * HOUR,
+    });
+    const spike = spikes.find((s) => s.term === 'zaporizhzhia');
+    assert.ok(spike, `expected zaporizhzhia spike, got: ${spikes.map((s) => s.term).join(', ')}`);
+    assert.equal(spike.uniqueSources, 3);
+    assert.deepEqual(spike.sourceNames, ['Al Jazeera', 'BBC', 'Reuters']);
+    assert.deepEqual(spike.sampleHeadlines, [
+      { title: 'Zaporizhzhia plant shelling escalates (0)', source: 'Reuters', link: 'https://example.test/reuters-0' },
+      { title: 'Zaporizhzhia plant shelling escalates (1)', source: 'BBC', link: 'https://example.test/bbc-1' },
+      { title: 'Zaporizhzhia plant shelling escalates (2)', source: 'Al Jazeera', link: 'https://example.test/aj-2' },
+    ]);
+  });
+
+  it('joins every publisher on a collapsed multi-outlet title instead of picking one owner', () => {
+    const HOUR = 60 * 60 * 1000;
+    const nowMs = 1_800_000_000_000;
+    const windowMs = 2 * HOUR;
+    const stories = [
+      {
+        title: 'Zaporizhzhia plant shelling escalates (0)',
+        lastSeenMs: nowMs - 10 * 60 * 1000,
+        sources: ['BBC World', 'Reuters World'],
+        link: 'https://example.test/reuters-canonical',
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (1)',
+        lastSeenMs: nowMs - 20 * 60 * 1000,
+        sources: ['Al Jazeera'],
+        link: 'https://example.test/aj-1',
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (2)',
+        lastSeenMs: nowMs - 30 * 60 * 1000,
+        sources: ['AP News'],
+        link: 'https://example.test/ap-2',
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (3)',
+        lastSeenMs: nowMs - 40 * 60 * 1000,
+        sources: ['BBC Africa'],
+      },
+      {
+        title: 'Zaporizhzhia plant shelling escalates (4)',
+        lastSeenMs: nowMs - 50 * 60 * 1000,
+        sources: ['Reuters US'],
+      },
+    ];
+    for (let i = 0; i < 30; i++) {
+      stories.push({
+        title: `Weather outlook stays calm (${i})`,
+        lastSeenMs: nowMs - windowMs - (i * 90 * 60 * 1000),
+        sources: ['weather-wire'],
+      });
+    }
+
+    const spikes = computeKeywordSpikesFromStories(stories, {
+      nowMs, windowMs, baselineDurationMs: 46 * HOUR,
+    });
+    const spike = spikes.find((s) => s.term === 'zaporizhzhia');
+    assert.ok(spike, `expected zaporizhzhia spike, got: ${spikes.map((s) => s.term).join(', ')}`);
+    assert.equal(spike.sampleHeadlines[0].source, 'BBC, Reuters');
+    assert.equal(spike.sampleHeadlines[0].link, 'https://example.test/reuters-canonical');
+    assert.ok(
+      spike.sampleHeadlines[0].source !== 'BBC',
+      'must not invent a single owner for a multi-outlet title hash',
+    );
   });
 
   // #6428: `uniqueSources` gates the spike alert and is surfaced to agents by
@@ -316,10 +461,77 @@ describe('news-clustering-core', () => {
     assert.equal(effectivePubDateMs({ pubDate: 'not-a-date' }), 0);
   });
 
+  it('caps input at MAX_CLUSTER_NEWS_ITEMS, keeping the newest, before per-item work', () => {
+    // Unique tokens per title so no two items cluster: every kept item
+    // becomes its own single-item cluster.
+    const word = (i) => [2, 1, 0].map((p) => String.fromCharCode(97 + (Math.floor(i / 26 ** p) % 26))).join('');
+    const base = Date.UTC(2026, 8, 1);
+    const overCap = MAX_CLUSTER_NEWS_ITEMS + 1;
+    // Index 0 is the OLDEST item and sits first, so a cap that slices the
+    // unsorted input would keep it and drop the newest one instead.
+    const bulk = Array.from({ length: overCap }, (_, i) => ({
+      source: 'Reuters',
+      title: `${word(i)}alpha ${word(i)}bravo`,
+      link: `https://fixture.test/${i}`,
+      pubDate: new Date(base + i * 60_000),
+      isAlert: false,
+    }));
+
+    let tierLookups = 0;
+    const clusters = clusterNewsCore(bulk, () => { tierLookups += 1; return 3; });
+    const keptLinks = new Set(clusters.flatMap((c) => c.allItems.map((item) => item.link)));
+
+    assert.equal(tierLookups, MAX_CLUSTER_NEWS_ITEMS, 'per-item work must run only on the capped set');
+    assert.equal(keptLinks.size, MAX_CLUSTER_NEWS_ITEMS);
+    assert.ok(!keptLinks.has('https://fixture.test/0'), 'the oldest item is the one dropped');
+    assert.ok(keptLinks.has(`https://fixture.test/${overCap - 1}`), 'the newest item is kept');
+  });
+
   it('tokenize + jaccard agree with the clustering threshold contract', () => {
     const a = tokenize('Iran closes Strait of Hormuz to all tanker traffic');
     const b = tokenize('Iran closes Strait of Hormuz, tanker traffic halted');
     assert.ok(jaccardSimilarity(a, b) >= 0.5, 'near-duplicate titles must clear the 0.5 threshold');
     assert.equal(jaccardSimilarity(new Set(), new Set()), 0);
+  });
+
+  it('jaccardSimilarity matches the set-materializing definition', () => {
+    const reference = (a, b) => {
+      if (a.size === 0 && b.size === 0) return 0;
+      return new Set([...a].filter((x) => b.has(x))).size / new Set([...a, ...b]).size;
+    };
+    let seed = 7;
+    const next = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed; };
+    const randomSet = () => new Set(Array.from({ length: next() % 12 }, () => `t${next() % 16}`));
+    for (let k = 0; k < 500; k++) {
+      const a = randomSet();
+      const b = randomSet();
+      assert.equal(jaccardSimilarity(a, b), reference(a, b), `${[...a]} vs ${[...b]}`);
+    }
+  });
+
+  it('clusters a feed of huge titles in time bounded by the smaller title of each pair', () => {
+    // Every huge title shares a common word with every normal headline, so
+    // each is compared against all of them; building the union of a 50k-token
+    // set per pair made this take seconds.
+    const common = ['iran', 'israel', 'strike', 'oil', 'market', 'ukraine', 'russia', 'china', 'election', 'storm'];
+    const now = Date.UTC(2026, 9, 27);
+    const items = Array.from({ length: 995 }, (_, i) => ({
+      source: `S${i % 50}`,
+      title: `${common[i % 10]} ${common[(i + 3) % 10]} story${i} detail${i}`,
+      link: `https://fixture.test/${i}`,
+      pubDate: new Date(now - i * 1000),
+    }));
+    const huge = `${common.join(' ')} ${Array.from({ length: 50_000 }, (_, k) => `tok${k.toString(36)}`).join(' ')}`;
+    for (let h = 0; h < 5; h++) {
+      items.unshift({ source: 'Evil', title: `${huge} v${h}`, link: `https://evil.test/${h}`, pubDate: new Date(now + 1000) });
+    }
+
+    const started = performance.now();
+    const clusters = clusterNewsCore(items, () => 3);
+    const elapsed = performance.now() - started;
+
+    const hugeCluster = clusters.find((c) => c.allItems.some((item) => item.source === 'Evil'));
+    assert.equal(hugeCluster.sourceCount, 5, 'the near-identical huge titles still cluster together');
+    assert.ok(elapsed < 1500, `clustering took ${elapsed.toFixed(0)} ms`);
   });
 });

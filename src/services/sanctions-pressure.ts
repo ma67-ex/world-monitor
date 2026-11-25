@@ -1,12 +1,14 @@
-import { createCircuitBreaker } from '@/utils';
+import { createCircuitBreaker } from '@/utils/circuit-breaker';
 import { getRpcBaseUrl } from '@/services/rpc-client';
 import { premiumFetch } from '@/services/premium-fetch';
 import { getHydratedData } from '@/services/bootstrap';
 import { hasPremiumAccess } from '@/services/panel-gating';
 import { toApiUrl } from '@/services/runtime';
-import { nameToCountryCode } from '@/services/country-geometry';
-import type { SanctionsEntry as ProtoSanctionsEntry, SanctionsEntityType as ProtoSanctionsEntityType, CountrySanctionsPressure as ProtoCountryPressure, ProgramSanctionsPressure as ProtoProgramPressure, ListSanctionsPressureResponse } from '@/generated/client/worldmonitor/sanctions/v1/service_client';
+import type { SanctionsEntry as ProtoSanctionsEntry, SanctionsEntityType as ProtoSanctionsEntityType, CountrySanctionsPressure as ProtoCountryPressure, ProgramSanctionsPressure as ProtoProgramPressure, ListSanctionsPressureResponse, UnattributedSanctionsPressure, FlagRegistrySanctionsPressure } from '@/generated/client/worldmonitor/sanctions/v1/service_client';
 import { SanctionsServiceClient } from '@/services/generated-rpc-clients';
+import { normalizeFlagRegistries, splitSanctionsAttribution } from '../../shared/sanctions-attribution';
+
+export type { FlagRegistrySanctionsPressure };
 
 export type SanctionsEntityType = 'entity' | 'individual' | 'vessel' | 'aircraft';
 
@@ -44,22 +46,28 @@ export interface SanctionsPressureResult {
   totalCount: number;
   sdnCount: number;
   consolidatedCount: number;
+  semaCount: number;
+  semaError: string | null;
   newEntryCount: number;
   vesselCount: number;
   aircraftCount: number;
   countries: CountrySanctionsPressure[];
+  unattributed?: UnattributedSanctionsPressure;
+  flagRegistries: FlagRegistrySanctionsPressure[];
+  regulationTargets: CountrySanctionsPressure[];
   programs: ProgramSanctionsPressure[];
   entries: SanctionsEntry[];
 }
 
-// premiumFetch — listSanctionsPressure (the only method called here) is in
-// PREMIUM_RPC_PATHS. See src/services/supply-chain/index.ts for the pattern
-// and #3242 review HIGH(new) #1 for the bug class this prevents.
+// premiumFetch no-ops safely without credentials, so keeping it is harmless
+// now that listSanctionsPressure is free. See src/services/supply-chain/index.ts
+// for the pattern.
 const client = new SanctionsServiceClient(getRpcBaseUrl(), { fetch: premiumFetch });
 const breaker = createCircuitBreaker<SanctionsPressureResult>({
   name: 'Sanctions Pressure',
   cacheTtlMs: 30 * 60 * 1000,
   persistCache: true,
+  revivePersistedData: reviveSanctionsPressureResult,
 });
 
 let latestSanctionsPressureResult: SanctionsPressureResult | null = null;
@@ -70,13 +78,42 @@ const emptyResult: SanctionsPressureResult = {
   totalCount: 0,
   sdnCount: 0,
   consolidatedCount: 0,
+  semaCount: 0,
+  semaError: null,
   newEntryCount: 0,
   vesselCount: 0,
   aircraftCount: 0,
   countries: [],
+  flagRegistries: [],
+  regulationTargets: [],
   programs: [],
   entries: [],
 };
+
+function reviveDate(value: Date): Date {
+  if (value instanceof Date) return value;
+  const revived = new Date(value as unknown as string | number);
+  return Number.isNaN(revived.getTime()) ? new Date(0) : revived;
+}
+
+function reviveNullableDate(value: Date | null): Date | null {
+  return value === null ? null : reviveDate(value);
+}
+
+function reviveSanctionsPressureResult(result: SanctionsPressureResult): SanctionsPressureResult {
+  return {
+    ...result,
+    ...splitSanctionsAttribution(result.countries ?? [], result.unattributed),
+    flagRegistries: normalizeFlagRegistries(result.flagRegistries),
+    regulationTargets: result.regulationTargets ?? [],
+    fetchedAt: reviveDate(result.fetchedAt),
+    datasetDate: reviveNullableDate(result.datasetDate),
+    entries: result.entries.map((entry) => ({
+      ...entry,
+      effectiveAt: reviveNullableDate(entry.effectiveAt),
+    })),
+  };
+}
 
 function mapEntityType(value: ProtoSanctionsEntityType): SanctionsEntityType {
   switch (value) {
@@ -132,6 +169,8 @@ function toProgram(raw: ProtoProgramPressure): ProgramSanctionsPressure {
   };
 }
 
+
+
 function toResult(response: ListSanctionsPressureResponse): SanctionsPressureResult {
   return {
     fetchedAt: parseEpoch(response.fetchedAt as string | number | undefined) || new Date(),
@@ -139,156 +178,90 @@ function toResult(response: ListSanctionsPressureResponse): SanctionsPressureRes
     totalCount: response.totalCount ?? 0,
     sdnCount: response.sdnCount ?? 0,
     consolidatedCount: response.consolidatedCount ?? 0,
+    semaCount: Number(response.semaCount) || 0,
+    semaError: response.semaError || null,
     newEntryCount: response.newEntryCount ?? 0,
     vesselCount: response.vesselCount ?? 0,
     aircraftCount: response.aircraftCount ?? 0,
-    countries: (response.countries ?? []).map(toCountry),
+    ...splitSanctionsAttribution((response.countries ?? []).map(toCountry), response.unattributed),
+    flagRegistries: normalizeFlagRegistries(response.flagRegistries),
+    regulationTargets: (response.regulationTargets ?? []).map(toCountry),
     programs: (response.programs ?? []).map(toProgram),
     entries: (response.entries ?? []).map(toEntry),
   };
 }
 
-// Free alt-source (task 04, docs/tasks/abdullah/04-sanctions-pressure.md):
-// api/_sanctions-ofac-proxy.ts fetches OFAC's SDN feed server-side once per
-// 24h and reduces it to a small per-country/per-program aggregate. This is
-// deliberately NOT the full ListSanctionsPressureResponse shape — no
-// individual `entries`, no countryCode from OFAC itself (mapped below via
-// the country-geometry name table, best-effort) — see the proxy's own
-// header comment for why a full entity-level replica isn't fetchable here.
-interface OfacCountryAggregate {
-  countryName: string;
-  entryCount: number;
-  newEntryCount: number;
-  vesselCount: number;
-  aircraftCount: number;
-}
-interface OfacProgramAggregate {
-  program: string;
-  entryCount: number;
-  newEntryCount: number;
-}
-interface OfacAggregateResponse {
-  fetchedAt: number;
-  datasetDate: string | null;
-  totalCount: number;
-  newEntryCount: number;
-  vesselCount: number;
-  aircraftCount: number;
-  countries: OfacCountryAggregate[];
-  programs: OfacProgramAggregate[];
-}
-
-function toOfacResult(raw: OfacAggregateResponse): SanctionsPressureResult {
-  return {
-    fetchedAt: new Date(raw.fetchedAt),
-    datasetDate: raw.datasetDate ? new Date(raw.datasetDate) : null,
-    totalCount: raw.totalCount,
-    sdnCount: raw.totalCount,
-    consolidatedCount: 0,
-    newEntryCount: raw.newEntryCount,
-    vesselCount: raw.vesselCount,
-    aircraftCount: raw.aircraftCount,
-    countries: raw.countries.map((c) => ({
-      countryCode: nameToCountryCode(c.countryName) ?? '',
-      countryName: c.countryName,
-      entryCount: c.entryCount,
-      newEntryCount: c.newEntryCount,
-      vesselCount: c.vesselCount,
-      aircraftCount: c.aircraftCount,
-    })),
-    programs: raw.programs.map((p) => ({
-      program: p.program,
-      entryCount: p.entryCount,
-      newEntryCount: p.newEntryCount,
-    })),
-    // No individual entity list in the free aggregate — see header comment.
-    entries: [],
-  };
-}
-
-async function fetchSanctionsPressureFromOfacProxy(): Promise<SanctionsPressureResult | null> {
-  try {
-    const resp = await fetch(toApiUrl('/api/sanctions-ofac-proxy'), {
-      // Generous: a cache-miss request re-triggers the proxy's own ~45s
-      // upstream parse. The overwhelming majority of calls hit its Redis
-      // cache and return in well under a second.
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!resp.ok) return null;
-    const raw = (await resp.json()) as OfacAggregateResponse;
-    if (!raw?.totalCount) return null;
-    return toOfacResult(raw);
-  } catch {
-    return null;
-  }
+function isCacheableSanctionsPressureResult(result: SanctionsPressureResult): boolean {
+  return result.totalCount > 0 && result.semaError === null;
 }
 
 export async function fetchSanctionsPressure(): Promise<SanctionsPressureResult> {
-  // Anonymous (non-premium) users: do NOT call the Pro-gated RPC. Try the
-  // free OFAC-derived aggregate first (direct-source pattern, same as
-  // earthquakes.ts/weather.ts — ahead of the hydrated/bootstrap fallback),
-  // then the hydrated bootstrap seed, then emptyResult.
-  if (!hasPremiumAccess()) {
-    const ofacResult = await fetchSanctionsPressureFromOfacProxy();
-    if (ofacResult) {
-      latestSanctionsPressureResult = ofacResult;
-      return ofacResult;
-    }
-
-    const hydratedFree = getHydratedData('sanctionsPressure') as ListSanctionsPressureResponse | undefined;
-    if (hydratedFree?.entries?.length || hydratedFree?.countries?.length || hydratedFree?.programs?.length) {
-      const result = toResult(hydratedFree);
-      latestSanctionsPressureResult = result;
-      return result;
-    }
-
-    // RPC at /api/sanctions/v1/list-sanctions-pressure is in
-    // PREMIUM_RPC_PATHS, so an anonymous client gets a deterministic 401 and
-    // the breaker fallback returns emptyResult anyway — same outcome as us,
-    // minus the Sentry/console noise. Try the public bootstrap endpoint as a
-    // last read path and surface whatever it serves (or emptyResult).
-    try {
-      const resp = await fetch(toApiUrl('/api/bootstrap?keys=sanctionsPressure'), {
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (resp.ok) {
-        const { data } = (await resp.json()) as { data?: { sanctionsPressure?: ListSanctionsPressureResponse } };
-        const payload = data?.sanctionsPressure;
-        if (payload?.entries?.length || payload?.countries?.length || payload?.programs?.length) {
-          const result = toResult(payload);
-          latestSanctionsPressureResult = result;
-          return result;
-        }
-      }
-    } catch { /* fall through to emptyResult */ }
-    return emptyResult;
-  }
-
   const hydrated = getHydratedData('sanctionsPressure') as ListSanctionsPressureResponse | undefined;
   if (hydrated?.entries?.length || hydrated?.countries?.length || hydrated?.programs?.length) {
     const result = toResult(hydrated);
     latestSanctionsPressureResult = result;
+    // Warm the breaker under the same key a later recurring premium call
+    // reads (#7048). The guard mirrors execute()'s shouldCache
+    // (complete, non-degraded data); the local mirror above already covers
+    // getLatestSanctionsPressure() consumers.
+    if (isCacheableSanctionsPressureResult(result)) breaker.recordSuccess(result);
     return result;
   }
 
-  return breaker.execute(async () => {
+  // Anonymous (non-premium) users read the shared bootstrap copy. The RPC
+  // is free and serves the same seed, but the per-key bootstrap URL is the
+  // cheaper read for ordinary visitors. Surface whatever it serves (or
+  // emptyResult on any failure).
+  if (!hasPremiumAccess()) {
+    const cached = breaker.getCached();
+    if (cached) {
+      latestSanctionsPressureResult = cached;
+      return cached;
+    }
+
+    const result = await breaker.execute(async () => {
+      const resp = await fetch(toApiUrl('/api/bootstrap?keys=sanctionsPressure'), {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!resp.ok) {
+        throw new Error(`Sanctions bootstrap failed: HTTP ${resp.status}`);
+      }
+      const { data } = (await resp.json()) as { data?: { sanctionsPressure?: ListSanctionsPressureResponse } };
+      const payload = data?.sanctionsPressure;
+      if (payload?.entries?.length || payload?.countries?.length || payload?.programs?.length) {
+        const liveResult = toResult(payload);
+        latestSanctionsPressureResult = liveResult;
+        return liveResult;
+      }
+      latestSanctionsPressureResult = emptyResult;
+      return emptyResult;
+    }, emptyResult, {
+      shouldCache: isCacheableSanctionsPressureResult,
+    });
+    latestSanctionsPressureResult = result;
+    return result;
+  }
+
+  const result = await breaker.execute(async () => {
     const response = await client.listSanctionsPressure({
       maxItems: 30,
     }, {
       signal: AbortSignal.timeout(25_000),
     });
-    const result = toResult(response);
-    latestSanctionsPressureResult = result;
-    if (result.totalCount === 0) {
+    const liveResult = toResult(response);
+    if (liveResult.totalCount === 0) {
       // Seed is missing or the feed is down. Evict any stale cache so the
       // panel surfaces "unavailable" instead of serving old designations
       // indefinitely via stale-while-revalidate.
       breaker.clearCache();
     }
-    return result;
+    latestSanctionsPressureResult = liveResult;
+    return liveResult;
   }, emptyResult, {
-    shouldCache: (result) => result.totalCount > 0,
+    shouldCache: isCacheableSanctionsPressureResult,
   });
+  latestSanctionsPressureResult = result;
+  return result;
 }
 
 export function getLatestSanctionsPressure(): SanctionsPressureResult | null {

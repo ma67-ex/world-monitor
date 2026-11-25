@@ -1,14 +1,17 @@
+import { observeDashboardFirstInteraction } from '@/components/dashboard-interaction-analytics';
 import type {
   AppContext,
   AppModule,
   UnifiedSettingsController,
-  UnifiedSettingsTabId,
 } from '@/app/app-context';
+import type { SettingsSectionId } from '@/config/settings-sections';
+import { applyVisibleMapDimension } from '@/app/map-dimension-control';
 import type { UnifiedSettingsConfig } from '@/components/UnifiedSettings';
 import type { AirlineIntelPanel } from '@/components/AirlineIntelPanel';
 import type { CustomWidgetPanel } from '@/components/CustomWidgetPanel';
 import { deleteWidget, getWidget, saveWidget, isProUser, isProTierResolved } from '@/services/widget-store';
 import { hasPremiumAccess } from '@/services/panel-gating';
+import { isOrbitalLookupOpen } from '@/services/orbital/lookup-host';
 import {
   sanitizeLockedLayers,
   shouldSanitizeLockedLayers,
@@ -17,9 +20,13 @@ import {
   FREE_MAX_PANELS,
   FREE_MAX_SOURCES,
   countFreePanelCapUsage,
+  enforceFreePanelLimit,
   isFreePanelCapCounted,
+  isPanelEntitled,
   userSetPanelEnabled,
 } from '@/config/panels';
+import { applySetPanelEnabled } from '@/app/panel-enablement';
+import type { SetPanelEnabledResult } from '@/config/panel-enablement';
 import type { McpDataPanel } from '@/components/McpDataPanel';
 import { deleteMcpPanel, getMcpPanel, saveMcpPanel } from '@/services/mcp-store';
 import type { PanelConfig, MapLayers, MilitaryFlight } from '@/types';
@@ -33,11 +40,15 @@ import { LlmStatusIndicator } from '@/components/LlmStatusIndicator';
 import type { PredictionPanel } from '@/components/PredictionPanel';
 import {
   buildMapUrl,
+  withMapCentreOf,
+  withUrlFragment,
+  withoutVariantScopedUrlState,
   debounce,
   loadFromStorage,
   saveToStorage,
   getCurrentTheme,
   showToast,
+  urlHasAsyncFlyTo,
 } from '@/utils';
 import { clearPanelColSpans, clearPanelSpans } from '@/utils/panel-storage';
 import {
@@ -55,7 +66,8 @@ import { resolveNewsCategories, enabledNewsCategoryKeys } from '@/config/feed-re
 import { VARIANT_META } from '@/config/variant-meta';
 import { isDesktopRuntime } from '@/services/runtime';
 import {
-  MISSION_PRESETS,
+  getMissionPreset,
+  getMissionPresetsForVariant,
   applyMissionPresetToState,
   clearMissionPreset,
   dismissMissionPresetPrompt,
@@ -75,14 +87,25 @@ import {
 } from '@/services';
 import {
   track,
+  trackMissionPickerShown,
+  type MissionPickerTrigger,
+  trackMissionSelected,
   trackPanelView,
   trackVariantSwitch,
+  replayPendingDashboardFirstInteraction,
   trackMapViewChange,
   trackMapLayerToggle,
   trackPanelToggled,
   trackDownloadClicked,
   trackGateHit,
+  trackLayoutCustomized,
 } from '@/services/analytics';
+import {
+  bindPromptToAccount,
+  decideAboutYouPrompt,
+  isPasskeyOfferPresent,
+  waitForActivationPromptDecision,
+} from '@/services/onboarding-prompt';
 import { detectPlatform, allButtons, buttonsForPlatform } from '@/components/DownloadBanner';
 import type { Platform } from '@/components/DownloadBanner';
 import { isOpenableExternalUrl, openExternalUrl } from '@/services/external-navigation';
@@ -93,9 +116,10 @@ import { WM_OPEN_NOTIFICATIONS_FOR_COUNTRY } from '@/utils/notify-country-link';
 import { AuthLauncher } from '@/components/AuthLauncher';
 import { AuthHeaderWidget } from '@/components/AuthHeaderWidget';
 import { t } from '@/services/i18n';
+import { getPanelDisplayName } from '@/services/panel-display-name';
 import { TvModeController } from '@/services/tv-mode';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
-import { onEntitlementChange } from '@/services/entitlements';
+import { hasEmbedAccessForAccount, onEntitlementChange } from '@/services/entitlements';
 import { evaluateAvailableExportFormats, evaluateExportGate, exportLockToGateReason } from '@/services/gates/export';
 import { primeExportGateActivation } from '@/services/gates/export-resolver';
 import type { DataExportFormat } from '@/services/gates/export-resolver';
@@ -103,14 +127,69 @@ import { evaluatePlaybackGate } from '@/services/gates/playback';
 import { resolveGateAction, type PanelGateReason } from '@/services/panel-gating';
 import { ExportGateControl } from '@/components/ExportGateControl';
 import { h, setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { renderCollapseIconSvg, renderExpandIconSvg } from '@/utils/ui-icons';
+import { copyText } from '@/utils/copy-text';
 import { scheduleAfterFirstPaint } from '@/utils/after-paint';
+import { declareOverlay, isModalOpen } from '@/utils/open-modal';
+import {
+  isAgentAnalyticsSuppressed,
+  isAgentPanelViewSuppressed,
+  suppressNextAgentPanelView,
+} from '@/services/agent-analytics-privacy';
 import { escapeHtml } from '@/utils/sanitize';
-import { buildEmbedIframeSnippet, buildEmbedMapUrl, type EmbedVariant } from '@/embed/embed-url';
+import {
+  buildEmbedIframeSnippet,
+  buildEmbedLoaderSnippet,
+  buildEmbedMapUrl,
+  embedLayerIdsFromMapLayers,
+  EMBED_KEY_PLACEHOLDER,
+  type EmbedVariant,
+} from '@/embed/embed-url';
 import { createSettingsButton } from '@/components/settings-button';
 import { overlayHistory, type OverlayId } from '@/utils/overlay-history';
 import { MobilePrimaryNav } from '@/app/mobile-primary-nav';
+import {
+  SPLIT_LAYOUT_MIN_WIDTH,
+  LEGACY_WEB_SPLIT_LAYOUT_MIN_WIDTH,
+  isSplitLayoutViewport,
+  MAP_COL_DEFAULT_PERCENT,
+  clampMapColWidthPercent,
+  getVisualMapSide,
+  getMapColWidthBounds,
+  mapRightClassForVisualSide,
+  type MapVisualSide,
+} from '@/app/split-layout';
+import {
+  addResponsiveZoneListener,
+  removeResponsiveZoneListener,
+  type ResponsiveZoneListener,
+} from '@/app/responsive-zone-listener';
 import { stageVariantSelection } from '@/services/variant-panel-ownership';
-import { transferSourceGateOwnershipToUser as releaseSourceGateOwnership } from '@/services/source-cap';
+import { isMapUrlCentreClaimed, publishedMapCentre } from '@/app/orbital-map-focus';
+import { transferSourceGateOwnershipToUser as releaseSourceGateOwnership, stringSetsEqual } from '@/services/source-cap';
+
+/** Bound on each wait before the About-you card abstains for this load. */
+const ABOUT_YOU_WAIT_MS = 8_000;
+
+/** The signed-in user id once auth settles, or null (signed out or timeout). */
+function waitForSettledUserId(timeoutMs: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    let unsubscribe: (() => void) | null = null;
+    const finish = (userId: string | null): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      queueMicrotask(() => unsubscribe?.());
+      resolve(userId);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    unsubscribe = subscribeAuthState((state) => {
+      if (!state.isPending) finish(state.user?.id ?? null);
+    });
+    if (done) unsubscribe();
+  });
+}
 
 function readStorageValue(key: string): string | null {
   try {
@@ -155,31 +234,41 @@ class LazyUnifiedSettings implements UnifiedSettingsController {
     return this.button;
   }
 
-  open(tab?: UnifiedSettingsTabId, replaceOverlayId?: OverlayId, historyPending = false): void {
+  open(
+    section?: SettingsSectionId,
+    replaceOverlayId?: OverlayId,
+    historyPending = false,
+  ): Promise<boolean> {
     const epoch = ++this.openEpoch;
     const pendingId: OverlayId = 'settings-pending';
     const pendingGate = historyPending
       ? overlayHistory.beginPending(pendingId, replaceOverlayId, () => { this.openEpoch += 1; })
       : null;
-    void this.load().then((settings) => {
-      if (this.destroyed || this.openEpoch !== epoch) return;
-      if (pendingGate && !pendingGate.isCurrent()) return;
-      settings.open(tab, pendingGate ? pendingId : replaceOverlayId);
+    return this.load().then((settings) => {
+      if (this.destroyed || this.openEpoch !== epoch) return false;
+      if (pendingGate && !pendingGate.isCurrent()) return false;
+      settings.open(section, pendingGate ? pendingId : replaceOverlayId);
+      return true;
     }).catch((error) => {
       // A rejection because the controller was torn down mid-load is a
       // deliberate unmount, not a failure the user should be toasted about.
       // Back can cancel the pending history transition before the lazy chunk
       // rejects; that cancellation is also an expected teardown path.
       const actionWasCancelled = pendingGate !== null && !pendingGate.isCurrent();
-      if (this.destroyed || actionWasCancelled) return;
+      if (this.destroyed || actionWasCancelled) return false;
       console.warn('[settings] Failed to load settings window:', error);
       pendingGate?.cancel();
       showToast(t('common.error'));
+      return false;
     });
   }
 
   refreshPanelToggles(): void {
     this.instance?.refreshPanelToggles();
+  }
+
+  refreshSourceToggles(): void {
+    this.instance?.refreshSourceToggles();
   }
 
   close(): void {
@@ -249,9 +338,21 @@ export interface EventHandlerCallbacks {
   stopLayerActivity?: (layer: keyof MapLayers) => void;
   mountLiveNewsIfReady?: () => void;
   isFreeTierFallbackActive?: () => boolean;
+  focusStorageFacility?: (facilityId: string) => void;
+  /**
+   * Dashboard focus (#10453). `canUseFocus`: this account may set a focus.
+   * `promptForFocus`: open the focus editor on the active tab (the presets
+   * that ask for countries). `showFocusGate`: say a focus needs a plan this
+   * account does not have. All three route to PanelLayoutManager, which owns
+   * the tabs.
+   */
+  canUseFocus?: () => boolean;
+  promptForFocus?: () => void;
+  showFocusGate?: () => void;
 }
 
 export class EventHandlerManager implements AppModule {
+  private stopInteractionAnalytics: (() => void) | null = null;
   private ctx: AppContext;
   private callbacks: EventHandlerCallbacks;
 
@@ -261,6 +362,9 @@ export class EventHandlerManager implements AppModule {
   private boundDesktopExternalLinkHandler: ((e: MouseEvent) => void) | null = null;
   private boundIdleResetHandler: (() => void) | null = null;
   private boundStorageHandler: ((e: StorageEvent) => void) | null = null;
+  private boundOpenStorageAtlas: ((ev: Event) => void) | null = null;
+  /** Leaves map fullscreen when it is active; set by setupMapFullscreen. */
+  private exitMapFullscreen: (() => void) | null = null;
   private boundTvKeydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private boundThemeChangedHandler: (() => void) | null = null;
   private boundDropdownClickHandler: ((e: MouseEvent) => void) | null = null;
@@ -269,7 +373,13 @@ export class EventHandlerManager implements AppModule {
   private boundMapEndResizeHandler: (() => void) | null = null;
   private boundMapResizeVisChangeHandler: (() => void) | null = null;
   private boundMapWidthResizeMoveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundMapWidthTouchMoveHandler: ((e: TouchEvent) => void) | null = null;
+  private boundMapWidthTouchEndHandler: ((e: TouchEvent) => void) | null = null;
+  private boundMapWidthMouseUpHandler: (() => void) | null = null;
+  private boundMapWidthVisChangeHandler: (() => void) | null = null;
+  private boundMapWidthWindowResizeHandler: (() => void) & { cancel(): void } | null = null;
   private boundMapWidthEndResizeHandler: (() => void) | null = null;
+  private mapSplitZoneListener: ResponsiveZoneListener | null = null;
   private boundMapFullscreenEscHandler: ((e: KeyboardEvent) => void) | null = null;
   private readonly registeredSearchButtons = new Set<string>();
   private boundSearchKeyHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -282,6 +392,7 @@ export class EventHandlerManager implements AppModule {
   private boundMissionKeydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private boundEmbedModalKeydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private missionPresetPopover: HTMLElement | null = null;
+  private missionPresetReturnFocus: HTMLElement | null = null;
   private missionDataRefreshTimer: number | null = null;
   private authStateUnsubscribers: Array<() => void> = [];
   private proGateUnsubscribers: Array<() => void> = [];
@@ -297,9 +408,12 @@ export class EventHandlerManager implements AppModule {
     if (!shareUrl) return;
     // Preserve the shared mobile-overlay marker while syncing map URL state;
     // replacing it with null makes Android Back skip the open sheet.
-    try { history.replaceState(history.state, '', shareUrl); } catch { }
+    // A satellite lookup centres the map on a picked point that must not reach the URL analytics read.
+    const url = isMapUrlCentreClaimed() ? withMapCentreOf(shareUrl, window.location.href) : shareUrl;
+    try { history.replaceState(history.state, '', withUrlFragment(url, window.location.hash)); } catch { }
   };
   private readonly debouncedUrlSync = debounce(this.writeUrlState, 250);
+  private urlStateSyncReady = false;
 
   private readonly debouncedWebcamReload = debounce(() => {
     if (this.ctx.mapLayers?.webcams) {
@@ -312,12 +426,17 @@ export class EventHandlerManager implements AppModule {
     this.callbacks = callbacks;
     this.mobilePrimaryNav = new MobilePrimaryNav(ctx, {
       openSearch: (options) => this.callbacks.openSearch(options),
-      navigateToVariant: (variant, options) => this.navigateToVariant(variant, options),
+      navigateToVariant: async (variant, options) => {
+        await this.navigateToVariant(variant, options);
+      },
       openMission: (anchor) => this.openMissionPresetPopover(anchor, true),
     });
   }
 
   init(): void {
+    replayPendingDashboardFirstInteraction();
+    this.stopInteractionAnalytics?.();
+    this.stopInteractionAnalytics = observeDashboardFirstInteraction(this.ctx.container);
     this.setupSearchControls();
     this.setupEventListeners();
     this.mobilePrimaryNav.init();
@@ -334,14 +453,16 @@ export class EventHandlerManager implements AppModule {
   /**
    * Enables a registered panel (undo-restore, CMD+K "Add", etc.). Returns
    * false when the panel is unknown or the free-tier cap blocks it. Already
-   * enabled → true (no-op). Single source of truth for runtime panel-enable
-   * so search-add and undo-restore stay in lockstep.
+   * enabled → true (no-op). Search-add and undo-restore stay in lockstep
+   * here so closing an unentitled or cross-monitor panel can still restore it.
+   * WebMCP catalog toggles use `applySetPanelEnabled`, which also enforces
+   * monitor compatibility and entitlements on enable.
    */
-  enablePanelById(panelId: string): boolean {
+  enablePanelById(panelId: string, options?: { trackAnalytics?: boolean }): boolean {
     const config = this.ctx.panelSettings[panelId];
     if (!config) return false;
     if (config.enabled) return true;
-    if (!isProUser() && isFreePanelCapCounted(panelId)) {
+    if (!hasPremiumAccess(getAuthState()) && isFreePanelCapCounted(panelId, config)) {
       const enabledCount = countFreePanelCapUsage(this.ctx.panelSettings);
       if (enabledCount >= FREE_MAX_PANELS) {
         // Tell the user why nothing happened instead of failing silently.
@@ -352,7 +473,7 @@ export class EventHandlerManager implements AppModule {
       }
     }
     userSetPanelEnabled(config, true);
-    trackPanelToggled(panelId, true);
+    if (options?.trackAnalytics !== false) trackPanelToggled(panelId, true);
     saveToStorage(STORAGE_KEYS.panels, this.ctx.panelSettings);
     this.applyPanelSettings();
     this.ctx.unifiedSettings?.refreshPanelToggles();
@@ -363,6 +484,38 @@ export class EventHandlerManager implements AppModule {
       (panel as { fetchData: () => void }).fetchData();
     }
     return true;
+  }
+
+  /**
+   * Enable or disable a catalog panel through the same persist/apply path as
+   * settings and search-add. Runtime widgets (`cw-*` / `mcp-*`) are refused;
+   * closing those panels still uses the dedicated confirm-and-delete handlers.
+   */
+  setPanelEnabledById(panelId: unknown, enabled: unknown): SetPanelEnabledResult {
+    const isPro = hasPremiumAccess(getAuthState());
+    return applySetPanelEnabled(
+      {
+        panelSettings: this.ctx.panelSettings,
+        panels: this.ctx.panels,
+        unifiedSettings: this.ctx.unifiedSettings,
+      },
+      panelId,
+      enabled,
+      {
+        variant: SITE_VARIANT,
+        isPro,
+        persist: (settings) => saveToStorage(STORAGE_KEYS.panels, settings),
+        applyPanelSettings: () => this.applyPanelSettings(),
+        trackToggle: trackPanelToggled,
+        beforeApply: (committedPanelId, committedEnabled) => {
+          if (committedEnabled) suppressNextAgentPanelView(committedPanelId);
+        },
+        showCapToast: () => showToast(
+          t('modals.settingsWindow.freePanelLimit', { max: String(FREE_MAX_PANELS) }),
+        ),
+        isPanelAllowed: (id, config) => isPanelEntitled(id, config, hasPremiumAccess(getAuthState())),
+      },
+    );
   }
 
   private setupTvMode(): void {
@@ -409,10 +562,13 @@ export class EventHandlerManager implements AppModule {
 
   destroy(): void {
     this.closeEmbedDialog();
+    this.stopInteractionAnalytics?.();
+    this.stopInteractionAnalytics = null;
     this.debouncedUrlSync.cancel();
     this.debouncedWebcamReload.cancel();
     if (this.boundFullscreenHandler) {
       document.removeEventListener('fullscreenchange', this.boundFullscreenHandler);
+      document.removeEventListener('webkitfullscreenchange', this.boundFullscreenHandler);
       this.boundFullscreenHandler = null;
     }
     if (this.boundResizeHandler) {
@@ -449,6 +605,11 @@ export class EventHandlerManager implements AppModule {
       window.removeEventListener('storage', this.boundStorageHandler);
       this.boundStorageHandler = null;
     }
+    if (this.boundOpenStorageAtlas) {
+      window.removeEventListener('wm:open-storage-atlas', this.boundOpenStorageAtlas);
+      this.boundOpenStorageAtlas = null;
+    }
+    this.exitMapFullscreen = null;
     if (this.boundTvKeydownHandler) {
       document.removeEventListener('keydown', this.boundTvKeydownHandler);
       this.boundTvKeydownHandler = null;
@@ -478,11 +639,34 @@ export class EventHandlerManager implements AppModule {
       document.removeEventListener('mousemove', this.boundMapWidthResizeMoveHandler);
       this.boundMapWidthResizeMoveHandler = null;
     }
+    if (this.boundMapWidthTouchMoveHandler) {
+      document.removeEventListener('touchmove', this.boundMapWidthTouchMoveHandler);
+      this.boundMapWidthTouchMoveHandler = null;
+    }
+    if (this.boundMapWidthTouchEndHandler) {
+      document.removeEventListener('touchend', this.boundMapWidthTouchEndHandler);
+      document.removeEventListener('touchcancel', this.boundMapWidthTouchEndHandler);
+      this.boundMapWidthTouchEndHandler = null;
+    }
+    if (this.boundMapWidthMouseUpHandler) {
+      document.removeEventListener('mouseup', this.boundMapWidthMouseUpHandler);
+      this.boundMapWidthMouseUpHandler = null;
+    }
+    if (this.boundMapWidthVisChangeHandler) {
+      document.removeEventListener('visibilitychange', this.boundMapWidthVisChangeHandler);
+      this.boundMapWidthVisChangeHandler = null;
+    }
+    if (this.boundMapWidthWindowResizeHandler) {
+      this.boundMapWidthWindowResizeHandler.cancel();
+      window.removeEventListener('resize', this.boundMapWidthWindowResizeHandler);
+      this.boundMapWidthWindowResizeHandler = null;
+    }
     if (this.boundMapWidthEndResizeHandler) {
-      document.removeEventListener('mouseup', this.boundMapWidthEndResizeHandler);
       window.removeEventListener('blur', this.boundMapWidthEndResizeHandler);
       this.boundMapWidthEndResizeHandler = null;
     }
+    removeResponsiveZoneListener(this.mapSplitZoneListener);
+    this.mapSplitZoneListener = null;
     if (this.boundMapResizeVisChangeHandler) {
       document.removeEventListener('visibilitychange', this.boundMapResizeVisChangeHandler);
       this.boundMapResizeVisChangeHandler = null;
@@ -614,6 +798,16 @@ export class EventHandlerManager implements AppModule {
     };
     window.addEventListener('storage', this.boundStorageHandler);
 
+    this.boundOpenStorageAtlas = (ev: Event) => {
+      const facilityId = (ev as CustomEvent<{ facilityId?: string }>).detail?.facilityId;
+      if (!facilityId) return;
+      if (!this.enablePanelById('storage-facility-map')) return;
+      // The fullscreen map covers the panel grid; leave it so the atlas can show.
+      this.exitMapFullscreen?.();
+      this.callbacks.focusStorageFacility?.(facilityId);
+    };
+    window.addEventListener('wm:open-storage-atlas', this.boundOpenStorageAtlas);
+
     // Handle panel close (X) button clicks
     this.boundPanelCloseHandler = ((e: CustomEvent<{ panelId: string }>) => {
       const { panelId } = e.detail;
@@ -716,11 +910,20 @@ export class EventHandlerManager implements AppModule {
     if (!this.ctx.isDesktopApp && fullscreenBtn) {
       fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
       this.boundFullscreenHandler = () => {
-        fullscreenBtn.textContent = document.fullscreenElement ? '\u26F6' : '\u26F6';
-        fullscreenBtn.classList.toggle('active', !!document.fullscreenElement);
+        const fullscreenDocument = this.getFullscreenDocument();
+        const activeFullscreen = Boolean(fullscreenDocument.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement);
+        setTrustedHtml(
+          fullscreenBtn,
+          trustedHtml(
+            activeFullscreen ? renderCollapseIconSvg(14) : renderExpandIconSvg(14),
+            'header fullscreen toggle icon',
+          ),
+        );
+        fullscreenBtn.classList.toggle('active', activeFullscreen);
         this.syncMapAfterLayoutChange();
       };
       document.addEventListener('fullscreenchange', this.boundFullscreenHandler);
+      document.addEventListener('webkitfullscreenchange', this.boundFullscreenHandler);
     }
 
     const regionSelect = document.getElementById('regionSelect') as HTMLSelectElement;
@@ -737,6 +940,7 @@ export class EventHandlerManager implements AppModule {
 
     this.setupMapResize();
     this.setupMapWidthResize();
+    this.setupMapSideToggle();
     this.setupMapPin();
 
     this.boundVisibilityHandler = () => {
@@ -810,12 +1014,73 @@ export class EventHandlerManager implements AppModule {
       // fixed 700ms timeout that forced layout reads (getBoundingClientRect +
       // offsetHeight) on the post-load path. Re-check state at fire time since
       // the idle wait can outlast an early user choice.
+      //
+      // That includes a modal the user opened first. On a slow machine the
+      // idle period lands after it; the prompt then took focus and swallowed
+      // the modal's Escape (its keydown handler stops propagation), leaving the
+      // modal impossible to close from the keyboard. Skipping costs nothing:
+      // an undismissed prompt re-appears on the next load.
       scheduleAfterFirstPaint(() => {
         if (this.ctx.isDestroyed) return;
-        if (loadStoredMissionPreset() || isMissionPresetPromptDismissed()) return;
-        this.openMissionPresetPopover(document.getElementById('missionPresetBtn'), false);
+        if (this.missionPresetPopover || loadStoredMissionPreset() || isMissionPresetPromptDismissed()) return;
+        if (isModalOpen(document)) return;
+        this.openMissionPresetPopover(document.getElementById('missionPresetBtn'), false, 'auto');
       });
     }
+    // One onboarding prompt per load (KTD6): the mission picker owns a
+    // brand-new desktop visitor's first load; the About-you card waits.
+    if (!shouldPrompt) {
+      scheduleAfterFirstPaint(() => {
+        this.maybeOpenAboutYouCard().catch((err) => {
+          console.warn('[about-you] could not open the card', err);
+        });
+      });
+    }
+  }
+
+  /**
+   * Open the About-you card when the signed-in account has not answered or
+   * skipped, or owes its one return visit (R19). Waits for auth to settle, the
+   * profile status, and the Pro activation decision, each bounded; any
+   * timeout or unknown abstains until the next load.
+   */
+  private async maybeOpenAboutYouCard(): Promise<void> {
+    const userId = await waitForSettledUserId(ABOUT_YOU_WAIT_MS);
+    if (!userId || this.ctx.isDestroyed) return;
+    const profile = await import('@/services/audience-profile');
+    const [status, activation] = await Promise.all([
+      profile.loadAboutYouStatus(userId),
+      waitForActivationPromptDecision(ABOUT_YOU_WAIT_MS),
+    ]);
+    const stillCurrent = (): boolean => !this.ctx.isDestroyed && getAuthState().user?.id === userId;
+    if (!stillCurrent()) return;
+    const decision = decideAboutYouPrompt({
+      signedIn: true,
+      status,
+      activation,
+      missionPickerDue: false,
+      // A passkey offer counts as an open prompt: one prompt per load (KTD6).
+      modalOpen: isModalOpen(document) || isPasskeyOfferPresent(document),
+    });
+    if (decision.kind === 'none') return;
+    const { mountAboutYouCard } = await import('@/components/AboutYouCard');
+    if (!stillCurrent() || isModalOpen(document) || isPasskeyOfferPresent(document)) return;
+    const card = mountAboutYouCard({
+      mode: decision.mode,
+      questions: decision.questions,
+      surface: 'dashboard',
+      deps: {
+        recordAnswer: (questionId, optionId) => profile.recordAboutYouAnswer(userId, questionId, optionId, 'dashboard'),
+        recordFreeText: (text) => profile.recordAboutYouFreeText(userId, text, 'dashboard'),
+        skip: () => profile.skipAboutYou(userId, 'dashboard'),
+        markReturnShown: () => profile.markAboutYouReturnShown(userId),
+        track: (event, data) => track(event, data),
+      },
+    });
+    if (!card) return;
+    // Its callbacks write against `userId`: remove it on sign-out, an account
+    // switch, or teardown.
+    this.authStateUnsubscribers.push(bindPromptToAccount(card, userId, subscribeAuthState));
   }
 
   private renderMissionPresetControl(): void {
@@ -863,17 +1128,35 @@ export class EventHandlerManager implements AppModule {
     this.openMissionPresetPopover(anchor, mobile);
   }
 
-  private openMissionPresetPopover(anchor: HTMLElement | null, mobile: boolean): void {
+  private openMissionPresetPopover(
+    anchor: HTMLElement | null,
+    mobile: boolean,
+    trigger: MissionPickerTrigger = 'manual',
+  ): void {
     this.closeMissionPresetPopover();
+    // One emission site covers every path onto the picker: the desktop button,
+    // the mobile menu item, the deferred auto-open, and the WebMCP entry
+    // (tagged 'agent' so the human funnel reads clean).
+    trackMissionPickerShown(trigger, mobile ? 'mobile' : 'desktop');
+    // The desktop trigger (#missionPresetBtn) is display:none on mobile, where the
+    // popover opens from the menu item instead, so remember the real opener.
+    this.missionPresetReturnFocus = anchor ?? document.getElementById('missionPresetBtn');
 
     const active = loadStoredMissionPreset();
     const popover = document.createElement('div');
     popover.className = `mission-preset-popover${mobile ? ' mission-preset-popover--mobile' : ''}`;
     popover.setAttribute('role', 'dialog');
     popover.setAttribute('aria-label', 'Mission presets');
+    // Auto-opens after first paint for every preset-less user, and holds no
+    // entered state — it re-appears on the next load. Without this, the
+    // automatic reload guards treated it as work worth protecting and
+    // deferred stale-bundle reloads for a broad population
+    // (WORLDMONITOR-15X). Read-only on every `trigger`, so one declaration
+    // covers all three paths. Accessibility still sees a dialog.
+    declareOverlay(popover, { reload: 'safe' });
     popover.tabIndex = -1;
 
-    const cards = MISSION_PRESETS.map((preset) => {
+    const cards = getMissionPresetsForVariant(SITE_VARIANT).map((preset) => {
       const selected = active?.id === preset.id;
       return `
         <button
@@ -973,9 +1256,17 @@ export class EventHandlerManager implements AppModule {
       this.missionPresetPopover.removeEventListener('keydown', this.boundMissionKeydownHandler);
       this.boundMissionKeydownHandler = null;
     }
+    const hadFocus = this.missionPresetPopover?.contains(document.activeElement) ?? false;
     this.missionPresetPopover?.remove();
     this.missionPresetPopover = null;
-    document.getElementById('missionPresetBtn')?.setAttribute('aria-expanded', 'false');
+    const trigger = document.getElementById('missionPresetBtn');
+    trigger?.setAttribute('aria-expanded', 'false');
+    // Removing the popover while focus was inside it drops focus to <body>;
+    // hand it back to whichever control opened it. Falling back to the desktop
+    // trigger keeps the pre-existing behavior when no opener was recorded.
+    const opener = this.missionPresetReturnFocus;
+    this.missionPresetReturnFocus = null;
+    if (hadFocus) (opener?.isConnected ? opener : trigger)?.focus();
   }
 
   private getMissionDefaultLayers(): MapLayers {
@@ -983,10 +1274,12 @@ export class EventHandlerManager implements AppModule {
   }
 
   private filterMissionLayersForCurrentRenderer(layers: MapLayers): MapLayers {
-    const renderer = this.ctx.map?.isGlobeMode?.() ? 'globe' : 'flat';
     const isDeckGLActive = this.ctx.map?.isDeckGLActive?.() ?? !this.ctx.isMobile;
+    const kind = this.ctx.map?.isGlobeMode?.()
+      ? 'globe'
+      : (isDeckGLActive ? 'deck' : 'svg');
     let filtered = this.filterMissionLayersForAvailableServices(
-      filterMissionLayersForRenderer(layers, renderer, isDeckGLActive, this.getMissionDefaultLayers()),
+      filterMissionLayersForRenderer(layers, kind, this.getMissionDefaultLayers()),
     );
     // #6045 — mission presets (e.g. Supply-Chain Risk) include resilienceScore.
     // Free users must not persist or apply locked layers through this path.
@@ -1007,14 +1300,32 @@ export class EventHandlerManager implements AppModule {
     return layers;
   }
 
-  private persistMissionPanelOrder(panelOrder: string[]): void {
+  private persistMissionPanelOrder(panelOrder: string[], bottomPanelIds: string[] = []): void {
     saveToStorage(this.ctx.PANEL_ORDER_KEY, panelOrder);
-    saveToStorage(this.ctx.PANEL_ORDER_KEY + '-bottom-set', []);
+    saveToStorage(this.ctx.PANEL_ORDER_KEY + '-bottom-set', bottomPanelIds);
     try {
       localStorage.removeItem(this.ctx.PANEL_ORDER_KEY + '-bottom');
     } catch {
       // Storage can be unavailable; the current session still applies the in-memory order.
     }
+  }
+
+  private readStoredPanelIds(key: string): string[] | null {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      return parsed.filter((value): value is string => typeof value === 'string');
+    } catch {
+      return null;
+    }
+  }
+
+  private snapshotEffectiveBottomPanelIds(): string[] {
+    const bottomSet = this.readStoredPanelIds(this.ctx.PANEL_ORDER_KEY + '-bottom-set');
+    if (bottomSet) return bottomSet;
+    return this.readStoredPanelIds(this.ctx.PANEL_ORDER_KEY + '-bottom') ?? [];
   }
 
   private scheduleMissionDataRefresh(): void {
@@ -1031,11 +1342,12 @@ export class EventHandlerManager implements AppModule {
     const sourceIds = LAYER_TO_SOURCE[layer];
     if (sourceIds) {
       for (const sourceId of sourceIds) {
-        dataFreshness.setEnabled(sourceId, enabled);
+        dataFreshness.setMapLayerEnabled(sourceId, enabled);
       }
     }
 
     if (layer === 'ais') {
+      dataFreshness.setEnabled('ais', isAisConfigured());
       if (enabled) {
         this.ctx.map?.setLayerLoading('ais', true);
         initAisStream();
@@ -1072,25 +1384,59 @@ export class EventHandlerManager implements AppModule {
     }
   }
 
-  private applyMissionPreset(presetId: MissionPresetId): void {
-    const applied = applyMissionPresetToState(
-      presetId,
-      this.ctx.panelSettings,
-      this.getMissionDefaultLayers(),
-      SITE_VARIANT,
-    );
+  private limitMissionPanels(panelSettings: Record<string, PanelConfig>): Record<string, PanelConfig> {
+    if (isProUser() || (!isProTierResolved() && this.callbacks.isFreeTierFallbackActive?.() !== true)) {
+      return panelSettings;
+    }
+    return enforceFreePanelLimit(panelSettings, false);
+  }
+
+  private applyMissionPreset(presetId: MissionPresetId, source: 'user' | 'agent' = 'user'): boolean {
+    const focusPreset = getMissionPreset(presetId);
+    const canFocus = this.callbacks.canUseFocus?.() === true;
+    if (focusPreset?.requiresFocus && !canFocus) {
+      // Refused before anything changes: the layout, the stored preset and the
+      // picker stay as they were, and the gate says which plans include it.
+      this.closeMissionPresetPopover();
+      this.callbacks.showFocusGate?.();
+      return false;
+    }
+    let applied: ReturnType<typeof applyMissionPresetToState>;
+    try {
+      applied = applyMissionPresetToState(
+        presetId,
+        this.ctx.panelSettings,
+        this.getMissionDefaultLayers(),
+        SITE_VARIANT,
+      );
+    } catch {
+      showToast('This mission is not available on this dashboard.');
+      return false;
+    }
     const mapLayers = this.filterMissionLayersForCurrentRenderer(applied.mapLayers);
     const previousMapLayers = { ...this.ctx.mapLayers };
 
-    this.ctx.panelSettings = applied.panelSettings;
+    const panelSettings = this.limitMissionPanels(applied.panelSettings);
+    this.ctx.panelSettings = panelSettings;
     this.ctx.mapLayers = mapLayers;
-    saveToStorage(STORAGE_KEYS.panels, applied.panelSettings);
+    saveToStorage(STORAGE_KEYS.panels, panelSettings);
     saveToStorage(STORAGE_KEYS.mapLayers, mapLayers);
     this.persistMissionPanelOrder(applied.panelOrder);
     saveMissionPreset(applied.preset.id);
+    trackMissionSelected(applied.preset.id, source);
+    if (source === 'agent') {
+      // An agent-applied preset mounts panels the user never asked to see.
+      // Suppress the panel-view records those mounts trigger (same rule the
+      // WebMCP search flows apply via search-selection-dispatcher) so the
+      // funnel's denominator stays human.
+      for (const [key, cfg] of Object.entries(panelSettings)) {
+        if (cfg?.enabled) suppressNextAgentPanelView(key);
+      }
+    }
 
     this.applyPanelSettings();
     this.callbacks.applySavedPanelOrder?.(applied.panelOrder);
+    this.showPanelsFromTop();
     this.ctx.unifiedSettings?.refreshPanelToggles();
     this.ctx.map?.setLayers(mapLayers);
     this.applyMissionMapLayerTransitions(previousMapLayers, mapLayers);
@@ -1103,6 +1449,148 @@ export class EventHandlerManager implements AppModule {
     showToast(`Mission preset applied: ${applied.preset.label}`);
     this.renderMissionPresetControl();
     this.closeMissionPresetPopover();
+    // A mission about countries asks which ones. Never from an agent (it must
+    // not open a dialog the user did not ask for), and never for a plan that
+    // cannot set a focus: Country Watcher still applies for those.
+    if (source === 'user' && applied.preset.asksForCountries && canFocus) {
+      this.callbacks.promptForFocus?.();
+    }
+    return true;
+  }
+
+  /**
+   * WebMCP entry: open the mission picker without applying a preset.
+   * Anchors to the visible trigger for the current viewport.
+   */
+  openMissionPresetPickerForWebMcp(): boolean {
+    if (this.ctx.isDestroyed) return false;
+    const mobile = this.ctx.isMobile;
+    const anchor = document.getElementById(mobile ? 'mobileMenuMission' : 'missionPresetBtn');
+    this.openMissionPresetPopover(anchor, mobile, 'agent');
+    return this.missionPresetPopover !== null;
+  }
+
+  /**
+   * WebMCP entry: apply a bundled mission preset through the same path as the
+   * visible mission control. Snapshots prior dashboard state and restores it
+   * if the commit throws before completion.
+   */
+  applyMissionPresetForWebMcp(presetId: MissionPresetId): {
+    changed: boolean;
+    priorPresetId: string | null;
+  } {
+    if (this.ctx.isDestroyed) {
+      throw new Error('Dashboard is no longer available.');
+    }
+
+    const snapshot = this.snapshotMissionDashboardState();
+    try {
+      if (!this.applyMissionPreset(presetId, 'agent')) {
+        // Refused (the focus gate, or a variant that lacks it): not a no-op success.
+        throw new Error('Mission preset was not applied.');
+      }
+      const nextPresetId = loadStoredMissionPreset()?.id ?? null;
+      const mapState = this.ctx.map?.getState();
+      const changed = snapshot.presetId !== nextPresetId
+        || JSON.stringify(snapshot.panelSettings) !== JSON.stringify(this.ctx.panelSettings)
+        || JSON.stringify(snapshot.mapLayers) !== JSON.stringify(this.ctx.mapLayers)
+        || snapshot.mapView !== (mapState?.view ?? snapshot.mapView)
+        || snapshot.mapZoom !== (mapState?.zoom ?? snapshot.mapZoom)
+        || snapshot.timeRange !== (mapState?.timeRange ?? snapshot.timeRange);
+      return { changed, priorPresetId: snapshot.presetId };
+    } catch (error) {
+      this.restoreMissionDashboardState(snapshot);
+      throw error;
+    }
+  }
+
+  private snapshotMissionDashboardState(): {
+    panelSettings: Record<string, PanelConfig>;
+    mapLayers: MapLayers;
+    panelOrder: string[];
+    bottomPanelIds: string[];
+    presetId: string | null;
+    mapView: MapView;
+    mapZoom: number;
+    timeRange: string;
+  } {
+    const mapState = this.ctx.map?.getState();
+    return {
+      panelSettings: structuredClone(this.ctx.panelSettings),
+      mapLayers: { ...this.ctx.mapLayers },
+      panelOrder: this.readStoredPanelIds(this.ctx.PANEL_ORDER_KEY) ?? [],
+      bottomPanelIds: this.snapshotEffectiveBottomPanelIds(),
+      presetId: loadStoredMissionPreset()?.id ?? null,
+      mapView: (mapState?.view ?? 'global') as MapView,
+      mapZoom: mapState?.zoom ?? 2,
+      timeRange: mapState?.timeRange ?? '7d',
+    };
+  }
+
+  private restoreMissionDashboardState(snapshot: {
+    panelSettings: Record<string, PanelConfig>;
+    mapLayers: MapLayers;
+    panelOrder: string[];
+    bottomPanelIds: string[];
+    presetId: string | null;
+    mapView: MapView;
+    mapZoom: number;
+    timeRange: string;
+  }): void {
+    if (this.missionDataRefreshTimer) {
+      window.clearTimeout(this.missionDataRefreshTimer);
+      this.missionDataRefreshTimer = null;
+    }
+    const previousMapLayers = { ...this.ctx.mapLayers };
+    this.ctx.panelSettings = structuredClone(snapshot.panelSettings);
+    this.ctx.mapLayers = { ...snapshot.mapLayers };
+    saveToStorage(STORAGE_KEYS.panels, this.ctx.panelSettings);
+    saveToStorage(STORAGE_KEYS.mapLayers, this.ctx.mapLayers);
+    this.persistMissionPanelOrder(snapshot.panelOrder, snapshot.bottomPanelIds);
+    if (snapshot.presetId) {
+      saveMissionPreset(snapshot.presetId as MissionPresetId);
+    } else {
+      clearMissionPreset();
+    }
+    this.applyPanelSettings();
+    this.callbacks.applySavedPanelOrder?.();
+    this.ctx.unifiedSettings?.refreshPanelToggles();
+    this.ctx.map?.setLayers(this.ctx.mapLayers);
+    this.applyMissionMapLayerTransitions(previousMapLayers, this.ctx.mapLayers);
+    this.ctx.map?.setView(snapshot.mapView, snapshot.mapZoom);
+    this.ctx.map?.setTimeRange(snapshot.timeRange as '1h' | '6h' | '24h' | '48h' | '7d' | 'all');
+    this.callbacks.mountLiveNewsIfReady?.();
+    this.callbacks.syncDataFreshnessWithLayers();
+    this.syncUrlState();
+    this.renderMissionPresetControl();
+  }
+
+  /**
+   * A mission apply or reset replaces the panel layout, so the old scroll
+   * position points into a different list. Start the new layout at its first
+   * panel: the grid scrolls on desktop. On mobile the main column scrolls and
+   * the sticky category bar covers its top, so when the user is scrolled into
+   * the panels, the first panel the bar's filter shows is brought up to just
+   * below the bar (the second half of MobilePanelNav.scrollToPanels). When the
+   * bar isn't stuck yet, the user is above the panels, which a layout change
+   * doesn't move, so the view stays where it is rather than scrolling the map
+   * out of sight.
+   */
+  private showPanelsFromTop(): void {
+    const grid = document.getElementById('panelsGrid');
+    if (!grid) return;
+    grid.scrollTop = 0;
+    const first = grid.querySelector<HTMLElement>(':scope > [data-panel]:not(.hidden):not(.mobile-cat-hidden)');
+    if (!first) return;
+    const bar = document.querySelector<HTMLElement>('.mobile-panel-nav');
+    const scroller = bar?.parentElement;
+    if (!bar || !scroller) {
+      if (first.getBoundingClientRect().top < 0) first.scrollIntoView({ block: 'start' });
+      return;
+    }
+    const target = scroller.scrollTop + first.getBoundingClientRect().top
+      - scroller.getBoundingClientRect().top - bar.getBoundingClientRect().height;
+    if (scroller.scrollTop > target) scroller.scrollTop = Math.max(0, target);
   }
 
   private resetMissionPreset(): void {
@@ -1114,15 +1602,17 @@ export class EventHandlerManager implements AppModule {
     const mapLayers = this.filterMissionLayersForCurrentRenderer(reset.mapLayers);
     const previousMapLayers = { ...this.ctx.mapLayers };
 
-    this.ctx.panelSettings = reset.panelSettings;
+    const panelSettings = this.limitMissionPanels(reset.panelSettings);
+    this.ctx.panelSettings = panelSettings;
     this.ctx.mapLayers = mapLayers;
-    saveToStorage(STORAGE_KEYS.panels, reset.panelSettings);
+    saveToStorage(STORAGE_KEYS.panels, panelSettings);
     saveToStorage(STORAGE_KEYS.mapLayers, mapLayers);
     this.persistMissionPanelOrder(reset.panelOrder);
     clearMissionPreset();
 
     this.applyPanelSettings();
     this.callbacks.applySavedPanelOrder?.(reset.panelOrder);
+    this.showPanelsFromTop();
     this.ctx.unifiedSettings?.refreshPanelToggles();
     this.ctx.map?.setLayers(mapLayers);
     this.applyMissionMapLayerTransitions(previousMapLayers, mapLayers);
@@ -1183,28 +1673,39 @@ export class EventHandlerManager implements AppModule {
 
     // Skip the immediate sync only when applyInitialUrlState() will start an
     // async flyTo that makes getCenter() return stale intermediate coordinates.
-    // Two cases qualify:
-    //   (a) lat+lon pair  → setCenter() flyTo; both must be present since
-    //       applyInitialUrlState only calls setCenter when both exist.
-    //   (b) bare zoom     → setZoom() animated zoom (no view preset).
-    //
-    // view is intentionally excluded: all renderers set this.state.view
-    // synchronously at the top of setView(), so the debounced read is always
-    // correct regardless of renderer. The initial Globe/SVG view is applied
-    // before this listener is installed, so neither can rely on that earlier
-    // state change to drive the URL write; they need the immediate debounce.
-    const { view, lat, lon, zoom, chokepoint } = this.ctx.initialUrlState ?? {};
-    const urlHasAsyncFlyTo =
-      (lat !== undefined && lon !== undefined) ||   // setCenter → flyTo (requires both)
-      (!view && zoom !== undefined) ||              // zoom-only → setZoom animated
-      chokepoint !== undefined;                     // chokepoint opens after renderer readiness
-    if (!urlHasAsyncFlyTo) {
+    // The cases, and why `view` alone is not one, are documented on the
+    // predicate in src/utils/urlState.ts.
+    if (urlHasAsyncFlyTo(this.ctx.initialUrlState)) {
+      // Keep the deep-link coordinates out of the URL until an animated
+      // renderer has reached them. SVG applies viewport changes synchronously,
+      // and may finish before this listener is attached, so this settled write
+      // is also what preserves its initial lat/lon URL state.
+      void this.ctx.map.whenViewportSettled().then(() => {
+        this.urlStateSyncReady = true;
+        if (!this.ctx.isDestroyed) this.debouncedUrlSync();
+      }).catch(() => {
+        // A superseding interaction or renderer switch owns the newer state;
+        // its normal state-change listener will sync that viewport.
+        this.urlStateSyncReady = true;
+      });
+    } else {
       this.debouncedUrlSync();
+      this.urlStateSyncReady = true;
     }
   }
 
   syncUrlState(): void {
     this.debouncedUrlSync();
+  }
+
+  /**
+   * For map changes that also fire during boot, such as the deep link's time
+   * range. Until setupUrlStateSync() has run and any deep-link flyTo has
+   * settled, a write would record the map mid-flight; the settled write then
+   * carries the current state, time range included.
+   */
+  syncUrlStateIfStarted(): void {
+    if (this.urlStateSyncReady) this.debouncedUrlSync();
   }
 
   syncUrlStateNow(): void {
@@ -1214,7 +1715,7 @@ export class EventHandlerManager implements AppModule {
 
   applyMapLayerChange(layer: keyof MapLayers, enabled: boolean, source: 'user' | 'programmatic'): void {
     console.log(`[App.onLayerChange] ${layer}: ${enabled} (${source})`);
-    trackMapLayerToggle(layer, enabled, source);
+    if (!isAgentAnalyticsSuppressed()) trackMapLayerToggle(layer, enabled, source);
     this.ctx.mapLayers[layer] = enabled;
     saveToStorage(STORAGE_KEYS.mapLayers, this.ctx.mapLayers);
     this.syncUrlState();
@@ -1222,11 +1723,12 @@ export class EventHandlerManager implements AppModule {
     const sourceIds = LAYER_TO_SOURCE[layer];
     if (sourceIds) {
       for (const sourceId of sourceIds) {
-        dataFreshness.setEnabled(sourceId, enabled);
+        dataFreshness.setMapLayerEnabled(sourceId, enabled);
       }
     }
 
     if (layer === 'ais') {
+      dataFreshness.setEnabled('ais', isAisConfigured());
       if (enabled) {
         this.ctx.map?.setLayerLoading('ais', true);
         initAisStream();
@@ -1255,16 +1757,23 @@ export class EventHandlerManager implements AppModule {
     const center = this.ctx.map.getCenter();
     const baseUrl = `${window.location.origin}${window.location.pathname}`;
     const briefPage = this.ctx.countryBriefPage;
-    const isCountryVisible = briefPage?.isVisible() ?? false;
+    // A loading or error panel is visible with a placeholder code such as
+    // `__loading__`, which is not a country.
+    const code = briefPage?.getCode();
+    const isCountryVisible = (briefPage?.isVisible() ?? false) && !!code && !code.startsWith('__');
+    // A deep-linked brief loads a lazy chunk and its data first; until it
+    // shows, keep its country in the URL so a refresh or copied link keeps it.
+    const pending = isCountryVisible ? null : this.ctx.pendingCountryBrief;
     return buildMapUrl(baseUrl, {
       view: state.view,
       zoom: state.zoom,
-      center,
+      // A claimed centre (a satellite lookup's point, or the located device position) stays out of copied links.
+      center: isOrbitalLookupOpen() ? null : publishedMapCentre(center, window.location.href),
       timeRange: state.timeRange,
       layers: state.layers,
-      country: isCountryVisible ? (briefPage?.getCode() ?? undefined) : undefined,
-      expanded: isCountryVisible && briefPage?.getIsMaximized?.() ? true : undefined,
-      chokepoint: !isCountryVisible ? (this.ctx.activeChokepoint ?? undefined) : undefined,
+      country: isCountryVisible ? code : pending?.code,
+      expanded: (isCountryVisible ? briefPage?.getIsMaximized?.() : pending?.expanded) ? true : undefined,
+      chokepoint: !isCountryVisible && !pending ? (this.ctx.activeChokepoint ?? undefined) : undefined,
     });
   }
 
@@ -1273,7 +1782,7 @@ export class EventHandlerManager implements AppModule {
     const state = this.ctx.map.getState();
     return buildEmbedMapUrl(`${window.location.origin}/embed`, {
       layers: state.layers,
-      center: this.ctx.map.getCenter(),
+      center: publishedMapCentre(this.ctx.map.getCenter(), window.location.href),
       zoom: state.zoom,
       theme: getCurrentTheme(),
       variant: SITE_VARIANT as EmbedVariant,
@@ -1295,6 +1804,10 @@ export class EventHandlerManager implements AppModule {
     dialog.className = 'embed-modal';
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
+    // Generated snippets only; nothing is typed here, so a reload loses nothing.
+    // The outer overlay is role="presentation"; this inner element is the one
+    // the reload guard sees.
+    declareOverlay(dialog, { reload: 'safe' });
     dialog.setAttribute('aria-labelledby', 'embedModalTitle');
 
     const header = document.createElement('div');
@@ -1316,26 +1829,43 @@ export class EventHandlerManager implements AppModule {
     preview.referrerPolicy = 'strict-origin-when-cross-origin';
     preview.src = embedUrl;
 
-    const label = document.createElement('label');
-    label.className = 'embed-snippet-label';
-    label.htmlFor = 'embedSnippetTextarea';
-    label.textContent = 'Iframe snippet';
+    const tiers = document.createElement('div');
+    tiers.className = 'embed-modal-tiers';
 
-    const textarea = document.createElement('textarea');
-    textarea.className = 'embed-snippet-textarea';
-    textarea.id = 'embedSnippetTextarea';
-    textarea.readOnly = true;
-    textarea.value = snippet;
+    // The free tier stays available to everyone, signed out included: it is a
+    // supported product surface, not a trial, so it is never gated here.
+    tiers.appendChild(this.buildEmbedTier({
+      id: 'embedSnippetTextarea',
+      title: 'Free — no key needed',
+      detail: 'Conflicts, earthquakes and weather, refreshed hourly. Anyone can publish this, '
+        + 'signed in or not.',
+      snippet,
+    }));
 
-    const actions = document.createElement('div');
-    actions.className = 'embed-modal-actions';
-    const copyButton = document.createElement('button');
-    copyButton.className = 'embed-copy-btn';
-    copyButton.type = 'button';
-    copyButton.textContent = 'Copy snippet';
-    actions.append(copyButton);
+    // The keyed tier is offered only to an account that can actually mint a
+    // key. Showing it to everyone else would be an upsell wearing a snippet.
+    if (hasEmbedAccessForAccount(getAuthState().user?.role)) {
+      const state = this.ctx.map?.getState();
+      tiers.appendChild(this.buildEmbedTier({
+        id: 'embedKeyedSnippetTextarea',
+        title: 'With your embed key',
+        detail: 'All fourteen layers at this exact view, refreshed every 10 minutes instead of '
+          + `hourly. Replace ${EMBED_KEY_PLACEHOLDER} with a key from Settings → Embeds; it is `
+          + 'meant to sit in your page HTML, unlike an API key.',
+        snippet: buildEmbedLoaderSnippet({
+          src: `${window.location.origin}/embed.js`,
+          panel: 'map',
+          layerIds: state ? embedLayerIdsFromMapLayers(state.layers) : undefined,
+          center: this.ctx.map?.getCenter(),
+          zoom: state?.zoom,
+          theme: getCurrentTheme(),
+          variant: SITE_VARIANT as EmbedVariant,
+        }),
+        manageKeysLabel: 'Manage embed keys',
+      }));
+    }
 
-    dialog.append(header, preview, label, textarea, actions);
+    dialog.append(header, preview, tiers);
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
 
@@ -1343,21 +1873,83 @@ export class EventHandlerManager implements AppModule {
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) this.closeEmbedDialog();
     });
+    this.boundEmbedModalKeydownHandler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') this.closeEmbedDialog();
+    };
+    document.addEventListener('keydown', this.boundEmbedModalKeydownHandler);
+    const firstSnippet = dialog.querySelector<HTMLTextAreaElement>('.embed-snippet-textarea');
+    firstSnippet?.focus();
+    firstSnippet?.select();
+  }
+
+  /**
+   * One snippet block: label, one-line explanation of what this tier gives,
+   * the textarea, and its own copy button.
+   *
+   * Built per tier rather than once because the two forms are not variants of
+   * each other — a keyless iframe and a keyed script loader differ in what
+   * they render, how often, and whether they carry a credential. Presenting
+   * them side by side with their differences spelled out is the point.
+   */
+  private buildEmbedTier(options: {
+    id: string;
+    title: string;
+    detail: string;
+    snippet: string;
+    manageKeysLabel?: string;
+  }): HTMLElement {
+    const section = document.createElement('section');
+    section.className = 'embed-modal-tier';
+
+    const label = document.createElement('label');
+    label.className = 'embed-snippet-label';
+    label.htmlFor = options.id;
+    label.textContent = options.title;
+
+    const detail = document.createElement('p');
+    detail.className = 'embed-tier-detail';
+    detail.textContent = options.detail;
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'embed-snippet-textarea';
+    textarea.id = options.id;
+    textarea.readOnly = true;
+    textarea.value = options.snippet;
+
+    const actions = document.createElement('div');
+    actions.className = 'embed-modal-actions';
+
+    if (options.manageKeysLabel) {
+      const manageButton = document.createElement('button');
+      manageButton.className = 'embed-manage-keys-btn';
+      manageButton.type = 'button';
+      manageButton.textContent = options.manageKeysLabel;
+      manageButton.addEventListener('click', () => {
+        // Closing first keeps two overlays off the screen at once, and the
+        // settings modal owns its own history entry on mobile.
+        this.closeEmbedDialog();
+        void this.ctx.unifiedSettings?.open('embeds');
+      });
+      actions.appendChild(manageButton);
+    }
+
+    const copyButton = document.createElement('button');
+    copyButton.className = 'embed-copy-btn';
+    copyButton.type = 'button';
+    copyButton.textContent = 'Copy snippet';
     copyButton.addEventListener('click', async () => {
       try {
-        await this.copyToClipboard(snippet);
+        await this.copyToClipboard(options.snippet);
         copyButton.textContent = 'Copied!';
       } catch (error) {
         console.warn('Failed to copy embed snippet:', error);
         copyButton.textContent = 'Copy failed';
       }
     });
-    this.boundEmbedModalKeydownHandler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') this.closeEmbedDialog();
-    };
-    document.addEventListener('keydown', this.boundEmbedModalKeydownHandler);
-    textarea.focus();
-    textarea.select();
+    actions.appendChild(copyButton);
+
+    section.append(label, detail, textarea, actions);
+    return section;
   }
 
   private closeEmbedDialog(): void {
@@ -1369,18 +1961,8 @@ export class EventHandlerManager implements AppModule {
   }
 
   private async copyToClipboard(text: string): Promise<void> {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return;
-    }
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.style.position = 'fixed';
-    textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-    textarea.select();
-    document.execCommand('copy');
-    document.body.removeChild(textarea);
+    const copied = await copyText(text);
+    if (!copied) throw new Error('Copy failed');
   }
 
   private platformLabel(p: Platform): string {
@@ -1425,7 +2007,7 @@ export class EventHandlerManager implements AppModule {
       dropdown.querySelectorAll<HTMLAnchorElement>('.dl-dd-btn').forEach(a => {
         a.addEventListener('click', (e) => {
           e.preventDefault();
-          const plat = new URL(a.href, location.origin).searchParams.get('platform') || 'unknown';
+          const plat = new URLSearchParams(a.search).get('platform') || 'unknown';
           trackDownloadClicked(plat);
           window.open(a.href, '_blank', 'noopener,noreferrer');
           dropdown.classList.remove('open');
@@ -1446,20 +2028,31 @@ export class EventHandlerManager implements AppModule {
 
     renderDropdown();
 
+    // Keep the trigger's aria-expanded in sync however the dropdown closes
+    // (toggle click, outside click, Escape).
+    btn.setAttribute('aria-haspopup', 'true');
+    btn.setAttribute('aria-expanded', 'false');
+    const syncExpanded = () => btn.setAttribute('aria-expanded', String(dropdown.classList.contains('open')));
+
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       dropdown.classList.toggle('open');
+      syncExpanded();
     });
 
     this.boundDropdownClickHandler = (e: MouseEvent) => {
       if (!dropdown.contains(e.target as Node) && !btn.contains(e.target as Node)) {
         dropdown.classList.remove('open');
+        syncExpanded();
       }
     };
     document.addEventListener('click', this.boundDropdownClickHandler);
 
     this.boundDropdownKeydownHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') dropdown.classList.remove('open');
+      if (e.key === 'Escape') {
+        dropdown.classList.remove('open');
+        syncExpanded();
+      }
     };
     document.addEventListener('keydown', this.boundDropdownKeydownHandler);
   }
@@ -1479,7 +2072,7 @@ export class EventHandlerManager implements AppModule {
     a.rel = 'noopener';
     a.addEventListener('click', (e) => {
       e.preventDefault();
-      const plat = new URL(btn.href, location.origin).searchParams.get('platform') || 'unknown';
+      const plat = new URLSearchParams(a.search).get('platform') || 'unknown';
       trackDownloadClicked(plat);
       window.open(btn.href, '_blank', 'noopener,noreferrer');
     });
@@ -1532,26 +2125,48 @@ export class EventHandlerManager implements AppModule {
   private async navigateToVariant(
     variant: string,
     options: { href?: string; isLocalDev: boolean },
-  ): Promise<void> {
+  ): Promise<'reload' | 'assign' | 'blocked'> {
     trackVariantSwitch(SITE_VARIANT, variant);
     await this.exitFullscreenForNavigation();
 
     if (this.ctx.isDesktopApp || options.isLocalDev) {
       if (stageVariantSelection(SITE_VARIANT, variant, writeStorageValue)) {
+        window.history.replaceState(
+          window.history.state,
+          '',
+          withoutVariantScopedUrlState(window.location.href),
+        );
         window.location.reload();
+        return 'reload';
       }
-      return;
+      return 'blocked';
     }
 
     const target = options.href || VARIANT_META[variant]?.url;
-    if (!target) return;
+    if (!target) return 'blocked';
     try {
       const parsed = new URL(target, window.location.href);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'blocked';
       window.location.href = parsed.toString();
+      return 'assign';
     } catch {
-      return;
+      return 'blocked';
     }
+  }
+
+  public async navigateToVisibleVariant(
+    variant: string,
+  ): Promise<'none' | 'reload' | 'assign' | 'blocked' | 'unavailable'> {
+    if (variant === SITE_VARIANT) return 'none';
+    const link = this.ctx.container.querySelector<HTMLAnchorElement>(
+      `.variant-option[data-variant="${variant}"]`,
+    );
+    if (!link) return 'unavailable';
+    const isLocalDev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    return this.navigateToVariant(variant, {
+      href: link.href,
+      isLocalDev,
+    });
   }
 
   toggleFullscreen(): void {
@@ -1588,6 +2203,8 @@ export class EventHandlerManager implements AppModule {
       .then(({ StatusPanel }) => {
         if (this.ctx.isDestroyed) return;
         this.ctx.statusPanel = new StatusPanel();
+        // A digest that landed before this chunk loaded reported to nobody.
+        if (this.ctx.digestCoverage) this.ctx.statusPanel.updateDigestCoverage(this.ctx.digestCoverage);
       })
       .catch((err) => {
         console.error('[status-panel] failed to lazy-load StatusPanel', err);
@@ -1815,7 +2432,7 @@ export class EventHandlerManager implements AppModule {
           const allSources = this.getAllSourceNames();
           const currentlyEnabled = allSources.filter(n => !this.ctx.disabledSources.has(n)).length;
           if (currentlyEnabled + 1 > FREE_MAX_SOURCES) {
-            this.showToast(t('modals.settingsWindow.freeSourceLimit', { max: String(FREE_MAX_SOURCES) }));
+            showToast(t('modals.settingsWindow.freeSourceLimit', { max: String(FREE_MAX_SOURCES) }), 3000);
             return;
           }
         }
@@ -1824,9 +2441,7 @@ export class EventHandlerManager implements AppModule {
         } else {
           this.ctx.disabledSources.add(name);
         }
-        if (this.transferSourceGateOwnershipToUser([name])) {
-          saveToStorage(STORAGE_KEYS.disabledFeeds, Array.from(this.ctx.disabledSources));
-        }
+        this.persistSourcePreferences([name]);
       },
       setSourcesEnabled: (names: string[], enabled: boolean) => {
         if (enabled && !isProUser()) {
@@ -1834,7 +2449,7 @@ export class EventHandlerManager implements AppModule {
           const currentlyEnabled = allSources.filter(n => !this.ctx.disabledSources.has(n)).length;
           const wouldEnable = names.filter(n => this.ctx.disabledSources.has(n) && allSources.includes(n)).length;
           if (currentlyEnabled + wouldEnable > FREE_MAX_SOURCES) {
-            this.showToast(t('modals.settingsWindow.freeSourceLimit', { max: String(FREE_MAX_SOURCES) }));
+            showToast(t('modals.settingsWindow.freeSourceLimit', { max: String(FREE_MAX_SOURCES) }), 3000);
             return;
           }
         }
@@ -1842,15 +2457,13 @@ export class EventHandlerManager implements AppModule {
           if (enabled) this.ctx.disabledSources.delete(name);
           else this.ctx.disabledSources.add(name);
         }
-        if (this.transferSourceGateOwnershipToUser(names)) {
-          saveToStorage(STORAGE_KEYS.disabledFeeds, Array.from(this.ctx.disabledSources));
-        }
+        this.persistSourcePreferences(names);
       },
       getAllSourceNames: () => this.getAllSourceNames(),
       // Sources are applied to ctx.disabledSources on click, but DataLoader
       // only re-reads that set when a load runs — so before this, a source
       // toggle first showed up at RefreshScheduler's `news` tick,
-      // REFRESH_INTERVALS.feeds = 20 minutes away, or on reload (#6380).
+      // the next REFRESH_INTERVALS.feeds tick, or on reload (#6380).
       //
       // No invalidateNewsHydration() here, deliberately: DataLoader's news gate
       // keys its work-list signature on ctx.disabledSources
@@ -1871,6 +2484,10 @@ export class EventHandlerManager implements AppModule {
         removeStorageValue(this.ctx.PANEL_ORDER_KEY + '-bottom');
         removeStorageValue(this.ctx.PANEL_ORDER_KEY + '-bottom-set');
         removeStorageValue('map-height');
+        removeStorageValue('map-height-mode');
+        removeStorageValue('map-split-height');
+        removeStorageValue('map-col-width');
+        removeStorageValue('map-side');
         window.location.reload();
       },
       isDesktopApp: this.ctx.isDesktopApp,
@@ -1918,8 +2535,8 @@ export class EventHandlerManager implements AppModule {
     // avatar menu, keeping account and subscription actions in one place.
     const widget = new AuthHeaderWidget(
       () => modal.open(),
-      () => this.ctx.unifiedSettings?.open('settings'),
-      () => this.ctx.unifiedSettings?.open('billing'),
+      () => this.ctx.unifiedSettings?.open(),
+      () => this.ctx.unifiedSettings?.open('account'),
     );
     this.ctx.authHeaderWidget = widget;
     const mount = document.getElementById('authWidgetMount');
@@ -2053,6 +2670,7 @@ export class EventHandlerManager implements AppModule {
         if (entry.isIntersecting && entry.intersectionRatio >= 0.3) {
           const id = (entry.target as HTMLElement).dataset.panel;
           if (id && !viewedPanels.has(id)) {
+            if (isAgentPanelViewSuppressed(id)) continue;
             viewedPanels.add(id);
             trackPanelView(id);
           }
@@ -2062,22 +2680,20 @@ export class EventHandlerManager implements AppModule {
 
     const grid = document.getElementById('panelsGrid');
     if (grid) {
-      for (const child of Array.from(grid.children)) {
-        if ((child as HTMLElement).dataset.panel) {
-          observer.observe(child);
+      const observeGridPanels = () => {
+        for (const child of Array.from(grid.children)) {
+          if ((child as HTMLElement).dataset.panel) {
+            observer.observe(child);
+          }
         }
-      }
+      };
+      observeGridPanels();
+      // Panels mounted after boot (mission apply, add-panel, tab switch) must
+      // join the funnel denominator too; observe() is idempotent, so a bulk
+      // re-scan per childList change is cheap and cannot double-count.
+      const lateMounts = new MutationObserver(() => observeGridPanels());
+      lateMounts.observe(grid, { childList: true });
     }
-  }
-
-  showToast(msg: string): void {
-    document.querySelector('.toast-notification')?.remove();
-    const el = document.createElement('div');
-    el.className = 'toast-notification';
-    el.textContent = msg;
-    document.body.appendChild(el);
-    requestAnimationFrame(() => el.classList.add('visible'));
-    setTimeout(() => { el.classList.remove('visible'); setTimeout(() => el.remove(), 300); }, 3000);
   }
 
   shouldShowIntelligenceNotifications(): boolean {
@@ -2090,9 +2706,32 @@ export class EventHandlerManager implements AppModule {
     const resizeHandle = document.getElementById('mapResizeHandle');
     if (!mapSection || !resizeHandle || !mapContainer) return;
 
-    const getMinHeight = () => (window.innerWidth >= 1600 ? 280 : 350);
+    const isSplit = () => isSplitLayoutViewport(window);
+    // Split mode sizes #mapContainer, stacked mode sizes #mapSection — two
+    // different elements, so each mode keeps its own storage key (#6417).
+    const getHeightKey = () => (isSplit() ? 'map-split-height' : 'map-height');
+    const saveHeight = (key: string, value: string) => {
+      // New stacked edits must never be mistaken for pre-split-key preferences.
+      if (key === 'map-height') writeStorageValue('map-height-mode', 'stacked');
+      writeStorageValue(key, value);
+    };
+    const readSavedHeight = (): { value: string | null; sourceKey: string } => {
+      const key = getHeightKey();
+      const value = readStorageValue(key);
+      // Before the keys were mode-scoped both modes overwrote 'map-height';
+      // fall back to it so existing split-mode users keep their height. The
+      // restore below completes the migration by writing the split key.
+      const canUseLegacySplitHeight = this.ctx.isDesktopApp
+        || window.innerWidth >= LEGACY_WEB_SPLIT_LAYOUT_MIN_WIDTH;
+      if (value === null && isSplit() && canUseLegacySplitHeight
+        && readStorageValue('map-height-mode') !== 'stacked') {
+        return { value: readStorageValue('map-height'), sourceKey: 'map-height' };
+      }
+      return { value, sourceKey: key };
+    };
+    const getMinHeight = () => (isSplit() ? 280 : 350);
     const getMaxHeight = () => {
-      if (window.innerWidth < 1600) return Math.max(getMinHeight(), window.innerHeight - 150);
+      if (!isSplit()) return Math.max(getMinHeight(), window.innerHeight - 150);
 
       const bottomGrid = document.getElementById('mapBottomGrid');
       const isEmpty = !bottomGrid || bottomGrid.children.length === 0;
@@ -2106,30 +2745,61 @@ export class EventHandlerManager implements AppModule {
       }
     };
 
-    const savedHeight = readStorageValue('map-height');
-    if (savedHeight) {
+    const getTarget = () => (isSplit() ? mapContainer : mapSection);
+    const getCurrentHeight = () => {
+      const target = getTarget();
+      const inlineHeight = Number.parseFloat(target.style.height);
+      return Number.isFinite(inlineHeight) ? inlineHeight : target.offsetHeight;
+    };
+    const syncHeightSeparatorAria = () => {
+      const target = getTarget();
+      const minHeight = getMinHeight();
+      const maxHeight = getMaxHeight();
+      const currentHeight = Math.max(minHeight, Math.min(getCurrentHeight(), maxHeight));
+      resizeHandle.setAttribute('aria-controls', target.id);
+      resizeHandle.setAttribute('aria-valuemin', String(Math.round(minHeight)));
+      resizeHandle.setAttribute('aria-valuemax', String(Math.round(maxHeight)));
+      resizeHandle.setAttribute('aria-valuenow', String(Math.round(currentHeight)));
+      resizeHandle.setAttribute('aria-valuetext', `${Math.round(currentHeight)} pixels`);
+    };
+
+    resizeHandle.tabIndex = 0;
+    resizeHandle.setAttribute('role', 'separator');
+    resizeHandle.setAttribute('aria-orientation', 'horizontal');
+    resizeHandle.setAttribute('aria-label', t('components.panel.dragToResize'));
+
+    const applySavedHeight = () => {
+      const { value: savedHeight, sourceKey } = readSavedHeight();
+      if (!savedHeight) return;
       const numeric = Number.parseInt(savedHeight, 10);
       if (Number.isFinite(numeric)) {
         const clamped = Math.max(getMinHeight(), Math.min(numeric, getMaxHeight()));
-        if (window.innerWidth >= 1600) {
+        if (isSplit()) {
           mapContainer.style.flex = 'none';
           mapContainer.style.height = `${clamped}px`;
         } else {
           mapSection.style.height = `${clamped}px`;
         }
-        if (clamped !== numeric) {
-          writeStorageValue('map-height', `${clamped}px`);
+        // Persist when the value was clamped, or when it came from the
+        // legacy shared key — writing the mode key completes the migration
+        // so stacked-mode edits stop steering split restores.
+        if (clamped !== numeric || sourceKey !== getHeightKey()) {
+          saveHeight(getHeightKey(), `${clamped}px`);
         }
       } else {
-        removeStorageValue('map-height');
+        removeStorageValue(sourceKey);
       }
-    }
+    };
+    applySavedHeight();
+    syncHeightSeparatorAria();
 
     let isResizing = false;
     let startY = 0;
     let startHeight = 0;
-
-    const getTarget = () => (window.innerWidth >= 1600 ? mapContainer : mapSection);
+    // Captured at mousedown so a viewport crossing the breakpoint mid-drag cannot
+    // switch the resized element or the storage key under the drag.
+    let dragTarget: HTMLElement | null = null;
+    let dragKey = 'map-height';
 
     this.boundMapEndResizeHandler = () => {
       if (!isResizing) return;
@@ -2138,15 +2808,35 @@ export class EventHandlerManager implements AppModule {
       this.ctx.map?.resize();
       mapSection.classList.remove('resizing');
       document.body.style.cursor = '';
-      writeStorageValue('map-height', getTarget().style.height);
+      saveHeight(dragKey, (dragTarget ?? getTarget()).style.height);
+      dragTarget = null;
+      syncHeightSeparatorAria();
     };
     const endResize = this.boundMapEndResizeHandler;
+
+    // Crossing the split threshold moves the height target between
+    // #mapContainer (split) and #mapSection (stacked). Finish an active drag
+    // before clearing the departing element so its captured key receives the
+    // last numeric height, then restore the arriving mode's preference.
+    this.mapSplitZoneListener = addResponsiveZoneListener(window, SPLIT_LAYOUT_MIN_WIDTH, () => {
+      endResize();
+      if (isSplit()) {
+        mapSection.style.height = '';
+      } else {
+        mapContainer.style.height = '';
+        mapContainer.style.flex = '';
+      }
+      applySavedHeight();
+      syncHeightSeparatorAria();
+      this.ctx.map?.resize();
+    });
 
     resizeHandle.addEventListener('mousedown', (e) => {
       isResizing = true;
       startY = e.clientY;
-      const target = getTarget();
-      startHeight = target.offsetHeight;
+      dragTarget = getTarget();
+      dragKey = getHeightKey();
+      startHeight = dragTarget.offsetHeight;
       this.ctx.map?.setIsResizing(true);
       mapSection.classList.add('resizing');
       document.body.style.cursor = 'ns-resize';
@@ -2154,8 +2844,9 @@ export class EventHandlerManager implements AppModule {
     });
 
     resizeHandle.addEventListener('dblclick', () => {
-      const isWide = window.innerWidth >= 1600;
+      const isWide = isSplit();
       const target = isWide ? mapContainer : mapSection;
+      const heightKey = getHeightKey();
 
       const targetHeight = window.innerHeight * 0.5;
       const finalHeight = Math.max(getMinHeight(), Math.min(targetHeight, getMaxHeight()));
@@ -2165,6 +2856,7 @@ export class EventHandlerManager implements AppModule {
 
       if (isWide) target.style.flex = 'none';
       target.style.height = `${finalHeight}px`;
+      syncHeightSeparatorAria();
 
       let fired = false;
       const onEnd = () => {
@@ -2173,9 +2865,10 @@ export class EventHandlerManager implements AppModule {
 
         target.classList.remove('map-section-smooth');
         target.removeEventListener('transitionend', onEnd);
-        writeStorageValue('map-height', `${finalHeight}px`);
+        saveHeight(heightKey, `${finalHeight}px`);
         this.ctx.map?.setIsResizing(false);
         this.ctx.map?.resize();
+        syncHeightSeparatorAria();
       };
 
       target.addEventListener('transitionend', onEnd);
@@ -2183,18 +2876,33 @@ export class EventHandlerManager implements AppModule {
       setTimeout(onEnd, 500);
     });
 
+    // Keyboard path (WAI-ARIA window-splitter): the drag strip is a focusable
+    // separator; arrow keys step the height and persist like a finished drag.
+    resizeHandle.addEventListener('keydown', (e: KeyboardEvent) => {
+      const step = e.key === 'ArrowUp' ? -40 : e.key === 'ArrowDown' ? 40 : 0;
+      if (step === 0) return;
+      e.preventDefault();
+      const target = getTarget();
+      const newHeight = Math.max(getMinHeight(), Math.min(target.offsetHeight + step, getMaxHeight()));
+      if (isSplit()) target.style.flex = 'none';
+      target.style.height = `${newHeight}px`;
+      this.ctx.map?.resize();
+      saveHeight(getHeightKey(), `${newHeight}px`);
+      syncHeightSeparatorAria();
+    });
+
     this.boundMapResizeMoveHandler = (e: MouseEvent) => {
       if (!isResizing) return;
-      const isWide = window.innerWidth >= 1600;
-      const target = isWide ? mapContainer : mapSection;
+      const target = dragTarget ?? getTarget();
 
       const deltaY = e.clientY - startY;
       const newHeight = Math.max(getMinHeight(), Math.min(startHeight + deltaY, getMaxHeight()));
 
-      if (isWide) target.style.flex = 'none';
+      if (target === mapContainer) target.style.flex = 'none';
       target.style.height = `${newHeight}px`;
 
       this.ctx.map?.resize();
+      syncHeightSeparatorAria();
     };
     document.addEventListener('mousemove', this.boundMapResizeMoveHandler);
 
@@ -2211,15 +2919,73 @@ export class EventHandlerManager implements AppModule {
     const widthHandle = document.getElementById('mapWidthResizeHandle');
     if (!mainContent || !widthHandle) return;
 
-    const saved = readStorageValue('map-col-width');
-    if (saved) mainContent.style.setProperty('--map-col-width', saved);
+    const isMapRight = () => mainContent.classList.contains('map-right');
+    const isRtl = () => getComputedStyle(mainContent).direction === 'rtl';
+    // Under RTL the grid mirrors, so grid column 1 sits on the visual right:
+    // drag and arrow-key directions must follow the VISUAL side, not the class.
+    const isMapVisuallyRight = () => getVisualMapSide(isMapRight(), isRtl()) === 'right';
+    const getCurrentWidthPercent = () => {
+      const raw = mainContent.style.getPropertyValue('--map-col-width') || `${MAP_COL_DEFAULT_PERCENT}%`;
+      return clampMapColWidthPercent(Number.parseFloat(raw), mainContent.offsetWidth);
+    };
+    // The centered header clock overlaps the action buttons in a narrow map
+    // column; .map-col-narrow hides it (styles/main.css).
+    const syncMapColNarrowState = () => {
+      const mapSection = document.getElementById('mapSection');
+      if (!mapSection) return;
+      const sectionWidth = mapSection.offsetWidth;
+      mapSection.classList.toggle('map-col-narrow', sectionWidth > 0 && sectionWidth < 360);
+    };
+    const syncWidthSeparatorAria = () => {
+      const current = getCurrentWidthPercent();
+      const { minPct, maxPct } = getMapColWidthBounds(mainContent.offsetWidth);
+      const mapSection = document.getElementById('mapSection');
+      if (mapSection) widthHandle.setAttribute('aria-controls', mapSection.id);
+      widthHandle.setAttribute('aria-valuemin', String(Math.round(minPct)));
+      widthHandle.setAttribute('aria-valuemax', String(Math.round(maxPct)));
+      widthHandle.setAttribute('aria-valuenow', String(Math.round(current)));
+      widthHandle.setAttribute('aria-valuetext', `${Math.round(current)}%`);
+    };
+
+    widthHandle.tabIndex = 0;
+    widthHandle.setAttribute('role', 'separator');
+    widthHandle.setAttribute('aria-orientation', 'vertical');
+    widthHandle.setAttribute('aria-label', t('components.panel.dragToResize'));
+    widthHandle.title = t('components.panel.dragToResize');
+
+    // Re-derive the applied width from storage, clamped for the CURRENT
+    // container: a 75% saved on an ultrawide would otherwise crush the
+    // panels below their pixel floor in a narrow window. Storage keeps the
+    // user's raw preference — only the applied CSS var is clamped — so the
+    // wide value comes back when the window grows again.
+    const applyStoredWidth = () => {
+      const stored = readStorageValue('map-col-width') || mainContent.style.getPropertyValue('--map-col-width');
+      if (stored) {
+        const clamped = clampMapColWidthPercent(Number.parseFloat(stored), mainContent.offsetWidth);
+        mainContent.style.setProperty('--map-col-width', `${clamped.toFixed(1)}%`);
+      }
+      syncMapColNarrowState();
+      syncWidthSeparatorAria();
+    };
+    applyStoredWidth();
 
     let isResizing = false;
     let startX = 0;
     let startTotalWidth = 0;
     let startColPx = 0;
+    // Captured at drag start so a mid-gesture side toggle cannot invert the
+    // direction, and so a second input (mouse vs touch) cannot steal the drag.
+    let dragSign = 1;
+    let activeTouchId: number | null = null;
+    let activeDragSource: 'mouse' | 'touch' | null = null;
+    // Set only by applyDrag: a zero-movement press/tap must not persist the
+    // container-clamped application back over the raw stored preference.
+    let dragMoved = false;
+    let dragStartPct = '';
 
     this.boundMapWidthEndResizeHandler = () => {
+      activeTouchId = null;
+      activeDragSource = null;
       if (!isResizing) return;
       isResizing = false;
       this.ctx.map?.setIsResizing(false);
@@ -2227,32 +2993,144 @@ export class EventHandlerManager implements AppModule {
       document.body.classList.remove('map-width-resizing');
       widthHandle.classList.remove('resizing');
       const current = mainContent.style.getPropertyValue('--map-col-width');
-      if (current) writeStorageValue('map-col-width', current);
+      if (current && dragMoved) {
+        writeStorageValue('map-col-width', current);
+        if (Number.parseFloat(current).toFixed(1) !== dragStartPct) trackLayoutCustomized('map-divider');
+      }
+      dragMoved = false;
+      syncMapColNarrowState();
+      syncWidthSeparatorAria();
     };
 
-    widthHandle.addEventListener('mousedown', (e) => {
+    const beginDrag = (clientX: number, source: 'mouse' | 'touch'): boolean => {
+      if (isResizing) return false;
       isResizing = true;
-      startX = e.clientX;
+      dragMoved = false;
+      activeDragSource = source;
+      startX = clientX;
       startTotalWidth = mainContent.offsetWidth;
-      const raw = mainContent.style.getPropertyValue('--map-col-width') || '60%';
-      startColPx = startTotalWidth * (parseFloat(raw) / 100);
+      dragStartPct = getCurrentWidthPercent().toFixed(1);
+      startColPx = startTotalWidth * (Number(dragStartPct) / 100);
+      dragSign = isMapVisuallyRight() ? -1 : 1;
       this.ctx.map?.setIsResizing(true);
       document.body.classList.add('map-width-resizing');
       widthHandle.classList.add('resizing');
+      return true;
+    };
+    // With the map visually on the right, moving the divider left grows it.
+    const applyDrag = (clientX: number) => {
+      const delta = (clientX - startX) * dragSign;
+      const newPct = clampMapColWidthPercent(((startColPx + delta) / startTotalWidth) * 100, startTotalWidth);
+      mainContent.style.setProperty('--map-col-width', `${newPct.toFixed(1)}%`);
+      dragMoved = true;
+      this.ctx.map?.resize();
+      syncMapColNarrowState();
+      syncWidthSeparatorAria();
+    };
+
+    widthHandle.addEventListener('mousedown', (e) => {
+      if (beginDrag(e.clientX, 'mouse')) e.preventDefault();
+    });
+
+    widthHandle.addEventListener('touchstart', (e: TouchEvent) => {
+      const touch = e.changedTouches[0];
+      if (!touch || !beginDrag(touch.clientX, 'touch')) return;
+      activeTouchId = touch.identifier;
       e.preventDefault();
+    }, { passive: false });
+
+    // Keyboard path, mirroring the height handle above. Arrows move the
+    // DIVIDER, so ArrowRight shrinks a visually-right map.
+    widthHandle.addEventListener('keydown', (e: KeyboardEvent) => {
+      const arrow = e.key === 'ArrowLeft' ? -5 : e.key === 'ArrowRight' ? 5 : 0;
+      if (arrow === 0) return;
+      e.preventDefault();
+      const step = isMapVisuallyRight() ? -arrow : arrow;
+      const currentPct = getCurrentWidthPercent();
+      const newPct = clampMapColWidthPercent(currentPct + step, mainContent.offsetWidth);
+      const value = `${newPct.toFixed(1)}%`;
+      mainContent.style.setProperty('--map-col-width', value);
+      this.ctx.map?.resize();
+      writeStorageValue('map-col-width', value);
+      if (newPct.toFixed(1) !== currentPct.toFixed(1)) trackLayoutCustomized('map-divider');
+      syncMapColNarrowState();
+      syncWidthSeparatorAria();
     });
 
     this.boundMapWidthResizeMoveHandler = (e: MouseEvent) => {
-      if (!isResizing) return;
-      const delta = e.clientX - startX;
-      const newPct = Math.max(25, Math.min(75, ((startColPx + delta) / startTotalWidth) * 100));
-      mainContent.style.setProperty('--map-col-width', `${newPct.toFixed(1)}%`);
-      this.ctx.map?.resize();
+      if (!isResizing || activeDragSource !== 'mouse') return;
+      applyDrag(e.clientX);
     };
+    this.boundMapWidthTouchMoveHandler = (e: TouchEvent) => {
+      if (!isResizing || activeDragSource !== 'touch' || activeTouchId === null) return;
+      const touch = Array.from(e.touches).find(t => t.identifier === activeTouchId);
+      if (!touch) return;
+      applyDrag(touch.clientX);
+    };
+    // Only the tracked finger ends a touch drag — another finger lifting
+    // elsewhere on the page must not cut the resize short.
+    this.boundMapWidthTouchEndHandler = (e: TouchEvent) => {
+      if (activeDragSource !== 'touch' || activeTouchId === null) return;
+      if (!Array.from(e.changedTouches).some(t => t.identifier === activeTouchId)) return;
+      this.boundMapWidthEndResizeHandler?.();
+    };
+    this.boundMapWidthMouseUpHandler = () => {
+      if (activeDragSource === 'mouse') this.boundMapWidthEndResizeHandler?.();
+    };
+    // Mirror the height handle: a hidden tab must not leave a drag latched.
+    this.boundMapWidthVisChangeHandler = () => {
+      if (document.hidden) this.boundMapWidthEndResizeHandler?.();
+    };
+    // Window resizes change the container the stored percentage resolves
+    // against: re-clamp the applied width and refresh the narrow state.
+    this.boundMapWidthWindowResizeHandler = debounce(() => {
+      if (isResizing) return;
+      applyStoredWidth();
+    }, 150);
 
     document.addEventListener('mousemove', this.boundMapWidthResizeMoveHandler);
-    document.addEventListener('mouseup', this.boundMapWidthEndResizeHandler);
+    document.addEventListener('mouseup', this.boundMapWidthMouseUpHandler);
+    document.addEventListener('touchmove', this.boundMapWidthTouchMoveHandler);
+    document.addEventListener('touchend', this.boundMapWidthTouchEndHandler);
+    document.addEventListener('touchcancel', this.boundMapWidthTouchEndHandler);
+    document.addEventListener('visibilitychange', this.boundMapWidthVisChangeHandler);
+    window.addEventListener('resize', this.boundMapWidthWindowResizeHandler);
     window.addEventListener('blur', this.boundMapWidthEndResizeHandler);
+  }
+
+  setupMapSideToggle(): void {
+    const mainContent = document.querySelector<HTMLElement>('.main-content');
+    const sideBtn = document.getElementById('mapSideBtn');
+    if (!mainContent || !sideBtn) return;
+
+    const isRtl = () => getComputedStyle(mainContent).direction === 'rtl';
+    const getVisualSide = () => getVisualMapSide(
+      mainContent.classList.contains('map-right'),
+      isRtl(),
+    );
+    const syncSideButton = () => {
+      const visualSide = getVisualSide();
+      const label = visualSide === 'right' ? 'Move map to the left side' : 'Move map to the right side';
+      sideBtn.title = label;
+      sideBtn.setAttribute('aria-label', label);
+      sideBtn.classList.toggle('active', visualSide === 'right');
+    };
+
+    const storedSide = readStorageValue('map-side');
+    if (storedSide === 'left' || storedSide === 'right') {
+      mainContent.classList.toggle(
+        'map-right',
+        mapRightClassForVisualSide(storedSide as MapVisualSide, isRtl()),
+      );
+    }
+    syncSideButton();
+
+    sideBtn.addEventListener('click', () => {
+      mainContent.classList.toggle('map-right');
+      writeStorageValue('map-side', getVisualSide());
+      syncSideButton();
+      this.ctx.map?.resize();
+    });
   }
 
   setupMapPin(): void {
@@ -2286,18 +3164,7 @@ export class EventHandlerManager implements AppModule {
         const isGlobe = mode === 'globe';
         const alreadyGlobe = this.ctx.map?.isGlobeMode() ?? false;
         if (isGlobe === alreadyGlobe) return;
-        toggle.querySelectorAll('.map-dim-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        saveToStorage(STORAGE_KEYS.mapMode, isGlobe ? 'globe' : 'flat');
-        if (isGlobe) {
-          this.ctx.map?.switchToGlobe();
-        } else {
-          this.ctx.map?.switchToFlat();
-        }
-        if (this.ctx.mapLayers.resilienceScore && !this.ctx.map?.isDeckGLActive?.()) {
-          this.ctx.mapLayers = { ...this.ctx.mapLayers, resilienceScore: false };
-          saveToStorage(STORAGE_KEYS.mapLayers, this.ctx.mapLayers);
-        }
+        void applyVisibleMapDimension(this.ctx, isGlobe ? '3d' : '2d');
       });
     });
   }
@@ -2313,41 +3180,54 @@ export class EventHandlerManager implements AppModule {
       isFullscreen = !isFullscreen;
       mapSection.classList.toggle('live-news-fullscreen', isFullscreen);
       document.body.classList.toggle('live-news-fullscreen-active', isFullscreen);
+      document.body.classList.toggle('map-fullscreen-active', isFullscreen);
       setTrustedHtml(btn, trustedHtml(isFullscreen ? shrinkSvg : expandSvg, "legacy direct innerHTML migration"));
       btn.title = isFullscreen ? 'Exit fullscreen' : 'Fullscreen';
+      this.mobilePrimaryNav.syncMapFullscreen(isFullscreen);
       this.syncMapAfterLayoutChange();
     };
 
     btn.addEventListener('click', toggle);
+    this.exitMapFullscreen = () => {
+      if (isFullscreen) toggle();
+    };
     this.boundMapFullscreenEscHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isFullscreen) toggle();
+      // The orbital full view raises the map and owns Escape while it is open; it lowers the map itself on leaving.
+      if (e.key === 'Escape' && isFullscreen && !document.body.classList.contains('orbital-full-view')) toggle();
     };
     document.addEventListener('keydown', this.boundMapFullscreenEscHandler);
   }
 
   getLocalizedPanelName(panelKey: string, fallback: string): string {
-    if (panelKey === 'runtime-config') {
-      return t('modals.runtimeConfig.title');
-    }
-    const key = panelKey.replace(/-([a-z])/g, (_match, group: string) => group.toUpperCase());
-    const lookup = `panels.${key}`;
-    const localized = t(lookup);
-    return localized === lookup ? fallback : localized;
+    return getPanelDisplayName(panelKey, fallback);
   }
 
-  private transferSourceGateOwnershipToUser(names: Iterable<string>): boolean {
-    const gateOwned = new Set(
+  private persistSourcePreferences(names: Iterable<string>): void {
+    const persistedGateOwned = new Set(
       loadFromStorage<string[]>(STORAGE_KEYS.sourceGateOwnership, []),
     );
-    const nextGateOwned = releaseSourceGateOwnership(gateOwned, names);
-    if (nextGateOwned.size === gateOwned.size) return true;
-    // A deliberate source preference can only outlive the gate safely after
-    // ownership transfers. If this sidecar write fails, keep the live toggle
-    // for the session but do not persist a preference Pro could later undo.
-    return writeStorageValue(
-      STORAGE_KEYS.sourceGateOwnership,
-      JSON.stringify([...nextGateOwned]),
-    );
+    const pending = this.ctx.pendingSourcePreferences;
+    const gateOwned = pending?.gateOwned ?? persistedGateOwned;
+    const edits = new Map(pending?.edits);
+    const editedNames = [...names];
+    for (const name of editedNames) edits.set(name, this.ctx.disabledSources.has(name));
+    const nextGateOwned = releaseSourceGateOwnership(gateOwned, editedNames);
+    this.ctx.pendingSourcePreferences = {
+      gateOwned: nextGateOwned,
+      baselineGateOwned: pending?.baselineGateOwned ?? persistedGateOwned,
+      fallbackDisabledSources: pending?.fallbackDisabledSources,
+      edits,
+      migrationMarkers: pending?.migrationMarkers ?? [],
+    };
+    if (!stringSetsEqual(persistedGateOwned, nextGateOwned)
+      && !writeStorageValue(STORAGE_KEYS.sourceGateOwnership, JSON.stringify([...nextGateOwned]))) return;
+    if (!saveToStorage(STORAGE_KEYS.disabledFeeds, [...this.ctx.disabledSources])) return;
+    this.ctx.pendingSourcePreferences.baselineGateOwned = nextGateOwned;
+    this.ctx.pendingSourcePreferences.fallbackDisabledSources = undefined;
+    for (const marker of pending?.migrationMarkers ?? []) {
+      if (!writeStorageValue(marker, 'done')) return;
+    }
+    this.ctx.pendingSourcePreferences = undefined;
   }
 
   getAllSourceNames(): string[] {

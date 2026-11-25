@@ -17,8 +17,12 @@
  * so a transient validation or auth blip on session init never crashes
  * the auth path. Client retries on next session.
  */
-import { mutation } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { TERMS_VERSION } from "../shared/legal";
+import { isAccountDeleting } from "./accountDeletion/guard";
+import { agentRefColumns } from "../shared/agent-client-source";
+import { briefL10nDeliverableLanguages, isUiLanguage, resolveBriefLanguage } from "../shared/ui-languages";
 
 // Validation invariants. Length-bounded BEFORE regex (defense in depth
 // against memory-exhaustion via huge strings).
@@ -58,12 +62,30 @@ function isValidTimezone(tz: string): boolean {
   }
 }
 
+/**
+ * Sign-up source columns for a new users row. An unusable ref is dropped, not
+ * rejected: attribution must never block the account record. Exported for
+ * tests.
+ */
+export function signupSourceFields(rawRef: string | undefined): {
+  signupRef?: string;
+  signupSource?: string;
+} {
+  const columns = agentRefColumns(rawRef);
+  return columns ? { signupRef: columns.ref, signupSource: columns.source } : {};
+}
+
 export const ensureRecord = mutation({
   args: {
     localeTag: v.string(),
     localePrimary: v.string(),
     timezone: v.optional(v.string()),
     country: v.optional(v.string()),
+    // First-touch agent link (`agent-claude`), stored by the browser from an
+    // inbound `?ref=`. Kept only on insert, as the sign-up source.
+    signupRef: v.optional(v.string()),
+    // Explicit Settings language (wm-locale-explicit). Never navigator or ?lang=.
+    uiLanguage: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     // ──── Validation ────
@@ -102,6 +124,12 @@ export const ensureRecord = mutation({
       );
       return { ok: false as const, reason: "invalid-input" as const, field: "country" };
     }
+    if (args.uiLanguage !== undefined && !isUiLanguage(args.uiLanguage)) {
+      console.warn(
+        `[users:ensureRecord] invalid uiLanguage rejected: ${args.uiLanguage.slice(0, 64)}`,
+      );
+      return { ok: false as const, reason: "invalid-input" as const, field: "uiLanguage" };
+    }
 
     // ──── Auth ────
     const identity = await ctx.auth.getUserIdentity();
@@ -109,6 +137,9 @@ export const ensureRecord = mutation({
       return { ok: false as const, reason: "unauthenticated" as const };
     }
     const userId = identity.subject;
+    if (await isAccountDeleting(ctx, userId)) {
+      return { ok: false as const, reason: "account-deletion" as const };
+    }
     // Email may be empty for phone-only signups; treated as "no email
     // observed yet" — we'll fill it on a later call when one is added.
     const incomingEmail = (identity.email ?? "").trim();
@@ -125,7 +156,7 @@ export const ensureRecord = mutation({
       // Patch policy:
       // - locale fields: always refresh (last-write-wins; users do switch
       //   browser locale legitimately).
-      // - timezone / country: refresh only if explicitly provided in this
+      // - timezone / country / uiLanguage: refresh only if explicitly provided in this
       //   call. An omitted optional arg means "no new data this session",
       //   not "clear it".
       // - email / normalizedEmail: refresh on every call when identity
@@ -149,6 +180,7 @@ export const ensureRecord = mutation({
         existing.localePrimary !== args.localePrimary ||
         (args.timezone !== undefined && existing.timezone !== args.timezone) ||
         (args.country !== undefined && existing.country !== args.country) ||
+        (args.uiLanguage !== undefined && existing.uiLanguage !== args.uiLanguage) ||
         emailChanged;
       if (!materialChange && now - existing.lastSeenAt < LAST_SEEN_REFRESH_WINDOW_MS) {
         return { ok: true as const, action: "unchanged" as const };
@@ -161,6 +193,7 @@ export const ensureRecord = mutation({
       };
       if (args.timezone !== undefined) patch.timezone = args.timezone;
       if (args.country !== undefined) patch.country = args.country;
+      if (args.uiLanguage !== undefined) patch.uiLanguage = args.uiLanguage;
       if (incomingEmail.length > 0) {
         patch.email = incomingEmail;
         patch.normalizedEmail = incomingNormalizedEmail;
@@ -169,6 +202,11 @@ export const ensureRecord = mutation({
       return { ok: true as const, action: "patched" as const };
     }
 
+    // First authenticated session === account creation, which is where Clerk
+    // renders the Terms and Privacy links on the sign-up card (#6976). Assent
+    // is stamped ONLY here, never in the patch branch above: signing in again
+    // is not accepting again, and back-stamping a returning user would claim
+    // consent from someone who was shown nothing.
     await ctx.db.insert("users", {
       userId,
       email: incomingEmail.length > 0 ? incomingEmail : undefined,
@@ -178,9 +216,162 @@ export const ensureRecord = mutation({
       localePrimary: args.localePrimary,
       timezone: args.timezone,
       country: args.country,
+      uiLanguage: args.uiLanguage,
       firstSeenAt: now,
       lastSeenAt: now,
+      termsAcceptedAt: now,
+      termsFirstAcceptedAt: now,
+      termsVersion: TERMS_VERSION,
+      ...signupSourceFields(args.signupRef),
     });
     return { ok: true as const, action: "inserted" as const };
+  },
+});
+
+/**
+ * Record Terms assent at checkout start (#6976).
+ *
+ * INTERNAL: called by `internalCreateCheckout` with a userId already derived
+ * from a validated Clerk bearer token, never from a request body. The version
+ * is read from `shared/legal.ts` here rather than accepted as an argument, so a
+ * caller cannot record a version that was never in effect — and because both
+ * ship from the same deploy, the value always names text that git history can
+ * resolve (locked by tests/legal-version.test.mts).
+ *
+ * Inserts when no row exists. That is not a corner case: `pro-test` has no
+ * Convex client, so a buyer who signs in on the /pro pricing page and checks
+ * out may never have run `ensureRecord` — the main purchase path.
+ *
+ * Re-accepting an already-recorded version is a READ, not a write. Repeat
+ * checkouts and retries therefore cannot OCC-conflict on the same `users` doc,
+ * the same reason `ensureRecord` debounces `lastSeenAt`.
+ *
+ * Never throws: the caller treats a failed audit write as loggable, not as a
+ * reason to fail a paid conversion.
+ */
+export const recordTermsAcceptance = internalMutation({
+  args: {
+    userId: v.string(),
+    email: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = args.userId.trim();
+    if (!userId) {
+      console.warn("[users:recordTermsAcceptance] empty userId rejected");
+      return { ok: false as const, reason: "invalid-input" as const };
+    }
+    if (await isAccountDeleting(ctx, userId)) {
+      return { ok: false as const, reason: "account-deletion" as const };
+    }
+
+    const now = Date.now();
+    const email = (args.email ?? "").trim();
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .unique();
+
+    if (!existing) {
+      await ctx.db.insert("users", {
+        userId,
+        email: email.length > 0 ? email : undefined,
+        normalizedEmail: email.length > 0 ? email.toLowerCase() : undefined,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        termsAcceptedAt: now,
+        termsFirstAcceptedAt: now,
+        termsVersion: TERMS_VERSION,
+      });
+      return { ok: true as const, action: "inserted" as const };
+    }
+
+    if (existing.termsVersion === TERMS_VERSION) {
+      return { ok: true as const, action: "unchanged" as const };
+    }
+
+    // `lastSeenAt` moves with every write to this table, so the timestamp keeps
+    // meaning "as of the last write" rather than drifting behind one (#6335).
+    await ctx.db.patch(existing._id, {
+      termsAcceptedAt: now,
+      // Preserved across every later version. A row written before this field
+      // existed has no first-acceptance date to keep, so it adopts the one
+      // acceptance we can prove: the one being recorded now.
+      termsFirstAcceptedAt: existing.termsFirstAcceptedAt ?? existing.termsAcceptedAt ?? now,
+      termsVersion: TERMS_VERSION,
+      lastSeenAt: now,
+    });
+    return { ok: true as const, action: "recorded" as const };
+  },
+});
+
+/**
+ * Notification-settings override for the brief language (epic #10877).
+ * `null` clears it, so the brief follows the explicit Settings language.
+ * Identity from `ctx.auth` only. An unchanged value is a read, not a write
+ * (read-only mutations cannot OCC-conflict). No row → `no-user-record`: the
+ * settings UI is reached only from the dashboard, where `ensureRecord` ran.
+ */
+export const setBriefLanguage = mutation({
+  // expectedUserId: the account the save was started for. A save in flight
+  // across a reconnect is replayed with the token current then; if the
+  // signed-in account changed, it must not land on the new account's row.
+  args: { lang: v.union(v.string(), v.null()), expectedUserId: v.string() },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return { ok: false as const, reason: "unauthenticated" as const };
+    const userId = identity.subject;
+    if (userId !== args.expectedUserId) return { ok: false as const, reason: "account-mismatch" as const };
+    if (args.lang !== null && !isUiLanguage(args.lang)) {
+      return { ok: false as const, reason: "invalid-input" as const };
+    }
+    if (await isAccountDeleting(ctx, userId)) {
+      return { ok: false as const, reason: "account-deletion" as const };
+    }
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .unique();
+    if (!existing) return { ok: false as const, reason: "no-user-record" as const };
+    const next = args.lang ?? undefined;
+    if (existing.briefLanguage === next) return { ok: true as const };
+    await ctx.db.patch(existing._id, { briefLanguage: next, lastSeenAt: Date.now() });
+    return { ok: true as const };
+  },
+});
+
+/**
+ * The caller's stored languages, the brief language they resolve to, and the
+ * languages the brief is delivered in now (Convex BRIEF_L10N_* env). The
+ * Settings page promises a language only when it is in that list.
+ */
+export const getBriefLanguage = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return null;
+    const row = await ctx.db
+      .query("users")
+      .withIndex("by_userId", (q) => q.eq("userId", identity.subject))
+      .unique();
+    const uiLanguage = row?.uiLanguage ?? null;
+    const briefLanguage = row?.briefLanguage ?? null;
+    return {
+      uiLanguage,
+      briefLanguage,
+      effective: resolveBriefLanguage({ uiLanguage, briefLanguage }),
+      deliverableLanguages: briefL10nDeliverableLanguages(process.env),
+    };
+  },
+});
+
+/** Effective brief language for the digest cron; `'en'` when there is no row. */
+export const getBriefLanguageForUser = internalQuery({
+  args: { userId: v.string() },
+  handler: async (ctx, args): Promise<string> => {
+    const row = await ctx.db
+      .query("users")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    return resolveBriefLanguage({ uiLanguage: row?.uiLanguage, briefLanguage: row?.briefLanguage });
   },
 });

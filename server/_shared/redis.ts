@@ -1,6 +1,7 @@
-import { unwrapEnvelope } from './seed-envelope';
-import { getRpcNoStoreReasonFromPayload } from './cache-contract';
-import { buildUpstreamEvent, getUsageScope, sendToAxiom } from './usage';
+import { COMPARE_AND_DELETE_SCRIPT } from '../../shared/compare-and-delete-script.cjs';
+import { unwrapEnvelope } from './seed-envelope.js';
+import { getRpcNoStoreReasonFromPayload } from './cache-contract.js';
+import { buildUpstreamEvent, getUsageScope, sendToAxiom } from './usage.js';
 
 // Default Upstash REST timeouts are tuned for production (Vercel ↔ Upstash
 // same-datacenter latency is sub-50ms, 1.5s leaves >20× headroom). They
@@ -79,7 +80,7 @@ async function readCachedJsonInternal(
 ): Promise<CacheReadResult> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
     try {
-      const { sidecarCacheGet } = await import('./sidecar-cache');
+      const { sidecarCacheGet } = await import('./sidecar-cache.js');
       const value = sidecarCacheGet(key);
       return value == null ? { status: 'miss' } : { status: 'hit', value };
     } catch (error) {
@@ -117,7 +118,12 @@ export async function readCachedJson(key: string, raw = false): Promise<CacheRea
   return readCachedJsonInternal(key, raw, true);
 }
 
-function logCacheReadError(key: string, err: unknown): void {
+/** Status-aware read that preserves the runSeed contract envelope. */
+export async function readCachedEnvelopeJson(key: string, raw = false): Promise<CacheReadResult> {
+  return readCachedJsonInternal(key, raw, false);
+}
+
+export function logCacheReadError(key: string, err: unknown): void {
   // Structured timeout log goes to Sentry via Vercel integration. Large-
   // payload timeouts used to silently return null and let downstream callers
   // cache zero-state — see docs/plans/chokepoint-rpc-payload-split.md for
@@ -142,7 +148,7 @@ function logCacheReadError(key: string, err: unknown): void {
  */
 export async function getRawJson(key: string): Promise<unknown | null> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
-    const { sidecarCacheGet } = await import('./sidecar-cache');
+    const { sidecarCacheGet } = await import('./sidecar-cache.js');
     return sidecarCacheGet(key);
   }
   const url = process.env.UPSTASH_REDIS_REST_URL;
@@ -162,6 +168,36 @@ export async function getRawJson(key: string): Promise<unknown | null> {
 }
 
 /**
+ * Read a large seed-owned JSON value through Upstash's body command endpoint.
+ * The normal 1.5-second GET deadline is intentionally too small for multi-MB
+ * last-good fallbacks; this path uses the bounded pipeline deadline instead.
+ */
+export async function getLargeRawJson(key: string, timeoutMs?: number): Promise<unknown | null> {
+  if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
+    const { sidecarCacheGet } = await import('./sidecar-cache.js');
+    return sidecarCacheGet(key);
+  }
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  const resp = await fetch(`${url}/`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'worldmonitor-server/1.0 (redis)',
+    },
+    body: JSON.stringify(['GET', key]),
+    signal: AbortSignal.timeout(resolvePipelineTimeoutMs(timeoutMs)),
+  });
+  if (!resp.ok) throw new Error(`Redis HTTP ${resp.status}`);
+  const data = (await resp.json()) as { result?: string | null; error?: string };
+  if (data.error) throw new Error(`Redis command error: ${data.error}`);
+  if (!data.result) return null;
+  return unwrapEnvelope(JSON.parse(data.result)).data;
+}
+
+/**
  * Read a key's value as a raw Upstash string — no JSON.parse, no envelope unwrap.
  * Use when a seeder stores a bare scalar (e.g., a snapshot_id pointer) via
  * `['SET', key, bareString]` without JSON.stringify. getCachedJson() on these
@@ -173,7 +209,7 @@ export async function getRawJson(key: string): Promise<unknown | null> {
  */
 export async function getCachedRawString(key: string): Promise<string | null> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
-    const { sidecarCacheGet } = await import('./sidecar-cache');
+    const { sidecarCacheGet } = await import('./sidecar-cache.js');
     const v = sidecarCacheGet(key);
     return typeof v === 'string' ? v : null;
   }
@@ -216,9 +252,8 @@ export async function getCachedEnvelopeJson(key: string, raw = false): Promise<u
 
 export async function setCachedJson(key: string, value: unknown, ttlSeconds: number, raw = false): Promise<boolean> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
-    const { sidecarCacheSet } = await import('./sidecar-cache');
-    sidecarCacheSet(key, value, ttlSeconds);
-    return true;
+    const { sidecarCacheSet } = await import('./sidecar-cache.js');
+    return sidecarCacheSet(key, value, ttlSeconds);
   }
 
   const url = process.env.UPSTASH_REDIS_REST_URL;
@@ -259,6 +294,57 @@ export async function setCachedJson(key: string, value: unknown, ttlSeconds: num
   }
 }
 
+/**
+ * First-writer-wins JSON publish. Uses SET NX EX so concurrent isolates cannot
+ * overwrite a key the other already persisted. Returns true only when this
+ * caller created the key; false means the key already existed or the write
+ * could not be confirmed. Callers that need the persisted winner must GET
+ * after this and fail closed on a miss.
+ */
+export async function setCachedJsonIfAbsent(
+  key: string,
+  value: unknown,
+  ttlSeconds: number,
+  raw = false,
+  onError?: (error: unknown) => void,
+): Promise<boolean> {
+  if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
+    const { sidecarCacheSetIfAbsent } = await import('./sidecar-cache.js');
+    return sidecarCacheSetIfAbsent(key, value, ttlSeconds);
+  }
+
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return false;
+  try {
+    const finalKey = raw ? key : prefixKey(key);
+    const resp = await fetch(`${url}/`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'worldmonitor-server/1.0 (redis)',
+      },
+      body: JSON.stringify(['SET', finalKey, JSON.stringify(value), 'EX', String(ttlSeconds), 'NX']),
+      signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
+    });
+    const data = (await resp.json().catch(() => null)) as {
+      result?: string | null;
+      error?: string;
+    } | null;
+    if (!resp.ok || data?.error) {
+      console.warn(`[redis] setCachedJsonIfAbsent failed:`, data?.error ?? `HTTP ${resp.status}`);
+      return false;
+    }
+    return data?.result === 'OK';
+  } catch (err) {
+    // sentry-coverage-ok: onError receives the original exception before the fail-closed return.
+    onError?.(err);
+    console.warn('[redis] setCachedJsonIfAbsent failed:', errMsg(err));
+    return false;
+  }
+}
+
 /** Read a bounded Redis list whose members are independently JSON encoded. */
 export async function readCachedJsonList(
   key: string,
@@ -270,7 +356,7 @@ export async function readCachedJsonList(
     : 1;
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
     try {
-      const { sidecarCacheGet } = await import('./sidecar-cache');
+      const { sidecarCacheGet } = await import('./sidecar-cache.js');
       const value = sidecarCacheGet(key);
       if (!Array.isArray(value) || value.length === 0) return { status: 'miss' };
       return { status: 'hit', value: value.slice(0, boundedLimit) };
@@ -357,13 +443,12 @@ export async function prependCachedJsonList(
 
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
     try {
-      const { sidecarCacheGet, sidecarCacheSet } = await import('./sidecar-cache');
+      const { sidecarCacheGet, sidecarCacheSet } = await import('./sidecar-cache.js');
       const existing = sidecarCacheGet(key);
       const retained = Array.isArray(existing)
         ? existing.filter((item) => JSON.stringify(item) !== encoded)
         : [];
-      sidecarCacheSet(key, [value, ...retained].slice(0, boundedLimit), boundedTtlSeconds);
-      return true;
+      return sidecarCacheSet(key, [value, ...retained].slice(0, boundedLimit), boundedTtlSeconds);
     } catch (err) {
       // sentry-coverage-ok: this helper returns false to its caller, and a
       // history write must never fail the current response it will inform.
@@ -422,6 +507,8 @@ export async function prependCachedJsonList(
 }
 
 const NEG_SENTINEL = '__WM_NEG__';
+/** Default negative-cache window for a fetcher that returned null. */
+export const CACHED_FETCH_NEGATIVE_TTL_SECONDS = 120;
 const FETCH_ERROR_NEGATIVE_TTL_SECONDS = 30;
 /** Short isolate-local backoff when error negative-caching is disabled. Distinct from NEG_SENTINEL. */
 const FETCH_ERROR_UNAVAILABLE_BACKOFF_SECONDS = 3;
@@ -510,7 +597,7 @@ export async function getCachedJsonBatch(keys: string[], raw = false): Promise<M
 
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
     try {
-      const { sidecarCacheGet } = await import('./sidecar-cache');
+      const { sidecarCacheGet } = await import('./sidecar-cache.js');
       for (const key of keys) {
         const value = sidecarCacheGet(key);
         if (value != null) result.set(key, value);
@@ -532,6 +619,7 @@ export async function getCachedJsonBatch(keys: string[], raw = false): Promise<M
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
+        'User-Agent': 'worldmonitor-server/1.0 (redis)',
       },
       body: JSON.stringify(pipeline),
       signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
@@ -567,6 +655,19 @@ export async function getCachedJsonBatch(keys: string[], raw = false): Promise<M
   return result;
 }
 
+/**
+ * Is there a Redis to talk to at all?
+ *
+ * Callers that must distinguish "no store exists here" from "the store failed"
+ * need this, because every command helper below collapses both into an empty
+ * result. Reading it through this function rather than process.env directly
+ * keeps it stubbable alongside the command helpers in tests.
+ */
+export function isRedisConfigured(): boolean {
+  if (process.env.LOCAL_API_MODE === 'tauri-sidecar') return true;
+  return Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+}
+
 export type RedisPipelineCommand = Array<string | number>;
 export type RedisCommandResult = { result?: unknown; error?: string };
 
@@ -583,7 +684,26 @@ function normalizePipelineCommand(command: RedisPipelineCommand, raw: boolean): 
   return [verb, prefixKey(key), ...rest];
 }
 
-export async function runRedisPipeline(commands: RedisPipelineCommand[], raw = false): Promise<RedisCommandResult[]> {
+function resolvePipelineTimeoutMs(timeoutMs?: number): number {
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return REDIS_PIPELINE_TIMEOUT_MS;
+  }
+  return Math.min(REDIS_PIPELINE_TIMEOUT_MS, Math.max(1, Math.ceil(timeoutMs)));
+}
+
+/**
+ * Execute allowlisted Redis commands through Upstash's pipeline endpoint.
+ *
+ * `timeoutMs` can tighten, but never extend, the shared pipeline timeout. It
+ * lets callers with an absolute response deadline abort the request inside
+ * their remaining budget instead of either starting a full five-second call
+ * or leaving work behind after their response has completed.
+ */
+export async function runRedisPipeline(
+  commands: RedisPipelineCommand[],
+  raw = false,
+  timeoutMs?: number,
+): Promise<RedisCommandResult[]> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') return [];
   if (commands.length === 0) return [];
 
@@ -599,7 +719,7 @@ export async function runRedisPipeline(commands: RedisPipelineCommand[], raw = f
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(commands.map((command) => normalizePipelineCommand(command, raw))),
-      signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(resolvePipelineTimeoutMs(timeoutMs)),
     });
     if (!response.ok) {
       console.warn(`[redis] runRedisPipeline HTTP ${response.status}`);
@@ -612,8 +732,15 @@ export async function runRedisPipeline(commands: RedisPipelineCommand[], raw = f
   }
 }
 
-/** Execute allowlisted Redis commands in one MULTI/EXEC transaction. */
-export async function runRedisTransaction(commands: RedisPipelineCommand[], raw = false): Promise<RedisCommandResult[]> {
+/**
+ * Execute allowlisted Redis commands in one MULTI/EXEC transaction.
+ * `timeoutMs` can tighten, but never extend, the shared pipeline timeout.
+ */
+export async function runRedisTransaction(
+  commands: RedisPipelineCommand[],
+  raw = false,
+  timeoutMs?: number,
+): Promise<RedisCommandResult[]> {
   if (process.env.LOCAL_API_MODE === 'tauri-sidecar') return [];
   if (commands.length === 0) return [];
 
@@ -630,7 +757,7 @@ export async function runRedisTransaction(commands: RedisPipelineCommand[], raw 
         'User-Agent': 'worldmonitor-server/1.0 (redis)',
       },
       body: JSON.stringify(commands.map((command) => normalizePipelineCommand(command, raw))),
-      signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(resolvePipelineTimeoutMs(timeoutMs)),
     });
     if (!response.ok) {
       console.warn(`[redis] runRedisTransaction HTTP ${response.status}`);
@@ -657,7 +784,6 @@ export async function compareAndDeleteRedisKey(key: string, expectedValue: strin
   if (!url || !token || !expectedValue) return false;
 
   const finalKey = raw ? key : prefixKey(key);
-  const script = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
   try {
     const response = await fetch(`${url}/`, {
       method: 'POST',
@@ -665,7 +791,7 @@ export async function compareAndDeleteRedisKey(key: string, expectedValue: strin
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(['EVAL', script, '1', finalKey, expectedValue]),
+      body: JSON.stringify(['EVAL', COMPARE_AND_DELETE_SCRIPT, '1', finalKey, expectedValue]),
       signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
     });
     if (!response.ok) {
@@ -732,28 +858,43 @@ export function __resetFetcherTimeoutForTests(): void {
 }
 
 /**
+ * Loader for a cache miss. `signal` aborts when the cache-layer timeout
+ * fires. A loader that ignores the argument behaves as before.
+ */
+export type CachedJsonFetcher<T extends object> = (signal: AbortSignal) => Promise<T | null>;
+
+/**
  * Race the fetcher promise against a setTimeout so the inflight slot is
  * guaranteed to settle even if the fetcher hangs forever. The timer is
- * cleared as soon as the fetcher wins so we don't leak handles or keep the
- * isolate awake unnecessarily.
+ * cleared as soon as either side settles so we don't leak handles or keep
+ * the isolate awake unnecessarily.
  *
- * Known limitation: this only times out the cache-layer wrapper — the
- * underlying fetcher promise is NOT cancelled. A truly hung upstream
- * fetcher continues running in the background until the isolate recycles
- * (~socket + small heap residue per orphan). Inflight-slot release means
- * subsequent callers re-fetch successfully, so user-facing behavior is
- * correct; only resource-cost is affected. True cancellation would require
- * threading an AbortSignal through the fetcher contract, which is a wider
- * refactor across every cached-fetch call site.
+ * The fetcher may take an AbortSignal. When the timeout fires, this aborts
+ * that signal with a CachedFetchTimeoutError so an opt-in fetcher can cancel
+ * its own upstream work. Fetchers that ignore the argument keep running until
+ * they settle. Call sites can adopt the signal over time.
  */
-function withFetcherTimeout<T>(promise: Promise<T>, key: string, timeoutMs: number, callerName: 'cachedFetchJson' | 'cachedFetchJsonWithMeta'): Promise<T> {
+function withFetcherTimeout<T>(
+  fetcher: (signal: AbortSignal) => Promise<T>,
+  key: string,
+  timeoutMs: number,
+  callerName: 'cachedFetchJson' | 'cachedFetchJsonWithMeta',
+): Promise<T> {
+  const controller = new AbortController();
+  // Start the fetcher before the timer. A synchronous throw must leave no
+  // timer behind, matching the previous call-site order.
+  const fetcherPromise = fetcher(controller.signal);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new CachedFetchTimeoutError(`${callerName} timeout after ${timeoutMs}ms for "${key}"`));
+      const error = new CachedFetchTimeoutError(`${callerName} timeout after ${timeoutMs}ms for "${key}"`);
+      // Settle the race before aborting. An abort listener that settles the
+      // fetcher must not replace the cache-layer timeout error.
+      reject(error);
+      controller.abort(error);
     }, timeoutMs);
   });
-  return Promise.race([promise, timeout]).finally(() => {
+  return Promise.race([fetcherPromise, timeout]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
 }
@@ -777,6 +918,12 @@ function withFetcherTimeout<T>(promise: Promise<T>, key: string, timeoutMs: numb
 export interface CachedFetchOpts {
   timeoutMs?: number;
   cacheFetcherErrors?: boolean;
+  /**
+   * Cache a payload whose only no-store marker is `upstreamUnavailable`.
+   * Use this only when the payload contains useful partial data. Null results
+   * and all other no-store markers keep the normal negative-cache behavior.
+   */
+  cacheUpstreamUnavailablePayloads?: boolean;
 }
 
 /**
@@ -792,73 +939,21 @@ export interface CachedFetchOpts {
 export async function cachedFetchJson<T extends object>(
   key: string,
   ttlSeconds: number,
-  fetcher: () => Promise<T | null>,
-  negativeTtlSeconds = 120,
+  fetcher: CachedJsonFetcher<T>,
+  negativeTtlSeconds = CACHED_FETCH_NEGATIVE_TTL_SECONDS,
   opts?: CachedFetchOpts,
 ): Promise<T | null> {
-  const cached = await readCachedJson(key);
-  if (cached.status === 'hit') {
-    if (cached.value === NEG_SENTINEL) return null;
-    return cached.value as T;
-  }
-  const localPositive = readLocalPositiveFallback(key);
-  if (localPositive !== undefined) return localPositive as T;
-  const hadCacheReadError = cached.status === 'error';
-  if (cached.status === 'error') {
-    logCacheReadError(key, cached.error);
-    if (hasLocalNegativeCooldown(key)) return null;
-  }
-  // Unavailable backoff (cacheFetcherErrors: false path): rethrow without
-  // hitting upstream again until the short isolate-local window expires.
-  if (hasLocalUnavailableBackoff(key)) {
-    throw new Error(`cachedFetchJson unavailable backoff active for "${key}"`);
-  }
-
-  const existing = inflight.get(key);
-  if (existing) return existing as Promise<T | null>;
-
-  const timeoutMs = opts?.timeoutMs ?? fetcherTimeoutDefaultMs;
-  const promise = withFetcherTimeout(fetcher(), key, timeoutMs, 'cachedFetchJson')
-    .then(async (result) => {
-      if (result != null) {
-        const noStoreReason = getRpcNoStoreReasonFromPayload(result, { includeAvailableFalse: false });
-        if (noStoreReason) {
-          armLocalNegativeCooldown(key, negativeTtlSeconds);
-          await setCachedJson(key, NEG_SENTINEL, negativeTtlSeconds);
-        } else {
-          const wrote = await setCachedJson(key, result, ttlSeconds);
-          // Remote Redis write/read failures should not force every caller back
-          // upstream while the isolate is still warm. Sidecar/local mode skips
-          // this bridge because hasRemoteRedisConfig() is false there.
-          if (hadCacheReadError || (!wrote && hasRemoteRedisConfig())) {
-            armLocalPositiveFallback(key, result, ttlSeconds);
-          }
-        }
-      } else {
-        armLocalNegativeCooldown(key, negativeTtlSeconds);
-        await setCachedJson(key, NEG_SENTINEL, negativeTtlSeconds);
-      }
-      return result;
-    })
-    .catch(async (err: unknown) => {
-      if (opts?.cacheFetcherErrors !== false) {
-        const errorTtlSeconds = effectiveFetchErrorNegativeTtlSeconds(negativeTtlSeconds);
-        armLocalNegativeCooldown(key, errorTtlSeconds);
-        await setCachedJson(key, NEG_SENTINEL, errorTtlSeconds);
-        console.warn(`[redis] cachedFetchJson fetcher failed for "${key}":`, errMsg(err));
-      } else {
-        // No Redis NEG_SENTINEL — keep definitive-invalid distinct — but still
-        // rate-limit retries with a short local-only unavailable backoff.
-        armLocalUnavailableBackoff(key, FETCH_ERROR_UNAVAILABLE_BACKOFF_SECONDS);
-      }
-      throw err;
-    })
-    .finally(() => {
-      inflight.delete(key);
-    });
-
-  inflight.set(key, promise);
-  return promise;
+  // Rebuild the public option shape so structurally assignable objects cannot
+  // leak cachedFetchJsonWithMeta-only fields into the shared implementation.
+  const coreOpts = opts === undefined
+    ? undefined
+    : {
+        timeoutMs: opts.timeoutMs,
+        cacheFetcherErrors: opts.cacheFetcherErrors,
+        cacheUpstreamUnavailablePayloads: opts.cacheUpstreamUnavailablePayloads,
+      };
+  const result = await cachedFetchJsonCore(key, ttlSeconds, fetcher, negativeTtlSeconds, coreOpts, 'cachedFetchJson');
+  return result.data;
 }
 
 /**
@@ -901,24 +996,54 @@ export interface UsageHook {
  * path (issue #3381). Pass-through for callers that don't care about
  * telemetry — backwards-compatible.
  *
- * If `opts.shouldFetch` returns false after all cache and in-flight checks,
+ * If `opts.shouldFetch` resolves false after all cache and in-flight checks,
  * the fetcher is skipped without writing a negative sentinel. Use this for
  * caller-local availability gates whose result must not poison a shared key.
  * `opts.cacheFailures: false` similarly makes nulls, no-store payloads, and
  * thrown fetches non-cacheable. `opts.inflightKey` lets callers share positive
  * cache entries while isolating provider-local work and failures.
+ * `opts.onPositiveResult` keeps the in-flight slot open for a caller-owned
+ * commit phase after a valid fetch result.
+ * `opts.isCallerLocalError` identifies admission failures that belong only to
+ * the fetch leader. These errors do not arm shared cache backoff, and an
+ * in-flight follower re-enters admission under its own request instead of
+ * inheriting any preceding leader's failure.
  */
+type CachedFetchWithMetaOpts<T extends object = object> = CachedFetchOpts & {
+  usage?: UsageHook;
+  shouldFetch?: () => boolean | Promise<boolean>;
+  cacheFailures?: boolean;
+  cachePositiveResult?: boolean;
+  onPositiveResult?: (result: T) => Promise<void>;
+  inflightKey?: string;
+  isCallerLocalError?: (error: unknown) => boolean;
+};
+
 export async function cachedFetchJsonWithMeta<T extends object>(
   key: string,
   ttlSeconds: number,
-  fetcher: () => Promise<T | null>,
-  negativeTtlSeconds = 120,
-  opts?: CachedFetchOpts & {
-    usage?: UsageHook;
-    shouldFetch?: () => boolean;
-    cacheFailures?: boolean;
-    inflightKey?: string;
-  },
+  fetcher: CachedJsonFetcher<T>,
+  negativeTtlSeconds = CACHED_FETCH_NEGATIVE_TTL_SECONDS,
+  opts?: CachedFetchWithMetaOpts<T>,
+): Promise<{ data: T | null; source: 'cache' | 'fresh' | 'skipped'; leader: boolean }> {
+  return cachedFetchJsonCore(key, ttlSeconds, fetcher, negativeTtlSeconds, opts, 'cachedFetchJsonWithMeta');
+}
+
+// Shared implementation behind cachedFetchJson / cachedFetchJsonWithMeta.
+// cachedFetchJson is the WithMeta behavior with every WithMeta-only opt left
+// at its default (no inflightKey override, no shouldFetch gate, no
+// per-fetch usage telemetry, cacheFailures/isCallerLocalError unset) and
+// { data, source, leader } narrowed down to plain `data`. `callerName`
+// keeps the timeout/backoff/log messages attributed to whichever public
+// entry point the caller actually used, matching withFetcherTimeout's
+// existing per-caller message convention.
+async function cachedFetchJsonCore<T extends object>(
+  key: string,
+  ttlSeconds: number,
+  fetcher: CachedJsonFetcher<T>,
+  negativeTtlSeconds: number,
+  opts: CachedFetchWithMetaOpts<T> | undefined,
+  callerName: 'cachedFetchJson' | 'cachedFetchJsonWithMeta',
 ): Promise<{ data: T | null; source: 'cache' | 'fresh' | 'skipped'; leader: boolean }> {
   const cached = await readCachedJson(key);
   if (cached.status === 'hit') {
@@ -933,18 +1058,39 @@ export async function cachedFetchJsonWithMeta<T extends object>(
     if (hasLocalNegativeCooldown(key)) return { data: null, source: 'cache', leader: false };
   }
   if (hasLocalUnavailableBackoff(key)) {
-    throw new Error(`cachedFetchJsonWithMeta unavailable backoff active for "${key}"`);
+    throw new Error(`${callerName} unavailable backoff active for "${key}"`);
   }
 
   const inflightKey = opts?.inflightKey ?? key;
-  const existing = inflight.get(inflightKey);
-  if (existing) {
-    const data = (await existing) as T | null;
-    return { data, source: 'fresh', leader: false };
-  }
+  const shouldFetch = opts?.shouldFetch;
+  let admissionChecked = shouldFetch == null;
+  while (true) {
+    const existing = inflight.get(inflightKey);
+    if (existing) {
+      try {
+        const data = (await existing) as T | null;
+        return { data, source: 'fresh', leader: false };
+      } catch (error) {
+        if (!opts?.isCallerLocalError?.(error)) throw error;
+        // The leader's promise removes itself from `inflight` before its
+        // rejection reaches followers. Loop so one follower becomes the next
+        // leader and the rest coalesce behind that request's own admission. If
+        // several caller-local leaders fail in sequence, each waiter keeps its
+        // own outcome instead of inheriting the last failed principal's error.
+        continue;
+      }
+    }
 
-  if (opts?.shouldFetch && !opts.shouldFetch()) {
-    return { data: null, source: 'skipped', leader: false };
+    if (!admissionChecked) {
+      admissionChecked = true;
+      if (!(await shouldFetch!())) return { data: null, source: 'skipped', leader: false };
+      // Async admission yields before a leader is registered. Recheck the
+      // per-key promise so simultaneous admitted callers still share one
+      // upstream request.
+      continue;
+    }
+
+    break;
   }
 
   const fetchT0 = Date.now();
@@ -952,7 +1098,7 @@ export async function cachedFetchJsonWithMeta<T extends object>(
   let cacheStatus: 'miss' | 'neg-sentinel' = 'miss';
 
   const timeoutMs = opts?.timeoutMs ?? fetcherTimeoutDefaultMs;
-  const promise = withFetcherTimeout(fetcher(), key, timeoutMs, 'cachedFetchJsonWithMeta')
+  const promise = withFetcherTimeout(fetcher, key, timeoutMs, callerName)
     .then(async (result) => {
       // Only count an upstream call as a 200 when it actually returned data.
       // A null result triggers the neg-sentinel branch below — these are
@@ -962,7 +1108,13 @@ export async function cachedFetchJsonWithMeta<T extends object>(
       // the structural detail.
       if (result != null) {
         const noStoreReason = getRpcNoStoreReasonFromPayload(result, { includeAvailableFalse: false });
-        if (noStoreReason) {
+        const cachePartialUpstreamResult = noStoreReason === 'upstream-unavailable'
+          && opts?.cacheUpstreamUnavailablePayloads === true
+          && getRpcNoStoreReasonFromPayload(
+            { ...result, upstreamUnavailable: false },
+            { includeAvailableFalse: false },
+          ) === null;
+        if (noStoreReason && !cachePartialUpstreamResult) {
           upstreamStatus = 0;
           if (opts?.cacheFailures !== false) {
             cacheStatus = 'neg-sentinel';
@@ -971,12 +1123,16 @@ export async function cachedFetchJsonWithMeta<T extends object>(
           }
         } else {
           upstreamStatus = 200;
-          const wrote = await setCachedJson(key, result, ttlSeconds);
+          const wrote = opts?.cachePositiveResult === false
+            ? true
+            : await setCachedJson(key, result, ttlSeconds);
           // See cachedFetchJson(): this short in-process bridge is only for
           // remote Redis outages, not local sidecar cache writes.
-          if (hadCacheReadError || (!wrote && hasRemoteRedisConfig())) {
+          if (opts?.cachePositiveResult !== false
+            && (hadCacheReadError || (!wrote && hasRemoteRedisConfig()))) {
             armLocalPositiveFallback(key, result, ttlSeconds);
           }
+          if (opts?.cachePositiveResult === false) await opts.onPositiveResult?.(result);
         }
       } else {
         upstreamStatus = 0;
@@ -990,14 +1146,17 @@ export async function cachedFetchJsonWithMeta<T extends object>(
     })
     .catch(async (err: unknown) => {
       upstreamStatus = 0;
-      if (opts?.cacheFailures === false) {
+      if (opts?.isCallerLocalError?.(err)) {
+        // Caller-local admission failures must not mutate provider-independent
+        // cache or backoff state shared by other principals.
+      } else if (opts?.cacheFailures === false) {
         // Provider-local failures must not mutate a provider-independent key.
       } else if (opts?.cacheFetcherErrors !== false) {
         cacheStatus = 'neg-sentinel';
         const errorTtlSeconds = effectiveFetchErrorNegativeTtlSeconds(negativeTtlSeconds);
         armLocalNegativeCooldown(key, errorTtlSeconds);
         await setCachedJson(key, NEG_SENTINEL, errorTtlSeconds);
-        console.warn(`[redis] cachedFetchJsonWithMeta fetcher failed for "${key}":`, errMsg(err));
+        console.warn(`[redis] ${callerName} fetcher failed for "${key}":`, errMsg(err));
       } else {
         armLocalUnavailableBackoff(key, FETCH_ERROR_UNAVAILABLE_BACKOFF_SECONDS);
       }
@@ -1047,61 +1206,76 @@ function emitUpstreamFromHook(usage: UsageHook | undefined, status: number, dura
   }
 }
 
-export async function geoSearchByBox(key: string, lon: number, lat: number, widthKm: number, heightKm: number, count: number, raw = false): Promise<string[]> {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return [];
+export async function geoSearchByBox(...args: Parameters<typeof geoSearchByBoxStrict>): Promise<string[]> {
   try {
-    const finalKey = raw ? key : prefixKey(key);
-    const pipeline = [['GEOSEARCH', finalKey, 'FROMLONLAT', String(lon), String(lat), 'BYBOX', String(widthKm), String(heightKm), 'km', 'ASC', 'COUNT', String(count)]];
-    const resp = await fetch(`${url}/pipeline`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(pipeline),
-      signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
-    });
-    if (!resp.ok) return [];
-    const data = (await resp.json()) as Array<{ result?: string[] }>;
-    return data[0]?.result ?? [];
-  } catch (err) {
-    console.warn('[redis] geoSearchByBox failed:', errMsg(err));
+    return await geoSearchByBoxStrict(...args);
+  } catch (error) {
+    logCacheReadError(args[0], error);
     return [];
   }
 }
 
-export async function getHashFieldsBatch(key: string, fields: string[], raw = false): Promise<Map<string, string>> {
+export async function getHashFieldsBatch(...args: Parameters<typeof getHashFieldsBatchStrict>): Promise<Map<string, string>> {
+  try {
+    return await getHashFieldsBatchStrict(...args);
+  } catch (error) {
+    logCacheReadError(args[0], error);
+    return new Map();
+  }
+}
+
+export async function geoSearchByBoxStrict(key: string, lon: number, lat: number, widthKm: number, heightKm: number, count: number, raw = false): Promise<string[]> {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) throw new Error('Redis unavailable');
+  const finalKey = raw ? key : prefixKey(key);
+  const pipeline = [['GEOSEARCH', finalKey, 'FROMLONLAT', String(lon), String(lat), 'BYBOX', String(widthKm), String(heightKm), 'km', 'ASC', 'COUNT', String(count)]];
+  const resp = await fetch(`${url}/pipeline`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'worldmonitor-server/1.0 (redis)',
+    },
+    body: JSON.stringify(pipeline),
+    signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`Redis HTTP ${resp.status}`);
+  const data = (await resp.json()) as Array<{ result?: string[]; error?: string }>;
+  if (data[0]?.error || !Array.isArray(data[0]?.result) || !data[0].result.every(value => typeof value === 'string')) throw new Error('Invalid GEOSEARCH result');
+  return data[0].result;
+}
+
+export async function getHashFieldsBatchStrict(
+  key: string,
+  fields: string[],
+  raw = false,
+  timeoutMs?: number,
+): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   if (fields.length === 0) return result;
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return result;
-  try {
-    const finalKey = raw ? key : prefixKey(key);
-    const pipeline = [['HMGET', finalKey, ...fields]];
-    const resp = await fetch(`${url}/pipeline`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(pipeline),
-      signal: AbortSignal.timeout(REDIS_PIPELINE_TIMEOUT_MS),
-    });
-    if (!resp.ok) return result;
-    const data = (await resp.json()) as Array<{ result?: (string | null)[] }>;
-    const values = data[0]?.result;
-    if (values) {
-      for (let i = 0; i < fields.length; i++) {
-        // Use a null/undefined check rather than a truthy test: "" is a
-        // legitimate Redis hash value and must be preserved (see #3530).
-        if (values[i] != null) result.set(fields[i]!, values[i]!);
-      }
-    }
-  } catch (err) {
-    console.warn('[redis] getHashFieldsBatch failed:', errMsg(err));
+  if (!url || !token) throw new Error('Redis unavailable');
+  const finalKey = raw ? key : prefixKey(key);
+  const pipeline = [['HMGET', finalKey, ...fields]];
+  const resp = await fetch(`${url}/pipeline`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'worldmonitor-server/1.0 (redis)',
+    },
+    body: JSON.stringify(pipeline),
+    signal: AbortSignal.timeout(resolvePipelineTimeoutMs(timeoutMs)),
+  });
+  if (!resp.ok) throw new Error(`Redis HTTP ${resp.status}`);
+  const data = (await resp.json()) as Array<{ result?: (string | null)[]; error?: string }>;
+  const values = data[0]?.result;
+  if (data[0]?.error || !Array.isArray(values) || values.length !== fields.length || !values.every(value => value === null || typeof value === 'string')) throw new Error('Invalid HMGET result');
+  for (let i = 0; i < fields.length; i++) {
+    // Empty strings are legitimate Redis hash values (see #3530).
+    if (values[i] != null) result.set(fields[i]!, values[i]!);
   }
   return result;
 }

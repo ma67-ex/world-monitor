@@ -11,6 +11,7 @@ export interface ListMarketQuotesResponse {
   skipReason: string;
   rateLimited: boolean;
   unavailableSymbols: MarketQuoteUnavailable[];
+  asOf: string;
 }
 
 export interface MarketQuote {
@@ -66,6 +67,108 @@ export interface CommodityQuote {
   price: number;
   change: number;
   sparkline: number[];
+  priceSource?: string;
+  priceBasis?: string;
+  priceAt?: number;
+  sparklineIntervalSeconds?: number;
+  sparklineStartAt?: number;
+}
+
+export interface GetPhysicalPremiumsRequest {
+  metals: string[];
+}
+
+export interface GetPhysicalPremiumsResponse {
+  premiums: PhysicalPremium[];
+  fx?: FxSnapshot;
+}
+
+export interface PhysicalPremium {
+  metal: string;
+  physical?: BenchmarkLeg;
+  paper?: BenchmarkLeg;
+  premiumUsdPerOz: number;
+  premiumPct: number;
+  computedAt: string;
+}
+
+export interface BenchmarkLeg {
+  price: number;
+  currency: string;
+  unit: string;
+  source: string;
+  asOf: string;
+}
+
+export interface FxSnapshot {
+  pair: string;
+  rate: number;
+  source: string;
+  asOf: string;
+}
+
+export interface GetPhysicalDivergenceIndexRequest {
+  metals: string[];
+}
+
+export interface GetPhysicalDivergenceIndexResponse {
+  readings: PhysicalDivergenceReading[];
+  composite?: PhysicalStressComposite;
+  evaluatedAt: number;
+  methodologyVersion: string;
+}
+
+export interface PhysicalDivergenceReading {
+  metal: string;
+  state: PhysicalDivergenceState;
+  reason: string;
+  regime: PhysicalPremiumRegime;
+  index?: number;
+  premiumPct?: number;
+  premiumUsdPerOz?: number;
+  percentile?: number;
+  robustZ?: number;
+  delta5d?: number;
+  delta20d?: number;
+  trend5d: PhysicalPremiumTrend;
+  trend20d: PhysicalPremiumTrend;
+  historyPoints: number;
+  historyWindowStart: string;
+  historyWindowEnd: string;
+  physicalAsOf: string;
+  paperAsOf: number;
+  historyKey: string;
+  methodologyVersion: string;
+  provenance?: PhysicalDivergenceProvenance;
+}
+
+export interface PhysicalDivergenceProvenance {
+  physicalSource: string;
+  physicalSymbol: string;
+  physicalAsOf: string;
+  paperSource: string;
+  paperSymbol: string;
+  paperAsOf: number;
+  fxSource: string;
+  fxPair: string;
+  fxAsOf: number;
+  historyKey: string;
+  historyWindowPoints: number;
+  methodologyVersion: string;
+}
+
+export interface PhysicalStressComposite {
+  state: PhysicalDivergenceState;
+  reason: string;
+  index?: number;
+  weights: PhysicalStressWeight[];
+  methodologyVersion: string;
+}
+
+export interface PhysicalStressWeight {
+  metal: string;
+  weight: number;
+  methodologyVersion: string;
 }
 
 export interface GetSectorSummaryRequest {
@@ -165,6 +268,25 @@ export interface GetCountryStockIndexResponse {
   weekChangePercent: number;
   currency: string;
   fetchedAt: string;
+}
+
+export interface GetPriceHistoryRequest {
+  symbols: string;
+  range: string;
+}
+
+export interface GetPriceHistoryResponse {
+  range: string;
+  series: PriceSeries[];
+  unavailable: string[];
+}
+
+export interface PriceSeries {
+  symbol: string;
+  name: string;
+  currency: string;
+  timestamps: number[];
+  closes: number[];
 }
 
 export interface ListGulfQuotesRequest {
@@ -484,6 +606,7 @@ export interface ListEarningsCalendarResponse {
   toDate: string;
   total: number;
   unavailable: boolean;
+  asOf: string;
 }
 
 export interface EarningsEntry {
@@ -587,6 +710,8 @@ export interface GetGoldIntelligenceResponse {
   drivers: GoldDriver[];
   etfFlows?: GoldEtfFlows;
   cbReserves?: GoldCbReserves;
+  goldSparklineIntervalSeconds?: number;
+  goldSparklineStartAt?: number;
 }
 
 export interface GoldCrossCurrencyPrice {
@@ -658,6 +783,8 @@ export interface GoldCbReserves {
   topHolders: GoldCbHolder[];
   topBuyers12m: GoldCbMover[];
   topSellers12m: GoldCbMover[];
+  indicator: string;
+  valueIsOunces?: boolean;
 }
 
 export interface GoldCbHolder {
@@ -714,6 +841,12 @@ export type HeadlineAlignmentRule = "HEADLINE_ALIGNMENT_RULE_UNSPECIFIED" | "HEA
 
 export type MarketQuoteUnavailableReason = "MARKET_QUOTE_UNAVAILABLE_REASON_UNSPECIFIED" | "MARKET_QUOTE_UNAVAILABLE_REASON_NOT_FOUND" | "MARKET_QUOTE_UNAVAILABLE_REASON_PROVIDER_ERROR" | "MARKET_QUOTE_UNAVAILABLE_REASON_PROVIDER_RATE_LIMITED" | "MARKET_QUOTE_UNAVAILABLE_REASON_PROVIDER_NOT_CONFIGURED" | "MARKET_QUOTE_UNAVAILABLE_REASON_REQUEST_LIMIT_EXCEEDED" | "MARKET_QUOTE_UNAVAILABLE_REASON_UPSTREAM_BUDGET_EXHAUSTED" | "MARKET_QUOTE_UNAVAILABLE_REASON_SEED_UNAVAILABLE";
 
+export type PhysicalDivergenceState = "PHYSICAL_DIVERGENCE_STATE_UNSPECIFIED" | "PHYSICAL_DIVERGENCE_STATE_OK" | "PHYSICAL_DIVERGENCE_STATE_INSUFFICIENT_HISTORY" | "PHYSICAL_DIVERGENCE_STATE_STALE_INPUT" | "PHYSICAL_DIVERGENCE_STATE_MISSING_INPUT";
+
+export type PhysicalPremiumRegime = "PHYSICAL_PREMIUM_REGIME_UNSPECIFIED" | "PHYSICAL_PREMIUM_REGIME_NORMAL" | "PHYSICAL_PREMIUM_REGIME_ELEVATED" | "PHYSICAL_PREMIUM_REGIME_STRESSED" | "PHYSICAL_PREMIUM_REGIME_EXTREME";
+
+export type PhysicalPremiumTrend = "PHYSICAL_PREMIUM_TREND_UNSPECIFIED" | "PHYSICAL_PREMIUM_TREND_WIDENING" | "PHYSICAL_PREMIUM_TREND_STABLE" | "PHYSICAL_PREMIUM_TREND_NARROWING";
+
 export interface FieldViolation {
   field: string;
   description: string;
@@ -762,10 +895,13 @@ export interface MarketServiceHandler {
   listMarketQuotes(ctx: ServerContext, req: ListMarketQuotesRequest): Promise<ListMarketQuotesResponse>;
   listCryptoQuotes(ctx: ServerContext, req: ListCryptoQuotesRequest): Promise<ListCryptoQuotesResponse>;
   listCommodityQuotes(ctx: ServerContext, req: ListCommodityQuotesRequest): Promise<ListCommodityQuotesResponse>;
+  getPhysicalPremiums(ctx: ServerContext, req: GetPhysicalPremiumsRequest): Promise<GetPhysicalPremiumsResponse>;
+  getPhysicalDivergenceIndex(ctx: ServerContext, req: GetPhysicalDivergenceIndexRequest): Promise<GetPhysicalDivergenceIndexResponse>;
   getSectorSummary(ctx: ServerContext, req: GetSectorSummaryRequest): Promise<GetSectorSummaryResponse>;
   listStablecoinMarkets(ctx: ServerContext, req: ListStablecoinMarketsRequest): Promise<ListStablecoinMarketsResponse>;
   listEtfFlows(ctx: ServerContext, req: ListEtfFlowsRequest): Promise<ListEtfFlowsResponse>;
   getCountryStockIndex(ctx: ServerContext, req: GetCountryStockIndexRequest): Promise<GetCountryStockIndexResponse>;
+  getPriceHistory(ctx: ServerContext, req: GetPriceHistoryRequest): Promise<GetPriceHistoryResponse>;
   listGulfQuotes(ctx: ServerContext, req: ListGulfQuotesRequest): Promise<ListGulfQuotesResponse>;
   analyzeStock(ctx: ServerContext, req: AnalyzeStockRequest): Promise<AnalyzeStockResponse>;
   getStockAnalysisHistory(ctx: ServerContext, req: GetStockAnalysisHistoryRequest): Promise<GetStockAnalysisHistoryResponse>;
@@ -828,7 +964,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -875,7 +1011,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -922,7 +1058,101 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/market/v1/get-physical-premiums",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetPhysicalPremiumsRequest = {
+            metals: params.getAll("metals"),
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("getPhysicalPremiums", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.getPhysicalPremiums(ctx, body);
+          return new Response(JSON.stringify(result as GetPhysicalPremiumsResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = "Internal server error";
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/market/v1/get-physical-divergence-index",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetPhysicalDivergenceIndexRequest = {
+            metals: params.getAll("metals"),
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("getPhysicalDivergenceIndex", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.getPhysicalDivergenceIndex(ctx, body);
+          return new Response(JSON.stringify(result as GetPhysicalDivergenceIndexResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -969,7 +1199,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1016,7 +1246,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1053,7 +1283,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1100,7 +1330,55 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
+          return new Response(JSON.stringify({ message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/market/v1/get-price-history",
+      handler: async (req: Request): Promise<Response> => {
+        try {
+          const pathParams: Record<string, string> = {};
+          const url = new URL(req.url, "http://localhost");
+          const params = url.searchParams;
+          const body: GetPriceHistoryRequest = {
+            symbols: params.get("symbols") ?? "",
+            range: params.get("range") ?? "",
+          };
+          if (options?.validateRequest) {
+            const bodyViolations = options.validateRequest("getPriceHistory", body);
+            if (bodyViolations) {
+              throw new ValidationError(bodyViolations);
+            }
+          }
+
+          const ctx: ServerContext = {
+            request: req,
+            pathParams,
+            headers: Object.fromEntries(req.headers.entries()),
+          };
+
+          const result = await handler.getPriceHistory(ctx, body);
+          return new Response(JSON.stringify(result as GetPriceHistoryResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (err: unknown) {
+          if (err instanceof ValidationError) {
+            return new Response(JSON.stringify({ violations: err.violations }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (options?.onError) {
+            return options.onError(err, req);
+          }
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1137,7 +1415,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1186,7 +1464,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1235,7 +1513,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1284,7 +1562,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1332,7 +1610,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1369,7 +1647,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1406,7 +1684,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1443,7 +1721,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1480,7 +1758,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1517,7 +1795,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1565,7 +1843,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1602,7 +1880,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1649,7 +1927,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1686,7 +1964,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1723,7 +2001,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },
@@ -1760,7 +2038,7 @@ export function createMarketServiceRoutes(
           if (options?.onError) {
             return options.onError(err, req);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = "Internal server error";
           return new Response(JSON.stringify({ message }), {
             status: 500,
             headers: { "Content-Type": "application/json" },

@@ -3,6 +3,7 @@ import { jsonResponse } from './_json-response.js';
 import { captureSilentError } from './_sentry-edge.js';
 // @ts-expect-error — JS module, no declaration file
 import { redisPipeline } from './_upstash-json.js';
+import { checkRateLimit } from './_rate-limit.js';
 
 export const config = { runtime: 'edge' };
 
@@ -29,7 +30,9 @@ function resolveMode(value) {
 
 async function readModeFromRedis() {
   try {
-    const entries = await redisPipeline([['GET', CORRELATION_RUNTIME_MODE_KEY]], 3_000);
+    // Seeder-owned key (#7674): scripts/seed-correlation.mjs publishes it
+    // bare — read raw in every environment so preview sees the fleet row.
+    const entries = await redisPipeline([['GET', CORRELATION_RUNTIME_MODE_KEY]], 3_000, true);
     const entry = entries?.[0];
     // An Upstash-reported error is a broken control plane, not an unset key —
     // report it so it stays distinguishable from the (silent, expected) no-key
@@ -39,6 +42,7 @@ async function readModeFromRedis() {
       console.warn('[correlation-runtime-mode] Upstash error entry; using legacy:', entry.error);
       captureSilentError(new Error(String(entry.error)), {
         tags: { route: 'api/correlation-runtime-mode', step: 'redis-error-entry' },
+        fingerprint: ['api/correlation-runtime-mode', 'redis-error-entry', 'Error'],
       });
       return 'legacy';
     }
@@ -57,6 +61,7 @@ async function readModeFromRedis() {
     console.warn('[correlation-runtime-mode] Redis read failed; using legacy:', error);
     captureSilentError(error, {
       tags: { route: 'api/correlation-runtime-mode', step: 'redis-read' },
+      fingerprint: ['api/correlation-runtime-mode', 'redis-read', error instanceof Error ? error.name : 'Error'],
     });
     return 'legacy';
   }
@@ -81,9 +86,15 @@ export default async function handler(req) {
     return jsonResponse(
       { error: 'Method not allowed' },
       405,
-      { ...NO_STORE_HEADERS, ...cors },
+      { ...NO_STORE_HEADERS, ...cors, Allow: 'GET, OPTIONS' },
     );
   }
+
+  // Every dashboard load reads this, so the per-IP budget is wide; a 429 makes the client fall back to legacy.
+  const limited = await checkRateLimit(req, { ...NO_STORE_HEADERS, ...cors }, {
+    scope: 'correlation-runtime-mode', limit: 300, window: '60 s',
+  });
+  if (limited) return limited;
 
   return jsonResponse(
     { mode: await readModeFromRedis() },

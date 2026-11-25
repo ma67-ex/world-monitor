@@ -28,10 +28,61 @@ health signal: a healthy deployment can still return HTTP 500 from `POST
   `12/12` accepted writes and zero `P2002` failures. Attach the exact deployed
   image/digest and the bounded production log query to the issue.
 - During normal queue draining, browser writes are serialized through one
-  in-flight transport slot. `pagehide` deliberately dispatches queued writes
-  concurrently so keepalive delivery gets a chance to finish. The client does
-  not blindly retry append-only conversion events after an ambiguous 5xx;
-  identity snapshots may use their idempotent retry policy.
+  in-flight transport slot. `pagehide` with `persisted === false` (a real
+  navigation) dispatches queued writes concurrently so keepalive delivery gets
+  a chance to finish. `pagehide` with `persisted === true` is bfcache freeze,
+  not unload: keep the hold. A tab that is only hidden (`visibilitychange` →
+  `hidden`, including iOS/Safari backgrounding) does **not** flush: WebKit
+  freezes in-flight `fetch`, and treating that as unload produced the
+  WORLDMONITOR-ZF `timeout+raced` population (~27/day, 71% Apple). Hidden tabs
+  hold the serialized queue and pause the module-owned latch until the page is
+  visible again (`visibilitychange` or `pageshow`). The client does not blindly
+  retry append-only conversion events after an ambiguous 5xx; identity snapshots
+  may use their idempotent retry policy.
+
+### Diagnose a monitor transport failure
+
+The scheduled monitor reports each failed write with its burst number, UTC
+start time, and elapsed milliseconds. Transport failures include bounded error
+codes from nested causes and aggregate connection errors, such as `ECONNRESET`,
+`EAI_AGAIN`, and `UND_ERR_CONNECT_TIMEOUT`. Arbitrary error messages, stacks,
+socket addresses, and request payloads are excluded.
+
+`phase=request` means fetch failed before response headers were available.
+`phase=body` means headers arrived but the response body could not be read.
+The latter includes the HTTP status. Neither proves that the collector did not
+commit the write.
+
+Compare the failed attempt times with Railway HTTP and runtime logs for the
+`umami` service. Check the adjacent scheduled runs before classifying an alert
+as isolated. A later clean run proves recovery for that sample; it does not
+identify the cause of an earlier connection failure. Any failed write still
+fails the monitor, including failures followed by successful bursts.
+
+Every probe sends `Connection: close`. Before #10079, writes in bursts 2 and 3
+reused idle keep-alive sockets. The edge occasionally reset one, and the
+monitor reported an `ECONNRESET` within about 100 ms even though the collector
+was healthy. See
+[the keep-alive reset write-up](solutions/integration-issues/analytics-monitor-econnreset-was-keep-alive-socket-reuse.md).
+
+### Raced-timeout retry / replay (#6968)
+
+A `raced` failure means the transport ignored our abort and the request may
+still commit. That is the same "committed, then we stopped listening" ambiguity
+that already forbids retrying a 500 or a gateway status:
+
+| Door | Append-only event (conversion) | Identity snapshot |
+|---|---|---|
+| In-page retry (`isRetryableCollectorFailure` / `isRetryableIdentityFailure`) | closed | open (idempotent overwrite) |
+| Durable checkout-marker replay (`isDurableMarkerResolved`) | closed (marker settles) | n/a |
+
+`sendBeacon` is not a recovery path for conversions: it has no receipt, so a
+successful beacon cannot clear a durable marker and a failed one cannot prove
+the write never landed. Hidden-tab **hold** is the recovery: those writes never
+become `raced`. Remaining `raced` events are parked wrappers on a visible tab
+and stay unreplayable. Each Sentry payload carries `visibilityAtSend`,
+`elapsedAtDeadlineMs`, `racedCount`, and `writeCount` so ZF is judged as a rate
+against that page's writes, not as a raw daily count.
 
 ## Patched runtime image
 
@@ -180,6 +231,179 @@ composite index is compatible with the old image, but the old update/create
 path can still race; starting the old image is emergency containment, not
 remediation. Restoring deleted duplicate rows or recovering from uncertain
 schema state requires the recorded database backup.
+
+## Postgres tuning
+
+`Postgres Umami` runs Railway's `postgres-ssl:16` template in a container
+with 8 CPUs and 12 GB of memory. The template ships stock Postgres defaults,
+and the repository does not build this service. Its tuning lives only in
+`postgresql.auto.conf` on the data volume. That file survives redeploys and is
+written with `ALTER SYSTEM`.
+
+### Why it is tuned
+
+On 2026-11-05 the collector returned HTTP 500 after exactly 10 s on 0.04% of
+`/api/send` requests (1,978 of 4.87M in 7 days). The failures came in bursts
+of 10–60 s, several times a day. The collector log reads `timeout exceeded when
+trying to connect`: all 20 pool connections were busy, and new requests gave up
+at `DATABASE_CONNECT_TIMEOUT_MS`. The monitor's "4/12 HTTP 500 at ~10.2 s"
+failures and the multi-hour storms on 2026-10-05 and 2026-10-20 were this
+class. `/api/heartbeat` stayed at 2–5 ms during the bursts, so the application
+was healthy and only database work was stalled.
+
+`pg_stat_statements` (reset 2026-10-20) showed that single-row inserts, which
+average about 1 ms, sometimes took 73–89 s: `website_event` 77.7 s, `session`
+73.5 s, `session_data` 88.7 s. Under the defaults:
+
+- `shared_buffers` was 128 MB for a 33 GB database. `website_event` alone has
+  19 GB of indexes, and each insert updates at least 15 of them.
+- The cache hit rate was 79.8%. Client backends had read 139M blocks, evicted
+  139M, and written 14.4M dirty buffers themselves.
+- The container sat at its memory limit (11.25 GB average, 12 GB peak), mostly
+  page cache.
+- Report queries spilled to disk with `work_mem` at 4 MB: 29 GB of temp files,
+  and up to 273 s for one channel report.
+- Parallel queries failed with `could not resize shared memory segment ... No
+  space left on device`, because the container's `/dev/shm` is small.
+
+### Applied settings
+
+| Setting | Default | Tuned | Needs restart |
+|---|---|---|---|
+| `shared_buffers` | 128MB | 3GB | yes |
+| `dynamic_shared_memory_type` | posix | mmap | yes |
+| `effective_cache_size` | 4GB | 8GB | no |
+| `work_mem` | 4MB | 32MB | no |
+| `maintenance_work_mem` | 64MB | 512MB | no |
+| `effective_io_concurrency` | 1 | 200 | no |
+| `random_page_cost` | 4 | 1.1 | no |
+| `max_wal_size` | 1GB | 4GB | no |
+| `checkpoint_timeout` | 5min | 15min | no |
+| `wal_compression` | off | on | no |
+| `track_io_timing` | off | on | no |
+| `log_min_duration_statement` | -1 | 2000 | no |
+| `log_parameter_max_length` | -1 | 0 | no |
+| `log_lock_waits` | off | on | no |
+| `log_autovacuum_min_duration` | 10min | 10s | no |
+| `track_wal_io_timing` | off | on | no |
+| `synchronous_commit` | on | off | no |
+
+`max_connections` stays at 500. It was already set in `postgresql.auto.conf`.
+
+`log_parameter_max_length = 0` must stay set while slow-statement logging is
+on. Umami binds user identifiers and subscription details as parameters of its
+`session_data` inserts. At the default of -1, every slow statement would copy
+those values into the Railway log.
+
+**Memory budget for `work_mem`.** The limit applies to each sort or hash node in
+each process, and hash nodes may use `hash_mem_multiplier` (2.0) times that. The
+collector's 20 pool connections run single-row inserts with no sort or hash
+nodes. The large consumers are report queries: a leader plus 2 parallel workers
+with about 4 sort or hash nodes uses at most 3 × 4 × 64 MB ≈ 768 MB. Two
+concurrent reports stay under 1.6 GB, inside the 12 GB container alongside 3 GB
+of `shared_buffers`. Revisit the budget before raising `work_mem`,
+`max_parallel_workers_per_gather`, or the number of concurrent report
+consumers.
+
+The settings that need no restart were applied with `ALTER SYSTEM` and
+`pg_reload_conf()` on 2026-11-05. Check every tuned setting, and anything still
+waiting for a restart:
+
+```sql
+SELECT name, setting, unit, pending_restart FROM pg_settings
+WHERE name IN ('shared_buffers', 'dynamic_shared_memory_type',
+  'effective_cache_size', 'work_mem', 'maintenance_work_mem',
+  'effective_io_concurrency', 'random_page_cost', 'max_wal_size',
+  'checkpoint_timeout', 'wal_compression', 'track_io_timing',
+  'log_min_duration_statement', 'log_parameter_max_length', 'log_lock_waits',
+  'log_autovacuum_min_duration', 'track_wal_io_timing', 'synchronous_commit',
+  'max_connections')
+ORDER BY name;
+SELECT name, setting, applied, error FROM pg_file_settings
+WHERE sourcefile LIKE '%auto.conf' ORDER BY name;
+```
+
+Until Postgres restarts, `pg_file_settings` shows the restart-only entries with
+`applied = false` and the error `setting could not be applied`, and
+`pg_settings.pending_restart` is `true` for them. Every other entry should show
+`applied = true` and the tuned value in `pg_settings`. Restart `Postgres Umami`
+between the retention cron's ticks at :07, :22, :37 and :52. The collector
+returns 500 for the few seconds the database is down.
+
+To revert a setting, run `ALTER SYSTEM RESET <name>`. Then run
+`pg_reload_conf()` for a setting marked "no" under "Needs restart". A setting
+marked "yes" (`shared_buffers`, `dynamic_shared_memory_type`) keeps its current
+value until Postgres restarts.
+
+### Judging the result
+
+Do not run `pg_stat_reset()`. It clears the per-table counters that schedule
+autovacuum and autoanalyze, which delays cleanup on these large, busy tables.
+Instead, record a before snapshot of the cumulative counters right after the
+restart (`blks_hit` and `blks_read` from `pg_stat_database`, and
+`pg_stat_bgwriter`), and compare against an after snapshot. Only
+`pg_stat_statements` may be reset (`SELECT pg_stat_statements_reset()`), so
+that its maximums describe the tuned server alone. Compare over a week:
+
+- the collector's `/api/send` 5xx count in Railway HTTP metrics (the baseline
+  was 1,978 in 7 days)
+- the maximum insert `max_exec_time` in `pg_stat_statements` (baseline 73–89 s)
+- the cache hit rate between the two snapshots (baseline 79.8%)
+- the Postgres log, which now records every statement over 2 s, without its
+  parameter values, and every lock wait longer than `deadlock_timeout` (1 s).
+  The next stall will name its statement.
+
+### WAL fsync freezes and `synchronous_commit`
+
+The tuning above raised the cache hit rate to 96% but did not stop the
+bursts. The `umami-stall-sampler` service (a `postgres:16-alpine` loop that
+logs `pg_stat_activity` whenever an insert runs longer than 3 s) captured
+them from 2026-11-07. In every burst, one backend sits in `IO/WALSync` for
+45–75 s and every other insert queues behind it on `LWLock/WALWrite`. The
+freeze recurs every day between 10:16 and 10:24 UTC (2026-11-06 through
+2026-11-15, except 11-11), with irregular extra freezes such as 2026-11-13
+14:13 and 2026-11-14 02:50.
+
+The database is idle when it happens. Checkpoints in that window write about
+4% of `shared_buffers` with `sync` under 0.05 s, no non-insert statement over
+2 s overlaps the freeze, and nothing in this project is scheduled at 10:1x
+UTC. The volume has no backup schedule (its last backup is from 2026-09-13),
+so a volume snapshot is not the trigger either. The stall is below Postgres,
+in Railway's volume storage. The cause there is unknown.
+
+Each blocked insert was waiting to fsync its own commit record. On
+2026-11-15 10:27 UTC `synchronous_commit` was set to `off` with `ALTER SYSTEM`
+and `pg_reload_conf()`. A commit now returns once its record is in the WAL
+buffers, and the WAL writer flushes them every 200 ms in the background. The
+collector writes about 75 KB of WAL per second (checkpoint `distance` of
+about 70 MB per 15 min), so a 75 s freeze fills about 6 MB of the 20 MB
+`wal_buffers`. Over the 2 minutes after the reload, WAL syncs fell from about
+1 per WAL write to 3.6/s against 9.6 writes/s, which shows the collector's
+pooled sessions picked up the setting without a restart.
+
+The cost: if Postgres crashes, acknowledged events that were not yet flushed
+are lost. The database stays consistent. While the WAL writer makes progress
+that is at most the last 600 ms (3 × `wal_writer_delay`). During a storage
+freeze nothing is flushed, so a crash inside a 75 s freeze can lose up to
+75 s of acknowledged events. Before the change, each freeze already lost
+writes. Requests that timed out waiting for a pool connection never reached
+the database, and the browser client does not retry an append-only event
+after a 5xx, because a 500 can also follow a write that committed (see the
+write-path contract).
+
+Judge it on the next 10:16–10:24 UTC window: the sampler should log no
+`WALSync` stall on a client backend, and Railway HTTP metrics should show no
+`/api/send` 5xx burst. A freeze that outlasts the WAL buffers, or a dirty page
+eviction that needs a WAL flush, can still block an insert, so a shorter or
+smaller burst is a partial result. Delete `umami-stall-sampler` once the
+result is recorded. To revert, run `ALTER SYSTEM RESET synchronous_commit`
+and `pg_reload_conf()`.
+
+The `website_event` indexes are a further lever. Eight of them, totaling
+12.7 GB, had zero scans between 2026-10-20 and 2026-11-05, including
+`website_event_website_id_created_at_url_query_idx` at 4.1 GB. They come from
+upstream Umami migrations, so dropping them is a schema decision to make with
+the next image change, not a tuning step.
 
 ## Retention contract
 
@@ -380,16 +604,38 @@ fail quietly:
 To read what the last tick actually did:
 
 ```
-railway deployment list --project "$RAILWAY_PROJECT_ID" --environment production \
-  --service umami-retention --limit 200 --json
+RAILWAY_PROJECT_ID=<project id> node scripts/read-umami-retention-deployments.mjs \
+  --output /tmp/retention-deployments.json
 ```
 
 Every push to `main` writes a `SKIPPED` refusal ("No changes to watched files")
-for this service, and those arrive far faster than 4 ticks/hour — so the newest
-record is almost never the tick. Take the newest record whose status is a
-*running* one, then read that deployment's logs. A healthy tick logs `BEGIN`,
+for this service, ~30 a day, so a plain `railway deployment list` is mostly
+refusals and its 1000-record maximum covers only about a month. The script
+above asks Railway's GraphQL API for the history with `SKIPPED` excluded on the
+server. Take the newest record whose status is a *running* one, then read that
+deployment's logs. A healthy tick logs `BEGIN`,
 `DELETE <n>`, `COMMIT` per statement; a locked-out tick logs the skip message
 and exits 0.
+
+### `HISTORY_WINDOW_SATURATED` — the runner is invisible, not dead
+
+If the alarm reports this verdict, **check the tick logs before touching
+Postgres.** It means none of the newest 100 non-refusal records reached a
+running state, so the deciding deployment is older than the window.
+
+The check used to read the plain history. A 200-record window missed a healthy
+runner on 2026-08-22, and the CLI's 1000-record maximum filled with refusals on
+2026-11-22 above a 24-day-old active deployment that was ticking every 15
+minutes. With refusals filtered out, only deploys and builds count toward the
+window, so saturation now takes a long run of failed or cancelled builds. Look
+for those, then confirm the active deployment is ticking:
+
+```
+railway logs --project "$RAILWAY_PROJECT_ID" --environment production \
+  --service umami-retention --since 1h
+```
+
+A redeploy also clears it by minting a fresh record at index 0.
 
 The runtime-image migration and the retention runner are separate gates. Do
 not start retention until the composite-index migration has succeeded and the
@@ -398,17 +644,55 @@ write canary is green.
 ## Capacity alert
 
 `.github/workflows/umami-storage-monitor.yml` reads the Railway volume list
-without mutating Railway or Postgres. It caches at most 30 days of samples and
+without mutating Railway or Postgres. It keeps the last 3 days of samples and
 reports the following capacity conditions:
 
 - current usage is at least 80% (warning) or 90% (critical); or
-- projected days to full are at most 30 (warning) or 14 (critical), once a
-  24-hour growth baseline exists.
+- projected days to full are at most 30 (warning) or 14 (critical), once the
+  samples span at least 2 days.
+
+Growth is a least-squares fit over those 3 days, not the difference from one
+old sample. Railway refreshes `currentSizeMB` only about every 6 hours, so the
+samples form a staircase. On 2026-09-13, one +1,078 MB refresh measured against
+a 24-hour baseline projected 8 days of headroom and failed the workflow, while
+the 3-day trend gave 17 days.
+
+The history is carried between runs as the `umami-storage-state` workflow
+artifact, not as an Actions cache entry. The repository cache sits at its 10 GB
+limit, and GitHub evicted every cached copy of the history on 2026-09-12, so the
+trend kept starting over. Each run restores the newest artifact from this
+workflow's recent runs on the same branch. When none exists, the run warns and
+starts a new trend.
 
 A warning emits a GitHub annotation but leaves the scheduled workflow green so
 the 15-minute probe does not send repeated failed-run alerts during a bounded
 retention drain. A critical condition fails the workflow. Input, Railway, or
-state-processing errors also fail closed.
+state-processing errors also fail closed, with one exception: Railway being
+unreachable.
+
+[`scripts/read-railway-volumes.mjs`](../scripts/read-railway-volumes.mjs) reads
+the volume list and retries transport failures: a timeout, a dropped or refused
+connection, or a 502–504. `railway volume list` is a project-wide query. On
+2026-09-28 it took 44–70 s against the CLI's ~90 s request timeout, and 7 of 35
+runs failed on a single timed-out request. The workflow no longer runs
+`railway status` first, because that call took 41–90 s and checked nothing the
+volume read does not. A bad token or an unknown project still fails at once. A
+timed-out attempt kills the CLI's whole process group, because the npm wrapper
+runs the real binary with inherited pipes.
+
+When every attempt fails, the run warns and judges the stored samples instead:
+
+- It fails when the newest sample is more than 6 hours old, which is one
+  Railway size refresh. With no stored sample at all, the state records when
+  reads started failing, and the same 6 hours count from then.
+- It fails when the newest sample measured critical, so a critical run is not
+  followed by a green one just because the next read timed out.
+- Otherwise it only warns.
+
+A Railway latency spike therefore produces an annotation, and an outage that
+leaves the monitor blind fails the workflow. The job timeout is 8 minutes, so
+the retention runner check still runs when both the volume attempts and the
+retention read run into the CLI timeout.
 
 ## Retention runner alarm
 

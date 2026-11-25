@@ -20,6 +20,7 @@ export class TechEventsPanel extends Panel {
   private events: TechEvent[] = [];
   private loading = true;
   private error: string | null = null;
+  private onMapNavigate: ((lat: number, lng: number) => void) | null = null;
 
   constructor(id: string, private getLatestNews?: () => NewsItem[]) {
     super({ id, title: t('panels.events'), showCount: true, infoTooltip: t('components.techEvents.infoTooltip') });
@@ -82,7 +83,6 @@ export class TechEventsPanel extends Panel {
       return;
     }
 
-    this.clearErrorState();
     const filteredEvents = this.getFilteredEvents();
     const upcomingConferences = this.events.filter(e => e.type === 'conference' && new Date(e.startDate) >= new Date());
     const mappableCount = upcomingConferences.filter(e => e.coords && !e.coords.virtual).length;
@@ -94,7 +94,7 @@ export class TechEventsPanel extends Panel {
       ['all', t('components.techEvents.all')],
     ];
 
-    replaceChildren(this.content,
+    this.setContentNodes(
       h('div', { className: 'tech-events-panel' },
         h('div', { className: 'panel-tabs' },
           ...tabEntries.map(([view, label]) =>
@@ -240,23 +240,15 @@ export class TechEventsPanel extends Panel {
     );
   }
 
+  public setMapNavigateHandler(handler: (lat: number, lng: number) => void): void {
+    this.onMapNavigate = handler;
+  }
+
   private panToLocation(lat: number, lng: number): void {
-    // Dispatch event for map to handle
-    window.dispatchEvent(new CustomEvent('tech-event-location', {
-      detail: { lat, lng, zoom: 10 }
-    }));
+    this.onMapNavigate?.(lat, lng);
   }
 
   public refresh(): void {
     void this.fetchEvents();
-  }
-
-  public getConferencesForMap(): TechEvent[] {
-    return this.events.filter(e =>
-      e.type === 'conference' &&
-      e.coords &&
-      !e.coords.virtual &&
-      new Date(e.startDate) >= new Date()
-    );
   }
 }
