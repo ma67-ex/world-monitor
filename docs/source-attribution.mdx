@@ -115,7 +115,7 @@ This generated inventory covers **1402 active source hosts** representing **1379
 | api.unhcr.org (api.unhcr.org) | structured — scripts/seed-displacement-summary.mjs |
 | api.usaspending.gov (api.usaspending.gov) | structured — scripts/ais-relay.cjs, scripts/seed-usa-spending.mjs |
 | api.weather.gov (api.weather.gov) | structured — scripts/_weather-alert-select.mjs, scripts/lib/grid-clock-sources.mjs, src/services/weather.ts |
-| api.windy.com (api.windy.com) | structured — api/mcp/registry/_webcam-tools.ts, api/mcp/skill-extension/_generated.ts, scripts/seed-webcams.mjs, server/worldmonitor/webcam/v1/get-webcam-image.ts |
+| api.windy.com (api.windy.com) | structured — api/mcp/registry/_webcam-tools.ts, scripts/seed-webcams.mjs, server/worldmonitor/webcam/v1/get-webcam-image.ts |
 | api.wto.org (api.wto.org) | structured — scripts/seed-supply-chain-trade.mjs |
 | apnews.com (apnews.com) | feed — shared/news-catalog.json |
 | aps.dz (aps.dz) | feed — shared/news-catalog.json |
@@ -324,7 +324,7 @@ This generated inventory covers **1402 active source hosts** representing **1379
 | dwtonline.com (dwtonline.com) | feed — shared/news-catalog.json |
 | e00-elmundo.uecdn.es (e00-elmundo.uecdn.es) | feed — shared/news-catalog.json |
 | earthobservatory.nasa.gov (earthobservatory.nasa.gov) | structured — scripts/seed-climate-news.mjs, server/worldmonitor/climate/v1/_live-fetch.ts |
-| earthquake.usgs.gov (earthquake.usgs.gov) | structured — api/mcp/skill-extension/_generated.ts, scripts/seed-earthquakes.mjs, src/services/earthquakes.ts |
+| earthquake.usgs.gov (earthquake.usgs.gov) | structured — scripts/seed-earthquakes.mjs, src/services/earthquakes.ts |
 | Earthquakes Canada (NRCan) (www.earthquakescanada.nrcan.gc.ca) | structured — scripts/seismology/nrcan-atom.mjs |
 | ec.europa.eu (ec.europa.eu) | feed+structured — scripts/_eurostat-utils.mjs, scripts/seed-economic-calendar.mjs, scripts/seed-eurostat-country-data.mjs, scripts/seed-resilience-static.mjs, +2 more |
 | ecfr.eu (ecfr.eu) | feed — shared/news-catalog.json |
@@ -495,7 +495,7 @@ This generated inventory covers **1402 active source hosts** representing **1379
 | hormuz.data-tracking.net (hormuz.data-tracking.net) | structured — scripts/seed-ukmto-incidents.mjs |
 | hoy.com.do (hoy.com.do) | feed — shared/news-catalog.json |
 | hromadske.ua (hromadske.ua) | feed — shared/news-catalog.json |
-| hts.usitc.gov (hts.usitc.gov) | structured — api/mcp/skill-extension/_generated.ts, scripts/seed-supply-chain-trade.mjs, server/worldmonitor/trade/v1/get-us-import-duty.ts |
+| hts.usitc.gov (hts.usitc.gov) | structured — scripts/seed-supply-chain-trade.mjs, server/worldmonitor/trade/v1/get-us-import-duty.ts |
 | hub.arcgis.com (hub.arcgis.com) | structured — scripts/seed-portwatch.mjs |
 | humanprogress.org (humanprogress.org) | feed — shared/news-catalog.json |
 | hvg.hu (hvg.hu) | feed — shared/news-catalog.json |
@@ -793,7 +793,7 @@ This generated inventory covers **1402 active source hosts** representing **1379
 | pncp.gov.br (pncp.gov.br) | structured — scripts/_global-tender-feeds.mjs |
 | podrobno.uz (podrobno.uz) | feed — shared/news-catalog.json |
 | Polityka (polityka.pl) | feed — shared/news-catalog.json |
-| polymarket.com (polymarket.com) | structured — api/mcp/skill-extension/_generated.ts, scripts/_bet-templates-markets.mjs, scripts/seed-prediction-markets.mjs |
+| polymarket.com (polymarket.com) | structured — scripts/_bet-templates-markets.mjs, scripts/seed-prediction-markets.mjs |
 | portal.korem.kz (portal.korem.kz) | structured — scripts/lib/regional-energy-feeds.mjs, scripts/shared/regional-energy-feeds.json |
 | portfolio.hu (portfolio.hu) | feed — shared/news-catalog.json |
 | portwatch.imf.org (portwatch.imf.org) | structured — scripts/build-chokepoint-transit-snapshot.mjs, scripts/seed-oil-trade-series.mjs |
@@ -1142,15 +1142,15 @@ This generated inventory covers **1402 active source hosts** representing **1379
 | wingbits.com (wingbits.com) | structured — src/components/MapPopup.ts |
 | winnfm.com (winnfm.com) | feed — shared/news-catalog.json |
 | Wired (www.wired.com) | feed — shared/news-catalog.json |
-| wits.worldbank.org (wits.worldbank.org) | structured — api/mcp/skill-extension/_generated.ts, scripts/ais-relay.cjs, server/worldmonitor/trade/v1/_tradestats-tariff.ts, server/worldmonitor/trade/v1/get-bilateral-tariff.ts |
+| wits.worldbank.org (wits.worldbank.org) | structured — scripts/ais-relay.cjs, server/worldmonitor/trade/v1/_tradestats-tariff.ts, server/worldmonitor/trade/v1/get-bilateral-tariff.ts |
 | workos.com (workos.com) | structured — api/_oauth-authorization-server.ts |
 | World Air Quality Index (WAQI) (api.waqi.info) | structured — scripts/seed-health-air-quality.mjs |
 | World Bank Open Data (api.worldbank.org) | structured — scripts/_defense-industrial-source.mjs, scripts/_demographics-capability-source.mjs, scripts/ais-relay.cjs, scripts/seed-bis-lbs.mjs, +15 more |
 | World Bank Open Data (datacatalogfiles.worldbank.org) | structured — scripts/seed-cii-structural-prior.mjs |
-| World Monitor hosted API (api.worldmonitor.app) | feed+structured — api/_a2a.ts, api/internal/_mcp-grant-mint.ts, api/mcp/_downstream.ts, api/mcp/skill-extension/_generated.ts, +20 more |
+| World Monitor hosted API (api.worldmonitor.app) | feed+structured — api/_a2a.ts, api/internal/_mcp-grant-mint.ts, api/mcp/_downstream.ts, scripts/_widget-data-policy.cjs, +19 more |
 | World Monitor proxy (proxy.worldmonitor.app) | structured — api/_widget-agent.ts, scripts/seed-security-advisories.mjs, src/utils/proxy.ts |
-| World Monitor web app (worldmonitor.app) | structured — api/_a2a.ts, api/_agent-metadata.ts, api/_ask.ts, api/_fwdstart.js, +53 more |
-| World Monitor web app (www.worldmonitor.app) | structured — api/_a2a.ts, api/_ask.ts, api/_cors.js, api/_customer-portal.ts, +62 more |
+| World Monitor web app (worldmonitor.app) | structured — api/_a2a.ts, api/_agent-metadata.ts, api/_ask.ts, api/_fwdstart.js, +52 more |
+| World Monitor web app (www.worldmonitor.app) | structured — api/_a2a.ts, api/_ask.ts, api/_cors.js, api/_customer-portal.ts, +61 more |
 | WorldMonitor test origin (worldmonitor.invalid) | structured — api/_md-url-twin.ts, src/shared/public-rpc-cache.ts, src/utils/dom-utils.ts |
 | worldmonitor.mintlify.dev (worldmonitor.mintlify.dev) | structured — api/_docs-mcp.ts, src/config/docs-locale-seo.ts |
 | ws.cso.ie (ws.cso.ie) | structured — scripts/lib/food-prices-adapters/cso.mjs |
@@ -1577,7 +1577,7 @@ This generated inventory covers **1402 active source hosts** representing **1379
 | www.weefmgrenada.com (www.weefmgrenada.com) | feed — shared/news-catalog.json |
 | www.whitehouse.gov (www.whitehouse.gov) | feed — shared/news-catalog.json |
 | www.who.int (www.who.int) | feed+structured — scripts/seed-disease-outbreaks.mjs, scripts/seed-security-advisories.mjs, shared/news-catalog.json |
-| www.windy.com (www.windy.com) | structured — api/mcp/registry/_webcam-tools.ts, api/mcp/skill-extension/_generated.ts, server/worldmonitor/webcam/v1/get-webcam-image.ts, src/services/webcams/index.ts |
+| www.windy.com (www.windy.com) | structured — api/mcp/registry/_webcam-tools.ts, server/worldmonitor/webcam/v1/get-webcam-image.ts, src/services/webcams/index.ts |
 | www.winnipegfreepress.com (www.winnipegfreepress.com) | feed — shared/news-catalog.json |
 | www.worldbank.org (www.worldbank.org) | structured — server/worldmonitor/resilience/v1/_indicator-source-policy.ts |
 | www.wort.lu (www.wort.lu) | feed — shared/news-catalog.json |

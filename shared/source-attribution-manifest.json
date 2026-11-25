@@ -1819,9 +1819,6 @@
           "path": "api/mcp/registry/_webcam-tools.ts"
         },
         {
-          "path": "api/mcp/skill-extension/_generated.ts"
-        },
-        {
           "path": "scripts/seed-webcams.mjs"
         },
         {
@@ -1914,9 +1911,6 @@
         },
         {
           "path": "api/mcp/_downstream.ts"
-        },
-        {
-          "path": "api/mcp/skill-extension/_generated.ts"
         },
         {
           "path": "scripts/_widget-data-policy.cjs"
@@ -4842,9 +4836,6 @@
       "status": "terms-review",
       "references": [
         {
-          "path": "api/mcp/skill-extension/_generated.ts"
-        },
-        {
           "path": "scripts/seed-earthquakes.mjs"
         },
         {
@@ -7311,9 +7302,6 @@
       "attribution": "Credit the USITC Harmonized Tariff Schedule and name the HTS release the rates come from.",
       "status": "reviewed",
       "references": [
-        {
-          "path": "api/mcp/skill-extension/_generated.ts"
-        },
         {
           "path": "scripts/seed-supply-chain-trade.mjs"
         },
@@ -11372,9 +11360,6 @@
       "attribution": "Credit polymarket.com and link to the original upstream API/dataset.",
       "status": "terms-review",
       "references": [
-        {
-          "path": "api/mcp/skill-extension/_generated.ts"
-        },
         {
           "path": "scripts/_bet-templates-markets.mjs"
         },
@@ -16049,9 +16034,6 @@
       "status": "reviewed",
       "references": [
         {
-          "path": "api/mcp/skill-extension/_generated.ts"
-        },
-        {
           "path": "scripts/ais-relay.cjs"
         },
         {
@@ -16114,9 +16096,6 @@
         },
         {
           "path": "api/_telegram-feed.js"
-        },
-        {
-          "path": "api/mcp/skill-extension/_generated.ts"
         },
         {
           "path": "api/oauth/_authorize.js"
@@ -22961,9 +22940,6 @@
           "path": "api/mcp/registry/_webcam-tools.ts"
         },
         {
-          "path": "api/mcp/skill-extension/_generated.ts"
-        },
-        {
           "path": "server/worldmonitor/webcam/v1/get-webcam-image.ts"
         },
         {
@@ -23042,9 +23018,6 @@
         },
         {
           "path": "api/mcp/_auth.ts"
-        },
-        {
-          "path": "api/mcp/skill-extension/_generated.ts"
         },
         {
           "path": "api/mcp/ui/_news-dashboard-app.ts"
