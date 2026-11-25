@@ -124,7 +124,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/plan"
           node scripts/dogfood/plan-content-shards.mjs
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dogfood-content-plan
           path: ${{ runner.temp }}/plan/plan.json
@@ -184,7 +184,7 @@ jobs:
           fi
           bash scripts/dogfood/run-agent.sh
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         continue-on-error: true
         with:
