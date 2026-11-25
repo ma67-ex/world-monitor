@@ -704,6 +704,8 @@ async function proxyDocsLocaleHtml(request: Request, url: URL, host: string): Pr
 }
 
 export const config = {
+  // Edge bundles the extension-less relative imports; the Node runtime cannot resolve them.
+  runtime: 'edge',
   matcher: [
     '/mcp',
     '/api/:path*',
