@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { assessFunnelDiversity, buildFunnelHealthMeta } from '../scripts/_forecast-funnel.mjs';
 
 describe('forecast resolution health registration', () => {

@@ -106,8 +106,8 @@ function post(url: string, body: unknown, bearer?: string): Request {
 describe('desktop sign-in: a revoked Clerk session cannot be laundered into a ticket', async () => {
   const { resolveVerifiedClerkSession } = await import('../server/_shared/auth-session.ts');
   const { verifyClerkSessionActive } = await import('../server/auth-session.ts');
-  const { desktopAuthAuthorizeHandler } = await import('../api/desktop-auth/authorize.ts');
-  const { desktopAuthTokenHandler } = await import('../api/desktop-auth/token.ts');
+  const { desktopAuthAuthorizeHandler } = await import('../api/desktop-auth/_authorize.ts');
+  const { desktopAuthTokenHandler } = await import('../api/desktop-auth/_token.ts');
   const { mintClerkSignInTicket } = await import('../api/_desktop-auth.ts');
 
   function flow(rateLimit: () => Promise<Response | null> = async () => null) {
@@ -241,7 +241,7 @@ describe('desktop sign-in: a revoked Clerk session cannot be laundered into a ti
 });
 
 describe('Pro MCP grant: the handler requires a live Clerk session (production resolvers)', async () => {
-  const { mintGrantHandler } = await import('../api/internal/mcp-grant-mint.ts');
+  const { mintGrantHandler } = await import('../api/internal/_mcp-grant-mint.ts');
   const { resolveVerifiedClerkSession } = await import('../server/_shared/auth-session.ts');
   const { verifyClerkSessionActive } = await import('../server/auth-session.ts');
 
@@ -312,8 +312,8 @@ describe('Pro MCP grant: the handler requires a live Clerk session (production r
 });
 
 describe('the limiter in front of the Clerk session check fails closed', async () => {
-  const { default: authorizeRoute, desktopAuthorizeRateLimitPolicy } = await import('../api/desktop-auth/authorize.ts');
-  const { default: mintRoute, mintRateLimitPolicy } = await import('../api/internal/mcp-grant-mint.ts');
+  const { default: authorizeRoute, desktopAuthorizeRateLimitPolicy } = await import('../api/desktop-auth/_authorize.ts');
+  const { default: mintRoute, mintRateLimitPolicy } = await import('../api/internal/_mcp-grant-mint.ts');
 
   // The fetch stub throws for every Upstash limiter call, so the production
   // limiter sees a Redis outage. Failing open would put one caller's requests

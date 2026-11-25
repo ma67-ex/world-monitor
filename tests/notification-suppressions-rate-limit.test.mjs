@@ -1,5 +1,5 @@
 // Per-IP rate limit on the anonymous link-suppression endpoint
-// (api/notification-suppressions.js, #8401 / #8416 follow-up).
+// (api/_notification-suppressions.js, #8401 / #8416 follow-up).
 //
 // The endpoint is unauthenticated and every CDN miss is an Upstash SMEMBERS.
 // It refuses query strings, but a caller can still miss the shared cache
@@ -16,7 +16,7 @@ const originalEnv = { ...process.env };
 const originalFetch = globalThis.fetch;
 const originalError = console.error;
 
-const { default: handler } = await import('../api/notification-suppressions.js');
+const { default: handler } = await import('../api/_notification-suppressions.js');
 const { __resetRateLimitForTest } = await import('../api/_rate-limit.js');
 
 const ENDPOINT = 'https://worldmonitor.app/api/notification-suppressions';

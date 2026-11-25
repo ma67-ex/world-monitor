@@ -57,7 +57,7 @@ describe('Skills Over MCP extension', () => {
     assert.equal(new Set(skills.map((skill) => skill.frontmatter.name)).size, 5,
       'the complete catalog must stay within the five-unique-skill-name publishing bound');
     assert.equal(new Set(skills.map((skill) => skill.uri)).size, skills.length, 'no skill repeats across pages');
-    const { SKILL_ENTRIES } = await import('../api/mcp/skill-extension/generated.ts');
+    const { SKILL_ENTRIES } = await import('../api/mcp/skill-extension/_generated.ts');
     assert.deepEqual(skills, SKILL_ENTRIES.slice(0, 5), 'preserve the existing first page');
     // Continue verifying every recipe, including those accessible by direct URI.
     for (const skill of SKILL_ENTRIES) {

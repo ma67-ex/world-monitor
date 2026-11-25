@@ -26,15 +26,15 @@ import {
   type WaitUntilCtx,
 } from '../../server/_shared/usage';
 import type { AuthKind } from '../../server/_shared/usage-identity';
-import { TOOL_ALIASES } from './registry/index';
-import { emitTelemetry } from './telemetry';
-import type { McpAuthContext } from './types';
+import { TOOL_ALIASES } from './registry/_index';
+import { emitTelemetry } from './_telemetry';
+import type { McpAuthContext } from './_types';
 
 // Which stage of the /mcp funnel produced the terminal Response. Set by the
 // handler at each return site; combined with the HTTP status it maps onto the
 // closed RequestReason union without parsing response bodies.
 export type McpPhase =
-  | '_auth'       // credential resolution rejected (invalid key/bearer, backend down)
+  | 'auth'       // credential resolution rejected (invalid key/bearer, backend down)
   | 'precheck'   // identity ok, entitlement/token pre-check rejected
   | 'billing'    // pre-check rejected with a billing-verification denial (#4770)
   | 'limit'      // per-minute rate limit or fail-closed free-tier limiter outage
@@ -120,7 +120,7 @@ export interface McpUsage {
   toolOutcome: McpToolOutcome | null;
   /** MCP-Protocol-Version the client sent: a known revision, 'other', or null when absent. */
   protocolVersion: string | null;
-  /** 'modern' once a request takes the 2026-07-28 per-request path (api/mcp/modern.ts). */
+  /** 'modern' once a request takes the 2026-07-28 per-request path (api/mcp/_modern.ts). */
   era: McpEra;
   /** clientInfo.name the request declares, bounded by declaredClientName; null when it names none. */
   clientName: string | null;
@@ -250,7 +250,7 @@ export function setUsageContext(usage: McpUsage, context: McpAuthContext): void 
 
 export function mcpReasonFor(phase: McpPhase, status: number): RequestReason {
   switch (phase) {
-    case '_auth':
+    case 'auth':
       return status === 503 ? 'auth_unavailable' : 'auth_401';
     case 'precheck':
       return status === 503 ? 'auth_unavailable' : 'tier_403';

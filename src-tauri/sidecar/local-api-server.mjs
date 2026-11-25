@@ -387,7 +387,7 @@ const ALLOWED_ENV_KEYS = new Set([
 ]);
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-// Matches api/rss-proxy.js MAX_FEED_BYTES.
+// Matches api/_rss-proxy.js MAX_FEED_BYTES.
 const RSS_PROXY_MAX_BODY_BYTES = 5 * 1024 * 1024;
 // Bounds buffered feed memory to RSS_PROXY_MAX_CONCURRENT * RSS_PROXY_MAX_BODY_BYTES.
 const RSS_PROXY_MAX_CONCURRENT = 12;
@@ -894,7 +894,7 @@ async function getCloudSessionToken(context) {
   return context.cloudSessionMint;
 }
 
-// Cookies api/wm-session.js issues and reads.
+// Cookies api/_wm-session.js issues and reads.
 const CLOUD_SESSION_COOKIES = new Set(['wm-session', '__Host-wm-widget-key', '__Host-wm-pro-key']);
 
 function pickCloudSessionCookies(raw) {
@@ -1089,7 +1089,7 @@ function takeSelfHostKeyCookie(req) {
   return key;
 }
 
-// The cloud verdict contract (api/desktop-key/status.ts): only a 200 whose
+// The cloud verdict contract (api/desktop-key/_status.ts): only a 200 whose
 // JSON `verdict` is a known value is a verdict. A 403 edge refusal, 404 (a
 // cloud without the route), 429, 5xx or a non-JSON answer is "unavailable".
 function parseDesktopKeyVerdict(status, bodyText) {

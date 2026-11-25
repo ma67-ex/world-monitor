@@ -31,7 +31,7 @@ export function getKeyPrefix() {
 /**
  * Apply the deployment prefix to an app-owned key. Exported for the mixed
  * pipelines that must name per-key ownership at command-construction time
- * (api/health.js sweep) and then pass `raw = true` so the pipeline helpers do
+ * (api/_health.js sweep) and then pass `raw = true` so the pipeline helpers do
  * not prefix again.
  *
  * Computed per call, NOT memoized — mirrors server/_shared/pro-mcp-token.ts's

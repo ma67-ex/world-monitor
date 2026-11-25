@@ -1,5 +1,5 @@
-import type { McpAuthContext, McpHandlerDeps } from './types';
-import { dailyAllowanceResetAt, isSharedRestCounter, readDailyAllowance, type McpBudget } from './quota';
+import type { McpAuthContext, McpHandlerDeps } from './_types';
+import { dailyAllowanceResetAt, isSharedRestCounter, readDailyAllowance, type McpBudget } from './_quota';
 import {
   FREE_ACCOUNT_CALLS_PER_DAY,
   FREE_ACCOUNT_IDLE_GAP_MS,
@@ -7,7 +7,7 @@ import {
   freeAccountCallsKey,
   freeAccountLastActivityKey,
   freeAccountRequestsKey,
-} from './free-account-allowance';
+} from './_free-account-allowance';
 import { READ_FREE_ACCOUNT_ALLOWANCE_SCRIPT } from '../../shared/free-account-allowance-scripts.mjs';
 
 export interface McpAllowanceStatus {

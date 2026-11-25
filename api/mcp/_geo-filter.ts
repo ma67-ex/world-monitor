@@ -1,4 +1,4 @@
-import { RpcValidationError } from './billing-denial';
+import { RpcValidationError } from './_billing-denial';
 
 export type GeoArea =
   | { kind: 'bbox'; swLat: number; swLon: number; neLat: number; neLon: number }

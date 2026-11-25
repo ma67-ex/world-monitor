@@ -32,7 +32,7 @@ import {
   LFS_PRODUCT_ID,
 } from '../scripts/lib/statcan-wds.mjs';
 import { DAY_MIN } from '../scripts/_content-age-helpers.mjs';
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const changedDoc = JSON.parse(readFileSync(resolve(here, 'fixtures/statcan-wds/changed-cube-list.json'), 'utf8'));
@@ -435,7 +435,7 @@ test('StatCan scored freshness is invariant across UTC, Toronto, and Dubai proce
 test('StatCan and BoC keep independent issue ownership and a documented tick', () => {
   // The 08:00 UTC cron must stay documented — the wrong-tick bug is only
   // avoidable while the runbook says what the tick actually is.
-  const healthSrc = readFileSync(resolve(here, '../api/health.js'), 'utf8');
+  const healthSrc = readFileSync(resolve(here, '../api/_health.js'), 'utf8');
   const runbook = readFileSync(resolve(here, '../docs/railway-seed-consolidation-runbook.md'), 'utf8');
 
   assert.match(seederSrc, /Issue #6676\./, 'the StatCan seeder must point to its own tracking issue');

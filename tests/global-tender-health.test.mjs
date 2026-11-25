@@ -438,7 +438,7 @@ test('Contracts Finder cannot contain repeated, stale, malformed, mismatched, or
 });
 
 test('Contracts Finder health checks the canonical payload, not the positive source-status count', async (t) => {
-  const { default: handler } = await import('../api/health.js');
+  const { default: handler } = await import('../api/_health.js');
   const seed = await import('../scripts/seed-global-tenders.mjs');
   const snapshot = await failedContractsFinder();
   const meta = seed.sourceHealthMeta(snapshot.sourceStatuses[0]);

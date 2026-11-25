@@ -763,7 +763,7 @@ export async function startCheckout(
       // inline so the post-auth Clerk listener can auto-resume the
       // exact checkout without manual re-click.
       //
-      // 403 is intentionally NOT routed here. Neither api/create-checkout.ts
+      // 403 is intentionally NOT routed here. Neither api/_create-checkout.ts
       // nor the Convex /relay/create-checkout handler ever emits 403 —
       // observed 403s on this route originate above our function
       // (Cloudflare Bot Fight Mode on datacenter IPs, Vercel Deployment

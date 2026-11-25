@@ -142,7 +142,7 @@ const onDemandInflight = new Map<string, OnDemandInflightEntry>();
 
 // The on-demand keys `/api/bootstrap?keys=<name>&public=1` will serve without
 // credentials. The ON-DEMAND PORTION cannot drift: this set, the server's
-// allowlist (ON_DEMAND_KEYS, api/bootstrap.js) and the wm-session interceptor's
+// allowlist (ON_DEMAND_KEYS, api/_bootstrap.js) and the wm-session interceptor's
 // bypass set (PUBLIC_SINGLE_KEY_BOOTSTRAP_KEYS, wm-session.ts) all derive it
 // from the same `bootstrapTierKeyNames('on-demand')` call.
 //
@@ -175,7 +175,7 @@ export async function ensureHydrated(key: string, signal?: AbortSignal): Promise
   if (hydrated !== undefined) return hydrated;
 
   // The public URL below only serves keys in the on-demand tier
-  // (isPublicOnDemandBootstrapRequest, api/bootstrap.js); anything else falls
+  // (isPublicOnDemandBootstrapRequest, api/_bootstrap.js); anything else falls
   // through to validateApiKey, which sees no credential — this request omits
   // them — and answers 401. Issuing it anyway is not merely wasted: the
   // wm-session interceptor waves through credential-less bootstrap reads only

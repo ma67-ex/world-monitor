@@ -5,7 +5,7 @@ import { Ratelimit } from '@upstash/ratelimit';
 import { listXFeed } from '../server/worldmonitor/intelligence/v1/list-x-feed.ts';
 import { issueSessionToken } from '../api/_session.js';
 import { __resetRateLimitForTest } from '../api/_rate-limit.js';
-import handler from '../api/x-feed.js';
+import handler from '../api/_x-feed.js';
 
 const originalFetch = globalThis.fetch;
 const originalSlidingWindow = Ratelimit.slidingWindow;
@@ -72,7 +72,7 @@ describe('api/x-feed contract normalization', () => {
         if (timedOut) error.name = 'AbortError';
         throw error;
       };
-      const handler = (await import(`../api/x-feed.js?error-test=${timedOut}`)).default;
+      const handler = (await import(`../api/_x-feed.js?error-test=${timedOut}`)).default;
       const response = await handler(await makeRequest());
       assert.equal(response.status, timedOut ? 504 : 502);
       assert.deepEqual(await response.json(), { error: timedOut ? 'Relay timeout' : 'Relay request failed' });
@@ -113,7 +113,7 @@ describe('api/x-feed contract normalization', () => {
       });
     };
 
-    const handler = (await import(`../api/x-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_x-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 200);
     // The payload is credential-gated now, so it must never be stored by a
@@ -161,7 +161,7 @@ describe('api/x-feed contract normalization', () => {
       headers: { 'Content-Type': 'application/json' },
     });
 
-    const handler = (await import(`../api/x-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_x-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     const data = await res.json();
     assert.equal(data.count, 1);
@@ -201,7 +201,7 @@ describe('api/x-feed R4 first-party boundary', () => {
   });
 
   async function get(headers) {
-    const handler = (await import(`../api/x-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_x-feed.js?t=${Date.now()}`)).default;
     return handler(new Request('https://api.worldmonitor.app/api/x-feed?limit=200', {
       method: 'GET',
       headers,
@@ -256,7 +256,7 @@ describe('api/x-feed R4 first-party boundary', () => {
   it('still answers the CORS preflight without a credential', async () => {
     // The gate sits after the OPTIONS branch on purpose: a browser cannot
     // attach credentials to a preflight, so gating it would break the panel.
-    const handler = (await import(`../api/x-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_x-feed.js?t=${Date.now()}`)).default;
     const res = await handler(new Request('https://api.worldmonitor.app/api/x-feed', {
       method: 'OPTIONS',
       headers: { origin: 'https://worldmonitor.app' },

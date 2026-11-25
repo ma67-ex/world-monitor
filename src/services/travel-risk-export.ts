@@ -2,7 +2,7 @@
  * The browser side of the trip assessment export (#10451, phase 2): the draft
  * the person fills in, the request it becomes, and what comes back.
  *
- * The server is the gate and the author of the document (api/travel-risk-assessment.ts).
+ * The server is the gate and the author of the document (api/_travel-risk-assessment.ts).
  * This only shapes a request from countries, cities and dates, and sorts the
  * answer into something the dialog can say in plain words. Nothing here is
  * stored: the draft lives in the open dialog and nowhere else.

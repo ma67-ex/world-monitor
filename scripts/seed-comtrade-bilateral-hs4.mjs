@@ -100,7 +100,7 @@ export const SEED_META_TTL_SECONDS = Math.max(
 // 110 of the 197 country-port-clusters entries (~56%). Deliberately loose: the
 // true healthy count is unmeasured, and a floor above it would warn forever —
 // the trap that makes operators ignore a signal. Sized to catch a collapse,
-// not to certify full coverage. Keep in step with api/health.js + seed-health.js.
+// not to certify full coverage. Keep in step with api/_health.js + seed-health.js.
 export const MIN_COUNTRY_COVERAGE = 110;
 
 /**
@@ -546,7 +546,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
   const countryCoverage = Object.fromEntries(countries.map(([iso2]) => [iso2, { state: 'not_attempted' }]));
   // The run's world-exports outcome. Null until the reserved fetch is attempted,
   // which is also what a snapshot written before this field existed reads as —
-  // api/seed-health.js treats that absence as "no evidence", not as a failure.
+  // api/_seed-health.js treats that absence as "no evidence", not as a failure.
   let worldExports = null;
   // The run's LNG origin outcome, recorded the same way as worldExports.
   let lngOrigin = null;

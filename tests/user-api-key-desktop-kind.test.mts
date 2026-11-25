@@ -529,7 +529,7 @@ describe('revocation', () => {
       const src = readFileSync(resolve(ROOT, file), 'utf8');
       assert.match(src, /`user-api-key:\$\{/, `${file} must delete user-api-key:<hash>`);
     }
-    const revoke = readFileSync(resolve(ROOT, 'api/invalidate-user-api-key-cache.ts'), 'utf8');
+    const revoke = readFileSync(resolve(ROOT, 'api/_invalidate-user-api-key-cache.ts'), 'utf8');
     assert.match(revoke, /invalidateApiKeyCache\(keyHash\)/);
   });
 });

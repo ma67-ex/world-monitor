@@ -27,7 +27,7 @@
 
 - [ ] Tested on [worldmonitor.app](https://worldmonitor.app) variant
 - [ ] Tested on [tech.worldmonitor.app](https://tech.worldmonitor.app) variant (if applicable)
-- [ ] New RSS feed domains added to `api/rss-proxy.js` allowlist (if adding feeds)
+- [ ] New RSS feed domains added to `api/_rss-proxy.js` allowlist (if adding feeds)
 - [ ] No API keys or secrets committed
 - [ ] TypeScript compiles without errors (`npm run typecheck`)
 - [ ] New or repointed health probes have a completed Railway-side pre-seed or a one-way durable activation marker (if applicable)

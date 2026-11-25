@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 // on it (orbitalSites claims a deadline only once lit). Pin the dark default, then restore.
 const previousOrbitalWatch = process.env.ORBITAL_WATCH_ENABLED;
 process.env.ORBITAL_WATCH_ENABLED = 'false';
-const { __testing__ } = await import('../api/health.js?orbital-watch=dark');
+const { __testing__ } = await import('../api/_health.js?orbital-watch=dark');
 if (previousOrbitalWatch === undefined) delete process.env.ORBITAL_WATCH_ENABLED;
 else process.env.ORBITAL_WATCH_ENABLED = previousOrbitalWatch;
 const { classifyKey, STANDALONE_KEYS, SEED_META, regionalEnergyRolloutCommands } = __testing__;

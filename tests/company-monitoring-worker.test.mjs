@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { ConvexHttpClient } from 'convex/browser';
-import { __testing__ as healthApi } from '../api/health.js';
+import { __testing__ as healthApi } from '../api/_health.js';
 
 import {
   COMPANY_MONITORING_CLASSIFIER_RUNTIME_APPROVED,

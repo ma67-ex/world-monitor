@@ -144,7 +144,7 @@ export const BRIEF_LLM_MODEL_OVERRIDES = { openrouter: BRIEF_LLM_OPENROUTER_MODE
 // The pure helpers (`WHY_MATTERS_SYSTEM`, `buildWhyMattersUserPrompt` (aliased
 // to `buildWhyMattersPrompt` for backcompat), `parseWhyMatters`, `hashBriefStory`)
 // live in `shared/brief-llm-core.js` so the Vercel-edge endpoint
-// (`api/internal/brief-why-matters.ts`) can import them without pulling in
+// (`api/internal/_brief-why-matters.ts`) can import them without pulling in
 // `node:crypto`. See the `shared/` → `scripts/shared/` mirror convention.
 
 function normalizeAnalystWhyMatters(value) {
@@ -212,7 +212,7 @@ export async function generateWhyMatters(story, deps) {
   }
 
   // #4914: before paying a direct-Gemini generation, check the analyst
-  // endpoint's OWN cache namespace. api/internal/brief-why-matters.ts
+  // endpoint's OWN cache namespace. api/internal/_brief-why-matters.ts
   // stores its envelope at brief:llm:whymatters:v11:{hash} under the same
   // hashBriefStory identity — when the endpoint CALL failed transiently
   // (or no endpoint is configured), the story may already have a paid,

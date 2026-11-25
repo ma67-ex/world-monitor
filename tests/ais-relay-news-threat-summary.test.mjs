@@ -15,7 +15,7 @@ import http from 'node:http';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 
 const relayScript = fileURLToPath(new URL('../scripts/ais-relay.cjs', import.meta.url));
 const SUMMARY_KEY = 'news:threat:summary:v1';

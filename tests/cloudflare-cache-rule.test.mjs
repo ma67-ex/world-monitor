@@ -403,7 +403,7 @@ describe('cloudflare corpus cache rule', () => {
         `${forbidden} must stay outside the corpus cache rule`,
       );
     }
-    // /docs/mcp is api/docs-mcp.ts — a no-store JSON-RPC endpoint that answers
+    // /docs/mcp is api/_docs-mcp.ts — a no-store JSON-RPC endpoint that answers
     // GET as well as POST — and /docs/_* is Mintlify's asset and API space. Both
     // share the prefix with the documents and neither is one. The exact-path
     // form matters: a prefix carve-out on "/docs/mcp" would also drop the

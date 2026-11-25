@@ -7,7 +7,7 @@ process.env.UPSTASH_REDIS_REST_URL = 'https://mock-upstash.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
 process.env.WORLDMONITOR_VALID_KEYS = 'test-health-admin-key';
 
-const { default: handler, handleHealth, __testing__ } = await import('../api/health.js');
+const { default: handler, handleHealth, __testing__ } = await import('../api/_health.js');
 const { nextChinaDecisionCoverageFailure } = await import('../scripts/seed-china-decision-signals.mjs');
 const { canadianWildfireAfterPublish } = await import('../scripts/wildfire/bc-fire-points.mjs');
 

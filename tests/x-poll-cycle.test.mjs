@@ -391,7 +391,7 @@ describe('X failure diagnostics and backoff recovery', () => {
     assert.equal(meta.errorCode, 'X_CREDITS_EXHAUSTED');
     assert.equal(harness.state.items[0].postId, '7000000000000000010');
     assert.ok(harness.calls.warn.some((line) => line.includes('X_CREDITS_EXHAUSTED')));
-    const { __testing__: health } = await import('../api/health.js');
+    const { __testing__: health } = await import('../api/_health.js');
     const sourceMeta = health.readSeedMeta(health.SEED_META.xFeed,
       new Map([[META_KEY, JSON.stringify(meta)]]), new Map(), clock);
     assert.equal(sourceMeta.seedAge, 180);

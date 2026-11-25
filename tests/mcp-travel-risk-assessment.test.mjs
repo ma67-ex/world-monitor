@@ -18,9 +18,9 @@ import {
   createTravelRiskTool,
   gatherTravelRiskSources,
   parseTravelRiskArgs,
-} from '../api/mcp/registry/travel-risk-tool.ts';
-import { RpcValidationError } from '../api/mcp/billing-denial.ts';
-import { McpSourceUnavailableError } from '../api/mcp/source-unavailable.ts';
+} from '../api/mcp/registry/_travel-risk-tool.ts';
+import { RpcValidationError } from '../api/mcp/_billing-denial.ts';
+import { McpSourceUnavailableError } from '../api/mcp/_source-unavailable.ts';
 import { CII_COUNTRY_CODES } from '../shared/cii-weights.ts';
 
 const NOW = Date.parse('2026-11-10T12:00:00.000Z');

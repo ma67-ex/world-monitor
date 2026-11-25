@@ -2,8 +2,8 @@ import { isOrbitalWatchEnabled, orbitalWatchDarkResponse } from '../../../server
 import { countrySiteImagery, imageryCredits } from '../../../server/worldmonitor/orbital/v1/site-imagery';
 import type { GetCountryImageryEvidenceResponse } from '../../../src/generated/server/worldmonitor/orbital/v1/service_server';
 import { requireCountryCode } from '../_country-args';
-import { assertToolFetchOk, RpcValidationError } from '../billing-denial';
-import type { ToolDef } from '../types';
+import { assertToolFetchOk, RpcValidationError } from '../_billing-denial';
+import type { ToolDef } from '../_types';
 import { COUNTRY_EVIDENCE_PATH, ORBITAL_MCP_TOOLS_PUBLISHED, orbitalMcpTools, readOrbital } from './_orbital';
 
 const TOOL = 'get-watched-site-imagery';

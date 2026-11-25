@@ -92,7 +92,7 @@ describe('listImagingSatellites', () => {
   });
 
   it('uses the same freshness limit as the health check', () => {
-    const health = readFileSync(new URL('../../api/health.js', import.meta.url), 'utf8');
+    const health = readFileSync(new URL('../../api/_health.js', import.meta.url), 'utf8');
     expect(health).toMatch(new RegExp(`orbitalCatalog:\\s*\\{[^}]*maxStaleMin: ${ORBITAL_CATALOG_MAX_STALE_MINUTES},`));
   });
 });

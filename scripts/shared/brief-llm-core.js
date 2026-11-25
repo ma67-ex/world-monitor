@@ -2,7 +2,7 @@
 /**
  * Edge-safe pure helpers for the brief LLM enrichment path. Shared by:
  *   - scripts/lib/brief-llm.mjs   (Railway cron, Node)
- *   - api/internal/brief-why-matters.ts  (Vercel edge)
+ *   - api/internal/_brief-why-matters.ts  (Vercel edge)
  *
  * No `node:*` imports. Hashing via Web Crypto (`crypto.subtle.digest`),
  * which is available in both Edge and modern Node. Everything else is

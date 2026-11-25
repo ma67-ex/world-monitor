@@ -3,10 +3,10 @@
 // MCP must point them at the billing portal instead of start_upgrade.
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mcpHandler } from '../api/mcp/handler.ts';
-import { getMcpBillingVerificationDenial } from '../api/mcp/auth.ts';
-import { applyChatGptCommercePolicy } from '../api/mcp/host-policy.ts';
-import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/index.ts';
+import { mcpHandler } from '../api/mcp/_handler.ts';
+import { getMcpBillingVerificationDenial } from '../api/mcp/_auth.ts';
+import { applyChatGptCommercePolicy } from '../api/mcp/_host-policy.ts';
+import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/_index.ts';
 import { TRAVEL_RISK_TOOL } from '../api/mcp/registry/_travel-risk-document.ts';
 import { HMAC_SECRET, callBody, makeProDeps, proReq } from './helpers/mcp-pro-deps.mjs';
 

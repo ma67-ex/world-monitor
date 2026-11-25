@@ -14,8 +14,8 @@ Object.assign(process.env, {
 });
 const { __resetRateLimitForTest } = await import('../server/_shared/rate-limit.ts');
 const handlers = {
-  discord: (await import('../api/discord/oauth/callback.ts')).default,
-  slack: (await import('../api/slack/oauth/callback.ts')).default,
+  discord: (await import('../api/discord/oauth/_callback.ts')).default,
+  slack: (await import('../api/slack/oauth/_callback.ts')).default,
 };
 
 const originalFetch = globalThis.fetch;

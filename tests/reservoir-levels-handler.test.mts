@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import {
   listReservoirLevels,
   normalizeReservoir,

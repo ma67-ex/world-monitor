@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, it, mock } from 'node:test';
-import handler from '../api/oauth/register.js';
+import handler from '../api/oauth/_register.js';
 import { isAllowedRedirectUri } from '../api/oauth/_redirect-uri.js';
 
 const originalEnv = { ...process.env };
@@ -103,7 +103,7 @@ it('bounds serialized metadata including JSON escaping before writing', async ()
 });
 
 it('preserves callbacks, arbitrary loopback ports, name truncation, response and TTL', async () => {
-  const uris = ['https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback', 'http://127.0.0.1:65535/callback?state=x'];
+  const uris = ['https://claude.ai/api/mcp/_auth_callback', 'https://claude.com/api/mcp/_auth_callback', 'http://127.0.0.1:65535/callback?state=x'];
   const response = await handler(request(payload(uris, 'é'.repeat(101))));
   assert.equal(response.status, 201);
   const result = await response.json();

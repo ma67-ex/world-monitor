@@ -815,7 +815,7 @@ export function wildfirePublishData(data) {
   return publicData;
 }
 
-// Matches warnAfterConsecutive for these codes in api/health.js SEED_META.wildfires.
+// Matches warnAfterConsecutive for these codes in api/_health.js SEED_META.wildfires.
 const FIRMS_PARTIAL_WARN_AFTER_CONSECUTIVE = 2;
 const CANADA_SUBSOURCE_WARN_AFTER_CONSECUTIVE = 3;
 

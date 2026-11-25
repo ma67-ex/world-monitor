@@ -395,7 +395,7 @@ export async function writeSnapshotFiles(outDir, snapshot) {
   return files.map((file) => file.path);
 }
 
-// Redis is the published store: api/open-data-chokepoints.js serves
+// Redis is the published store: api/_open-data-chokepoints.js serves
 // /data/v1/chokepoints/* from these keys. A day key holds the exact JSON and
 // CSV bytes for that date. The index key holds the exact index.json bytes, and
 // its dates list is the archive manifest the publisher plans against. Neither

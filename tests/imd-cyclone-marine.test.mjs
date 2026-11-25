@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import {
   IMD_BULLETIN_PRODUCT_IDS,
   IMD_CANONICAL_KEY,

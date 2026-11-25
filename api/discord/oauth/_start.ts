@@ -68,7 +68,7 @@ export default async function handler(req: Request, ctx?: { waitUntil: (p: Promi
     return new Response(JSON.stringify({ error: 'pro_required', message: 'Discord notifications are available on the Pro plan.', upgradeUrl: 'https://worldmonitor.app/pro' }), { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
   }
 
-  // Same per-user, fail-closed budget as api/slack/oauth/start.ts: each
+  // Same per-user, fail-closed budget as api/slack/oauth/_start.ts: each
   // accepted start writes two state keys with a 10-minute TTL.
   const rateLimitResponse = await checkRateLimit(req, corsHeaders, {
     scope: 'discord-oauth-start', identifier: session.userId, limit: 5, window: '60 s', failClosed: true, ctx,

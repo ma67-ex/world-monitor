@@ -354,7 +354,7 @@ describe('JODI publishes the rest of the world without China (#6395)', () => {
     // runSeed invokes the hook as `contentMeta(data, startMs)` — a NUMBER
     // (scripts/_seed-utils.mjs). This helper used to demand `now instanceof
     // Date` and return null for anything else, and a null newestItemAt is read
-    // as STALE_CONTENT by api/health.js. jodiGas and lngVulnerability were
+    // as STALE_CONTENT by api/_health.js. jodiGas and lngVulnerability were
     // therefore permanently stale no matter how current the file was (#6799).
     //
     // Every other test here passes `NOW`, a Date — which is exactly why the

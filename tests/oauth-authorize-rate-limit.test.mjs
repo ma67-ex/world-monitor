@@ -3,7 +3,7 @@ import { afterEach, beforeEach, it, mock } from 'node:test';
 
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
-const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+const redirectUri = 'https://claude.ai/api/mcp/_auth_callback';
 let handler;
 let commands;
 let counts;
@@ -36,7 +36,7 @@ beforeEach(async () => {
     });
     return Response.json(pipeline ? results : results[0]);
   };
-  ({ default: handler } = await import(`../api/oauth/authorize.js?test=${crypto.randomUUID()}`));
+  ({ default: handler } = await import(`../api/oauth/_authorize.js?test=${crypto.randomUUID()}`));
 });
 
 afterEach(() => {

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { transformSync } from 'esbuild';
 import { Window } from 'happy-dom';
-import { COUNTRY_RISK_APP_HTML } from '../api/mcp/ui/country-risk-app.ts';
-import { buildStructuredContent } from '../api/mcp/structured-content.ts';
-import { applyJmespath } from '../api/mcp/jmespath.ts';
+import { COUNTRY_RISK_APP_HTML } from '../api/mcp/ui/_country-risk-app.ts';
+import { buildStructuredContent } from '../api/mcp/_structured-content.ts';
+import { applyJmespath } from '../api/mcp/_jmespath.ts';
 
 const windows = [];
 const risk = {

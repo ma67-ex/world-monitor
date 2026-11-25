@@ -31,7 +31,7 @@ import {
 } from '../../../../scripts/shared/no2-activity.mjs';
 import { readCachedJson } from '../../../_shared/redis';
 
-/** Must equal api/health.js SEED_META.no2Activity.maxStaleMin; pinned by tests. */
+/** Must equal api/_health.js SEED_META.no2Activity.maxStaleMin; pinned by tests. */
 export const NO2_ACTIVITY_MAX_STALE_MINUTES = 4320;
 
 const REASON = {

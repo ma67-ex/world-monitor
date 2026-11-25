@@ -63,7 +63,7 @@ const EXPOSE_HEADERS = 'Allow, Mcp-Session-Id, WWW-Authenticate, Retry-After, Id
 // fixed Allow-Methods on every preflight, so if a route handles DELETE but
 // Allow-Methods omits it, the browser rejects the preflight before the
 // authenticated DELETE can reach Vercel. Current union across api/*:
-//   - api/product-catalog.js handles GET + DELETE (`'GET, DELETE, OPTIONS'`)
+//   - api/_product-catalog.js handles GET + DELETE (`'GET, DELETE, OPTIONS'`)
 //   - most route handlers respond to GET, POST, HEAD, OPTIONS
 //   - HEAD is technically a "simple method" so browsers don't require it in
 //     Allow-Methods, but listing it costs nothing and avoids a different
@@ -101,15 +101,15 @@ function appendDeprecationPolicyLink(headers) {
 //     the Worker's origin echo (or canonical fallback) and break CORS.
 //
 // Keep this list in sync with:
-//   - api/oauth/register.js, api/oauth/token.ts, api/mcp/handler.ts
+//   - api/oauth/_register.js, api/oauth/_token.ts, api/mcp/_handler.ts
 //     (use getPublicCorsHeaders() with ACAO: '*' + their own Claude origin
 //     validation in the handler body)
-//   - api/oauth/authorize.js, api/oauth-protected-resource.ts
+//   - api/oauth/_authorize.js, api/_oauth-protected-resource.ts
 //     (hardcoded ACAO: '*')
-//   - api/security/report.js (CSP/COOP/COEP reports from any origin)
-//   - api/geo.js, api/version.js (public, no credentials)
-//   - api/gpsjam.js, api/reverse-geocode.js,
-//     api/product-catalog.js (cacheable public GET responses use ACAO: '*';
+//   - api/security/_report.js (CSP/COOP/COEP reports from any origin)
+//   - api/_geo.js, api/_version.js (public, no credentials)
+//   - api/_gpsjam.js, api/_reverse-geocode.js,
+//     api/_product-catalog.js (cacheable public GET responses use ACAO: '*';
 //     product-catalog also owns the CORS policy for its credentialed DELETE)
 //
 // Do not let the Worker replace these endpoints' response headers with its
@@ -210,7 +210,7 @@ export function buildCorsHeaders(origin) {
 }
 
 /**
- * The response shape `api/bootstrap.js` uses for a `&public=1` URL
+ * The response shape `api/_bootstrap.js` uses for a `&public=1` URL
  * (`getPublicBootstrapHeaders()` -> `getPublicCorsHeaders()` + TAO): ACAO `*`,
  * no `Access-Control-Allow-Credentials`, no `Vary: Origin`.
  *
@@ -245,7 +245,7 @@ function buildPublicBootstrapCorsHeaders() {
 }
 
 // A disallowed Origin is excluded from the public shape on purpose — both by the
-// preflight predicate below and by publicBootstrapShape in fetch(). api/bootstrap.js
+// preflight predicate below and by publicBootstrapShape in fetch(). api/_bootstrap.js
 // refuses those with 403 (isDisallowedOrigin), so answering one with ACAO `*` would
 // make the seed bundle browser-readable to a page the origin turns away. Those
 // requests keep the credentialed bag, whose canonical-fallback ACAO is what actually

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test, { mock } from 'node:test';
-import handler from './bootstrap.js';
+import handler from './_bootstrap.js';
 import { DESKTOP_KEY_LIMIT_ERROR } from '../shared/desktop-key-access.js';
 import { issueSessionToken } from './_session.js';
 import {
@@ -863,7 +863,7 @@ test('every Canada road key serves anonymously with a shield sized to its publis
   //
   // The s-maxage values are the second half of the move. Without a profile
   // these inherit the slow 7200 s shield, which outlives the 45- and 90-minute
-  // freshness budgets api/health.js declares for them.
+  // freshness budgets api/_health.js declares for them.
   const expected = {
     canadaRoads: 900,   // seed-provincial-511, 15min member interval
     albertaRoads: 900,  // same seeder, same interval

@@ -3,13 +3,13 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 
 import handler from '../api/mcp.ts';
-import { executeTool } from '../api/mcp/dispatch.ts';
-import { TOOL_REGISTRY, buildPublicTool } from '../api/mcp/registry/index.ts';
+import { executeTool } from '../api/mcp/_dispatch.ts';
+import { TOOL_REGISTRY, buildPublicTool } from '../api/mcp/registry/_index.ts';
 import { validateToolArgs } from '../api/mcp/_validate-args.ts';
-import { RpcValidationError } from '../api/mcp/billing-denial.ts';
+import { RpcValidationError } from '../api/mcp/_billing-denial.ts';
 import { CII_RISK_SCORE_CACHE_KEYS } from '../api/_cii-risk-cache-keys.js';
 import { filterNaturalDisastersPanelData } from '../api/mcp/_natural-disasters-reuse.ts';
-import { filterConflictPanelEvents } from '../api/mcp/registry/cache-tools.ts';
+import { filterConflictPanelEvents } from '../api/mcp/registry/_cache-tools.ts';
 import { filterRows, locationPoint, locator } from '../api/mcp/_geo-filter.ts';
 
 const originalFetch = globalThis.fetch;

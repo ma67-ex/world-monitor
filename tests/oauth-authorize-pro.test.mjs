@@ -32,7 +32,7 @@ const SECRET = 'test-secret-32bytes-1234567890ab';
 const NONCE = 'nonce_xyz';
 const USER_ID = 'user_pro_123';
 const CLIENT_ID = 'client_abc';
-const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
+const REDIRECT_URI = 'https://claude.ai/api/mcp/_auth_callback';
 const CODE_CHALLENGE = 'a'.repeat(43);
 const FIXED_CODE = 'code_fixed_uuid_for_tests';
 

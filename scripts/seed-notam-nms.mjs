@@ -42,7 +42,7 @@ export const CLOSURES_KEY = NMS_CLOSURES_KEY;
 export const CLOSURES_META_KEY = 'seed-meta:aviation:notam-nms-closures';
 export const STATE_KEY = 'notam:nms:state:v1';
 export const FULL_LOAD_GUARD_KEY = 'notam:nms:full-load-at:v1';
-// No TTL: api/health.js ACTIVATION_MARKERS keeps both NMS keys soft
+// No TTL: api/_health.js ACTIVATION_MARKERS keeps both NMS keys soft
 // (EMPTY_ON_DEMAND) until the first real publish, i.e. until production
 // NMS credentials are deployed. After that, missing data alarms normally.
 export const ACTIVATION_KEY = NMS_ACTIVATION_KEY;

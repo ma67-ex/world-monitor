@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import { gtfsRtHeaderContentMeta } from '../scripts/lib/gtfsrt.mjs';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -83,7 +83,7 @@ describe('TTC service-alerts production registration (#6623)', () => {
     // Three carriers, and all three had the colon form. A probe on an unwritten
     // key is invisible, not loud — so pin them together rather than one by one.
     assert.match(
-      read('api/seed-health.js'),
+      read('api/_seed-health.js'),
       /'transit:ttc:alerts':\s*\{ key: 'seed-meta:transit:ttc-alerts',\s*intervalMin:\s*15/,
     );
     assert.equal(healthTesting.SEED_META.ttcAlerts.key, 'seed-meta:transit:ttc-alerts');

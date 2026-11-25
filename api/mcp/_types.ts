@@ -3,8 +3,8 @@
 // from anywhere without creating evaluation-order surprises or cycles.
 
 import type { BillingVerificationStatus } from '../../server/_shared/entitlement-check';
-import type { McpBudget } from './quota';
-import type { SpokenNarrator } from './spoken';
+import type { McpBudget } from './_quota';
+import type { SpokenNarrator } from './_spoken';
 
 // ---------------------------------------------------------------------------
 // Auth-context shape passed into tool _execute. U7 widened the previous
@@ -59,14 +59,14 @@ export type ConflictSourceObservation = {
 export interface McpToolExecutionContext {
   readAccountAllowance?: () => Promise<import('./_account-allowance').McpAllowanceStatus>;
   // The checkout session dispatch already created for `start_upgrade` (#9144).
-  startUpgradeResult?: import('./checkout').StartUpgradeResult;
+  startUpgradeResult?: import('./_checkout').StartUpgradeResult;
   // Set only by dispatch for a host that must not see these tools (ChatGPT,
   // host-policy.ts). describe_tool treats them as unknown.
   hiddenTools?: ReadonlySet<string>;
   // Set with hiddenTools: describe_tool returns the same inform-only schema
   // copy that host's tools/list carries.
   informOnly?: true;
-  panelRequest?: import('./panel-requests').PaidPanelAdmission;
+  panelRequest?: import('./_panel-requests').PaidPanelAdmission;
   panelScope?: 'forecasts';
   // Set only by dispatch for an original forecast read billed per tool call.
   perToolForecastRead?: true;
@@ -140,7 +140,7 @@ export interface BaseToolDef {
   // `response_mode: "spoken"` (#9722). A tool that declares a narrator
   // advertises `response_mode` in its input schema and the spoken branch in
   // its output schema; the dispatcher replaces the finished payload with the
-  // narrator's 2-3 sentence envelope (api/mcp/spoken.ts). Declared HERE, on
+  // narrator's 2-3 sentence envelope (api/mcp/_spoken.ts). Declared HERE, on
   // the tool, so the roster is the registry itself. The narrator sees the
   // payload a full call would serialize after filters and presentation but
   // before any output-budget fit (the envelope is small, so the fit is
@@ -260,7 +260,7 @@ export interface BaseToolDef {
 // run kept a 98-hour-old CN payload while reading fresh.
 //
 // The CONSUMER owns both the scope and the budget, exactly as
-// api/health.js::SEED_META does — a producer that could narrow `countries` or
+// api/_health.js::SEED_META does — a producer that could narrow `countries` or
 // widen `budgetMinutes` could certify its own stale observation.
 export interface ContentFreshnessRequirement {
   countries: string[];
@@ -275,7 +275,7 @@ export interface FreshnessCheck {
   honorSourceError?: boolean;
   // When true, `stale` additionally reflects the seed-meta content-age trio
   // (newestItemAt / oldestItemAt / maxContentAgeMin) via the shared assessor
-  // in api/_content-age.js — the same rule api/health.js classifyKey applies,
+  // in api/_content-age.js — the same rule api/_health.js classifyKey applies,
   // so the two surfaces cannot answer differently for one key (#7141).
   //
   // Opt-in is declared HERE, on the check, not inferred from the presence of
@@ -475,7 +475,7 @@ export interface PublicToolShape {
 // `error` exists because Upstash reports per-command failures inside an
 // otherwise-successful 200 — the shape readExistsFlags branches on. While this
 // omitted `error`, a consumer could not read that field without a local cast
-// (api/mcp/dispatch.ts carried one, with a comment saying so, until #6152).
+// (api/mcp/_dispatch.ts carried one, with a comment saying so, until #6152).
 //
 // PRECONDITION (#7674): the production binding (PRODUCTION_DEPS.redisPipeline)
 // sends commands VERBATIM (raw = true default) because the MCP quota and
@@ -564,7 +564,7 @@ export interface McpHandlerDeps {
   redisPipeline: PipelineFn;
   // `start_upgrade` checkout relay (#9144). Optional so existing fixtures keep
   // compiling; dispatch falls back to the production Convex relay.
-  createCheckout?: import('./checkout').McpCreateCheckout;
+  createCheckout?: import('./_checkout').McpCreateCheckout;
 }
 
 export interface AuthResolution {

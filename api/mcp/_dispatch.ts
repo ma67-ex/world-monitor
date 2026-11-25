@@ -15,29 +15,29 @@ import { secondsUntilUtcMidnight } from '../../server/_shared/pro-mcp-token';
 import { OPERATOR_KEY_DAILY_CEILINGS, reportHighUsageIfCrossed } from '../../server/_shared/high-usage-alarm';
 import { hashKeySync } from '../../server/_shared/usage-identity';
 import { readAccountAllowance } from './_account-allowance';
-import { applyPerMinuteLimit, getMcpBillingVerificationDenial, runContextPreChecks, wwwAuthHeader } from './auth';
+import { applyPerMinuteLimit, getMcpBillingVerificationDenial, runContextPreChecks, wwwAuthHeader } from './_auth';
 import { getClientIp } from '../../server/_shared/client-ip';
-import { FeedbackRejectedError, REPORT_ISSUE_TOOL } from './registry/feedback-tools';
-import { BillingDenialError, RpcValidationError, ToolBackoffError, UpstreamHttpError } from './billing-denial';
+import { FeedbackRejectedError, REPORT_ISSUE_TOOL } from './registry/_feedback-tools';
+import { BillingDenialError, RpcValidationError, ToolBackoffError, UpstreamHttpError } from './_billing-denial';
 import {
   BothSourcesFailedError,
   ToolFetchError,
   createMcpToolExecutionContext,
   downstreamErrorTags,
-} from './downstream';
-import { mcpErrorFingerprint } from './error-fingerprint';
-import { argBool, argStrList, summarizeData } from './filters';
-import { evaluateFreshness } from './freshness';
-import { applyJmespath } from './jmespath';
-import { admitChokepointPanel, admitConflictPanel, admitCountryPanel, admitDisasterPanel, admitForecastPanel, admitMarketPanel, admitNewsIntelligencePanel, admitNewsPanel, admitPredictionPanel, admitWorldBriefPanel, authorizePanelRead, PANEL_READ_LIMIT, PanelRequestError, type PaidPanelAdmission } from './panel-requests';
+} from './_downstream';
+import { mcpErrorFingerprint } from './_error-fingerprint';
+import { argBool, argStrList, summarizeData } from './_filters';
+import { evaluateFreshness } from './_freshness';
+import { applyJmespath } from './_jmespath';
+import { admitChokepointPanel, admitConflictPanel, admitCountryPanel, admitDisasterPanel, admitForecastPanel, admitMarketPanel, admitNewsIntelligencePanel, admitNewsPanel, admitPredictionPanel, admitWorldBriefPanel, authorizePanelRead, PANEL_READ_LIMIT, PanelRequestError, type PaidPanelAdmission } from './_panel-requests';
 import { parseNewsDashboardRequest } from '../../shared/plugin-news-view';
 import { forecastTheaterReadSchema } from '../../shared/forecast-theaters';
 import { chokepointPanelViewSchema, conflictPanelViewSchema, disasterPanelViewSchema, forecastCaseReadSchema, forecastPanelReadSchema, marketPanelViewSchema, newsIntelligencePanelViewSchema, predictionPanelViewSchema, worldBriefPanelViewSchema, type PanelUsage } from '../../shared/panel-admission';
-import { isSharedRestCounter, readDailyAllowance, reserveQuota, resolveDailyLimit, type McpBudget } from './quota';
-import { reserveFreeAccountAllowance } from './free-account-allowance';
-import { buildMcpStructuredDenial, type McpDenial } from './upgrade';
-import { CHATGPT_HIDDEN_TOOLS, isChatGptHost } from './host-policy';
-import { pointerOnlyNewsResult } from './chatgpt-news';
+import { isSharedRestCounter, readDailyAllowance, reserveQuota, resolveDailyLimit, type McpBudget } from './_quota';
+import { reserveFreeAccountAllowance } from './_free-account-allowance';
+import { buildMcpStructuredDenial, type McpDenial } from './_upgrade';
+import { CHATGPT_HIDDEN_TOOLS, isChatGptHost } from './_host-policy';
+import { pointerOnlyNewsResult } from './_chatgpt-news';
 import { MCP_UPGRADE_URL } from '../../shared/mcp-attribution';
 import {
   checkoutProductIdForPlan,
@@ -45,26 +45,26 @@ import {
   START_UPGRADE_TOOL,
   startUpgradeCheckout,
   type StartUpgradeResult,
-} from './checkout';
-import { filterConflictPanelEvents, isOrdinaryMarketDefault, presentConflictEvents, presentDefaultMarketData, projectConflictSourceObservation } from './registry/cache-tools';
-import { isQuotaExemptMetadataTool, toolAccess, toolWeight, TOOL_ALIASES, TOOL_REGISTRY } from './registry/index';
-import { rpcError, rpcOk, withMcpNoStore } from './rpc';
-import { McpSourceUnavailableError } from './source-unavailable';
-import { buildSpokenEnvelope, recordStaleFreshnessKeys, spokenLanguageOf } from './spoken';
-import { applyDeprecationNotice, buildStructuredContent } from './structured-content';
+} from './_checkout';
+import { filterConflictPanelEvents, isOrdinaryMarketDefault, presentConflictEvents, presentDefaultMarketData, projectConflictSourceObservation } from './registry/_cache-tools';
+import { isQuotaExemptMetadataTool, toolAccess, toolWeight, TOOL_ALIASES, TOOL_REGISTRY } from './registry/_index';
+import { rpcError, rpcOk, withMcpNoStore } from './_rpc';
+import { McpSourceUnavailableError } from './_source-unavailable';
+import { buildSpokenEnvelope, recordStaleFreshnessKeys, spokenLanguageOf } from './_spoken';
+import { applyDeprecationNotice, buildStructuredContent } from './_structured-content';
 import {
   principalIdForLog,
   telemetryEnabled,
-} from './telemetry';
-import { recordToolCall, setUsageDescribeMiss, type McpUsage } from './usage';
+} from './_telemetry';
+import { recordToolCall, setUsageDescribeMiss, type McpUsage } from './_usage';
 import type {
   CacheToolDef,
   ConflictSourceObservation,
   McpAuthContext,
   McpHandlerDeps,
   McpToolExecutionContext,
-} from './types';
-import { utf8ByteLength } from './utils';
+} from './_types';
+import { utf8ByteLength } from './_utils';
 // Currently the only stored-contract violation a post-filter can raise; add to this seam
 // rather than widening the catch below if another dataset grows one.
 import { isPhysicalDivergenceContractError as isMcpStoredContractError } from '../../server/_shared/physical-divergence-snapshot';
@@ -209,8 +209,8 @@ async function executeCacheTool(
   const activationStates = readExistsFlags(activationResults, activationKeys);
   // A marker this tool needed could not be read, so `stale` below was computed
   // WITHOUT knowing whether the producer has ever published. Both health
-  // surfaces publish exactly this as `activationUnknown` (api/health.js,
-  // api/seed-health.js) for a reason api/health.js states outright: otherwise a
+  // surfaces publish exactly this as `activationUnknown` (api/_health.js,
+  // api/_seed-health.js) for a reason api/_health.js states outright: otherwise a
   // verdict resting on an unreadable marker is byte-identical to one resting on
   // evidence, and the two need different remediations. MCP alarmed on this but
   // told its CALLER nothing — `stale: true` looked the same whether the marker
@@ -225,7 +225,7 @@ async function executeCacheTool(
     });
   }
   // Sample wall time AFTER the Redis reads, never at function entry. The same
-  // rule api/health.js applies via snapshotNow(): a request that begins inside
+  // rule api/_health.js applies via snapshotNow(): a request that begins inside
   // an activation window but finishes after it must not report the grace as
   // still live, or MCP briefly disagrees with the health surfaces at the exact
   // instant the deadline passes. `now` stays injectable as a test seam.
@@ -469,7 +469,7 @@ const REGISTERED_TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_REGISTRY.map((to
 
 // #8721 phase 7: an error that suggests a bug (an unexpected tool failure) or
 // a missing capability (an unknown tool) names the tool that takes a report.
-// The handler's exit adds `requestId` beside it (api/mcp/request-id.ts). Known
+// The handler's exit adds `requestId` beside it (api/mcp/_request-id.ts). Known
 // states, such as billing denials, rate limits, validation errors, source
 // outages and report_issue's own refusals, do not carry it.
 const REPORT_GUIDANCE = { reportWith: REPORT_ISSUE_TOOL } as const;
@@ -514,7 +514,7 @@ export async function dispatchToolsCall(
   body: { id?: unknown; params?: unknown },
   corsHeaders: Record<string, string>,
   ctx?: { waitUntil: (p: Promise<unknown>) => void },
-  // Budget resolved by the context pre-check (api/mcp/auth.ts) from the
+  // Budget resolved by the context pre-check (api/mcp/_auth.ts) from the
   // entitlement it already fetched: which counter to charge and its ceiling.
   // Omitted → the dedicated Pro counter at `PRO_DAILY_QUOTA_LIMIT`, so a caller
   // that skips the pre-check inherits the plan default rather than a wider cap.
@@ -681,7 +681,7 @@ export async function dispatchToolsCall(
   // same classifier as the advertised catalog and are denied before metering.
   // A tool with `_execute` fans out to server/gateway.ts, which runs its own
   // checkProMcpAccess re-check that this feature deliberately does not relax
-  // (see api/mcp/types.ts's `freeAccountAllowance` note). Admitting one would
+  // (see api/mcp/_types.ts's `freeAccountAllowance` note). Admitting one would
   // charge a free slot and then hand the caller a gateway 401 — burning the
   // day's allowance on errors it can never convert into data. Refuse BEFORE the
   // reservation so no slot is spent.
@@ -1401,7 +1401,7 @@ export async function dispatchToolsCall(
       } : {}),
       ctx,
       // Split the api/mcp catch-all (WORLDMONITOR-T8) into per-tool,
-      // per-status groups — see api/mcp/error-fingerprint.ts.
+      // per-status groups — see api/mcp/_error-fingerprint.ts.
       fingerprint: mcpErrorFingerprint('tool-execution', tool.name, err),
       ...(isClient4xx || isExpectedDenial || isExpectedSourceOutage || isExpectedRefusal ? { level: 'warning' as const } : {}),
     });

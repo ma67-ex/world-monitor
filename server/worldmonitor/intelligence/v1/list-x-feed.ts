@@ -129,7 +129,7 @@ export const listXFeed: IntelligenceServiceHandler['listXFeed'] = async (
     };
   } catch (error) {
     // Fixed strings only: exception text can carry internal hostnames or
-    // cache-key names. Same vocabulary as the legacy api/x-feed.js.
+    // cache-key names. Same vocabulary as the legacy api/_x-feed.js.
     // sentry-coverage-ok: a relay blip (restart, timeout) is an expected
     // degraded state — the response carries enabled:false and the client
     // treats it as "relay starting"; relay health is monitored on Railway.

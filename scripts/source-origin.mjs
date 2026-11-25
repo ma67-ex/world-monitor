@@ -67,6 +67,10 @@ const INTERNATIONAL_HOST_SUFFIXES = [
 // Host → ISO 3166-1 alpha-2, 'EU', or null (international).
 // Only hosts that cannot be inferred from a real ccTLD or government suffix.
 const HOST_ORIGINS = Object.freeze({
+  "lemmy.world": "US",
+  "ix.cnn.io": "US",
+  "insideclimatenews.org": "US",
+  "api.groq.com": "US",
   "24ur.com": "SI",
   "abs-cbn.com": "PH",
   "addisstandard.com": "ET",
@@ -919,6 +923,12 @@ const HOST_ORIGINS = Object.freeze({
 // Provider-level overrides win when the host is a CDN, cloud, or shared
 // platform that would otherwise point at the wrong country.
 const PROVIDER_ORIGINS = Object.freeze({
+  "www.numbeo.com": "RS",
+  "National Stock Exchange of India (NSE)": "IN",
+  "tile.openstreetmap.org": "GB",
+  "terrain.reearth.land": "JP",
+  "services.arcgisonline.com": "US",
+  "National Stock Exchange of India (NSE) archives": "IN",
   'US Restricted Parties feed (Tensorust LLC)': 'US',
   "BioBioChile": "CL",
   "The Sofia Globe": "BG",

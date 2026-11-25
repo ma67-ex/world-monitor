@@ -5,7 +5,7 @@ import { lua, lauxlib, lualib, to_luastring, to_jsstring } from 'fengari';
 import type { GetCableHealthResponse } from '../src/generated/server/worldmonitor/infrastructure/v1/service_server';
 import { getCachedJson, __resetKeyPrefixCacheForTests } from '../server/_shared/redis';
 import { getCableHealth } from '../server/worldmonitor/infrastructure/v1/get-cable-health';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { cableHealthToDigestInput } from '../shared/analysis-composite-adapters';
 import { sidecarCacheGet, sidecarCacheSet } from '../server/_shared/sidecar-cache';
 

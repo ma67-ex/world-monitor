@@ -11,7 +11,7 @@ delete process.env.NODE_TEST_CONTEXT;
 process.env.VITE_SENTRY_DSN = 'https://public@example.ingest.sentry.io/12345';
 await import('../api/_sentry-edge.js');
 Object.assign(process.env, originalEnv);
-const { default: handler } = await import('../api/x-feed.js');
+const { default: handler } = await import('../api/_x-feed.js');
 const { issueSessionToken } = await import('../api/_session.js');
 const { __resetRateLimitForTest } = await import('../api/_rate-limit.js');
 

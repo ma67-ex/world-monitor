@@ -35,7 +35,7 @@ after(() => {
   }
 });
 
-const { default: handler } = await import('../api/cache-purge.js');
+const { default: handler } = await import('../api/_cache-purge.js');
 
 function purge(body) {
   return handler(new Request('https://api.worldmonitor.app/api/cache-purge', {

@@ -3,7 +3,7 @@ import { redisPipeline } from '../_upstash-json.js';
 import { CII_FORMULA_VERSION } from '../../server/worldmonitor/intelligence/v1/_risk-config';
 import { CII_COUNTRY_CODES } from '../../shared/cii-weights';
 import { buildCiiHistory, buildCiiMovers, CII_DAY_MS, CII_HISTORY_MAX_AGE_MS, parseCiiDailyPoints, type CiiDailyPoint } from '../../shared/cii-daily-history';
-import { RpcValidationError } from './billing-denial';
+import { RpcValidationError } from './_billing-denial';
 
 export function ciiHistoryDays(value: unknown, name: 'history_days' | 'movers_days'): number | undefined {
   if (value === undefined) return undefined;

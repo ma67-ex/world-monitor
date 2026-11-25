@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 
 import {
   parseEntsoEPrice,
@@ -889,7 +889,7 @@ describe('electricity daily schedule margin', () => {
     assert.equal(classify(cfg.maxStaleMin + 1).status, 'STALE_SEED');
     assert.equal(classify(3614).status, 'STALE_SEED', 'observed outage stays visible');
     assert.ok(ELECTRICITY_TTL_SECONDS > cfg.maxStaleMin * 60);
-    const mcp = readFileSync(new URL('../api/mcp/registry/cache-tools.ts', import.meta.url), 'utf8');
+    const mcp = readFileSync(new URL('../api/mcp/registry/_cache-tools.ts', import.meta.url), 'utf8');
     assert.match(mcp, new RegExp(`seed-meta:energy:electricity-prices'[^\\n]+maxStaleMin: ${cfg.maxStaleMin}`));
   });
 });

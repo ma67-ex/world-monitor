@@ -60,7 +60,7 @@ function stripTrailingVersion(stripped: string): string {
 
 // Explicit overrides for cases where the template/version strip still
 // diverges from the real seed-meta key. Keep this table short: add an
-// entry only when verified against api/seed-health.js, api/health.js,
+// entry only when verified against api/_seed-health.js, api/_health.js,
 // or the relevant scripts/seed-*.mjs runSeed() / writeExtraKeyWithMeta
 // call.
 //
@@ -83,9 +83,9 @@ const SOURCE_KEY_META_OVERRIDES: Readonly<Record<string, string>> = {
   // (seed-meta:economic:bis-dsr, seed-meta:economic:bis-property-residential,
   // seed-meta:economic:bis-property-commercial) so a DSR-only outage does
   // not falsely mark the property datasets as fresh (and vice versa).
-  // These mirror the per-dataset SEED_META entries in api/health.js.
+  // These mirror the per-dataset SEED_META entries in api/_health.js.
   // The aggregate seed-meta:economic:bis-extended key still exists as a
-  // "seeder ran" signal read by api/seed-health.js; do not remove it, but
+  // "seeder ran" signal read by api/_seed-health.js; do not remove it, but
   // this resilience-freshness map must not collapse to it.
   'economic:bis:dsr': 'economic:bis-dsr',
   'economic:bis:property-residential': 'economic:bis-property-residential',
@@ -97,7 +97,7 @@ const SOURCE_KEY_META_OVERRIDES: Readonly<Record<string, string>> = {
   'economic:energy:v1:all': 'economic:energy-prices',
   // OWID energy mix seeder: the data keys live under energy:mix:v1:{ISO2}
   // but the seed-meta is seed-meta:economic:owid-energy-mix (both
-  // energyExposure and energyMixAll in api/health.js point at it).
+  // energyExposure and energyMixAll in api/_health.js point at it).
   'energy:mix': 'economic:owid-energy-mix',
   // GIE gas storage per-country keys share one meta key.
   'energy:gas-storage': 'energy:gas-storage-countries',
@@ -302,7 +302,7 @@ export async function readFreshnessMap(
           // P2 fix: a failed seed run writes fetchedAt: Date.now() but
           // status: 'error' while preserving the prior snapshot via
           // extendExistingTtl. Treat non-ok meta as missing so the
-          // dimension classifies as stale, matching api/health.js behavior.
+          // dimension classifies as stale, matching api/_health.js behavior.
           //
           // P3 follow-up: legacy quiet-period writes can still refresh
           // bare seed-meta with recordCount:0 and no status. Treat that as

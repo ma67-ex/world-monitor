@@ -55,7 +55,7 @@ Fixed in PR #8305.
 
 | Client | Callback(s) | Evidence |
 |---|---|---|
-| Claude | `https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback` | pre-existing |
+| Claude | `https://claude.ai/api/mcp/_auth_callback`, `https://claude.com/api/mcp/_auth_callback` | pre-existing |
 | Cursor Agents, Cursor web, Grok Bot | `https://www.cursor.com/agents/mcp/oauth/callback`, `cursor://anysphere.cursor-mcp/oauth/callback` | cursor.com/docs/mcp; Cursor forum staff reply |
 | ChatGPT | `https://chatgpt.com/connector_platform_oauth_redirect` | developers.openai.com/plugins/build/auth |
 | Grok | `https://grok.com/connectors-oauth-exchange-code/`, `https://console.x.ai/connectors-oauth-exchange-code/` | grok.com/oauth/mcp-client.json (fetched live) |

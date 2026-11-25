@@ -25,7 +25,7 @@ write('api/_relay.js', [
   'export function getRelayBaseUrl() { return "x"; }',
   'export function createRelayHandler(cfg) { return async (req) => (cfg.requireRateLimit ? checkRateLimit(req, {}) : null); }',
 ].join('\n'));
-write('api/mcp/auth.ts', [
+write('api/mcp/_auth.ts', [
   "import { checkRateLimit } from '../_rate-limit.js';",
   'export async function applyPerMinuteLimit(r: Request) { return checkRateLimit(r, {}); }',
   'export async function applyAnonDiscoveryLimit(r: Request) { return checkRateLimit(r, {}); }',
@@ -35,7 +35,7 @@ write('api/mcp/auth.ts', [
 write('api/bare.js', handler('  return new Response("ok");'));
 write('api/helper-only.js', `import { getRelayBaseUrl } from './_relay.js';\n${handler('  return fetch(getRelayBaseUrl());')}`);
 write('api/direct.js', `import { checkRateLimit } from './_rate-limit.js';\n${handler('  const limited = await checkRateLimit(req, {});\n  return limited ?? new Response("ok");')}`);
-write('api/relay.js', "import { createRelayHandler } from './_relay.js';\nexport default createRelayHandler({ requireRateLimit: true });\n");
+write('api/_relay.js', "import { createRelayHandler } from './_relay.js';\nexport default createRelayHandler({ requireRateLimit: true });\n");
 write('api/relay-overridden.js', "import { createRelayHandler } from './_relay.js';\nconst off = { requireRateLimit: false };\nexport default createRelayHandler({ requireRateLimit: true, ...off });\n");
 write('api/local-alias.ts', "import handler from './direct.js';\nexport { handler as default };\n");
 write('api/relay-unlimited.js', "import { createRelayHandler } from './_relay.js';\nexport default createRelayHandler({ relayPath: '/x' });\n");
@@ -93,7 +93,7 @@ describe('standalone route admission audit', () => {
     const { admission } = audit();
     assert.equal(admission.get('api/direct.js'), 'checkRateLimit');
     assert.equal(admission.get('api/comment-with-glob.js'), 'checkRateLimit');
-    assert.equal(admission.get('api/relay.js'), 'createRelayHandler');
+    assert.equal(admission.get('api/_relay.js'), 'createRelayHandler');
     assert.equal(admission.get('api/upstash.ts'), 'Ratelimit.limit');
     assert.equal(admission.get('api/upstash-factory.js'), 'Ratelimit.limit');
     assert.equal(admission.get('api/mcp-route.ts'), 'applyAnonDiscoveryLimit');
@@ -117,7 +117,7 @@ describe('standalone route admission audit', () => {
 
   it('a delegate that stops calling a limiter is reported even when its siblings still do', () => {
     assert.deepEqual(audit().problems, []);
-    write('api/mcp/auth.ts', [
+    write('api/mcp/_auth.ts', [
       "import { checkRateLimit } from '../_rate-limit.js';",
       'const viaHelper = (r: Request) => checkRateLimit(r, {});',
       'export async function applyPerMinuteLimit(r: Request) { return viaHelper(r); }',

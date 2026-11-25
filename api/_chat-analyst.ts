@@ -176,7 +176,7 @@ export default async function handler(req: Request): Promise<Response> {
   // and, while individually fail-soft today, this route had NO server-side
   // capture, so any 5xx surfaced only as the browser's `API 500` message with
   // no stack (WORLDMONITOR-SV). Mirror the sibling premium edge route
-  // (api/latest-brief.ts): capture server-side for a real trace, and return a
+  // (api/_latest-brief.ts): capture server-side for a real trace, and return a
   // CORS-correct transient 503 the panel can render. 503 (not 403) so a
   // transient dependency blip never misclassifies a paying Pro user as
   // unsubscribed.
@@ -196,7 +196,7 @@ export default async function handler(req: Request): Promise<Response> {
       // Selling a subscription to someone who is merely signed out is both wrong
       // and unactionable, and it left the client's `sign_in_required` verdict
       // (#5608) unreachable on this route — every denial arrived as a 403.
-      // Matches api/latest-brief.ts, which has always answered 401 here.
+      // Matches api/_latest-brief.ts, which has always answered 401 here.
       if (premiumIdentity.unauthenticated) {
         return json({ error: 'UNAUTHENTICATED' }, 401, corsHeaders);
       }

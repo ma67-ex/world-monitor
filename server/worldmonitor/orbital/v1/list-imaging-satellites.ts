@@ -24,7 +24,7 @@ import { ORBITAL_CATALOG_KEY } from '../../../_shared/cache-keys';
 import { readCachedJson } from '../../../_shared/redis';
 import { markNoStoreFallbackResponse } from '../../../_shared/response-headers';
 
-/** Must equal api/health.js SEED_META.orbitalCatalog.maxStaleMin; pinned by tests. */
+/** Must equal api/_health.js SEED_META.orbitalCatalog.maxStaleMin; pinned by tests. */
 export const ORBITAL_CATALOG_MAX_STALE_MINUTES = 540;
 
 interface StoredSatellite {

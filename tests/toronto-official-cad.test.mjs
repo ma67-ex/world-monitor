@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import {
   TFS_FEED_URL,
   TFS_HOST,
@@ -56,7 +56,7 @@ const TFS_SEEDER = readFileSync(join(root, 'scripts/seed-toronto-tfs.mjs'), 'utf
 const TPS_SEEDER = readFileSync(join(root, 'scripts/seed-toronto-tps.mjs'), 'utf8');
 const ATTRIBUTION = readFileSync(join(root, 'scripts/source-attribution.mjs'), 'utf8');
 const BUNDLE = readFileSync(join(root, 'scripts/seed-bundle-canada.mjs'), 'utf8');
-const HEALTH = readFileSync(join(root, 'api/health.js'), 'utf8');
+const HEALTH = readFileSync(join(root, 'api/_health.js'), 'utf8');
 const RELAY = readFileSync(join(root, 'scripts/ais-relay.cjs'), 'utf8');
 
 const NOW = Date.parse('2026-08-20T22:00:00.000Z');

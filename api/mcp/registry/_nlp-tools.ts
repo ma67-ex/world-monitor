@@ -44,12 +44,12 @@ import { CLAIM_CARD_MAX_HEADLINES, CLAIM_CARD_STATES, CLAIM_MAX_CHARS, buildClai
 import { FACT_CHECK_CAVEAT, FACT_CHECK_LABEL } from '../../../server/_shared/fact-checks';
 import { lookupFactChecks, type FactCheckLookup } from '../../../server/_shared/fact-check-search';
 import { searchClaimPool } from '../../../server/worldmonitor/news/v1/search-claim-headlines';
-import { buildAuthHeaders } from '../auth';
-import { fetchMcpDownstream } from '../downstream';
-import { assertToolFetchOk } from '../billing-denial';
-import { argStr, argStrList, ciIncludes } from '../filters';
-import { McpSourceUnavailableError } from '../source-unavailable';
-import type { ToolDef, McpToolExecutionContext } from '../types';
+import { buildAuthHeaders } from '../_auth';
+import { fetchMcpDownstream } from '../_downstream';
+import { assertToolFetchOk } from '../_billing-denial';
+import { argStr, argStrList, ciIncludes } from '../_filters';
+import { McpSourceUnavailableError } from '../_source-unavailable';
+import type { ToolDef, McpToolExecutionContext } from '../_types';
 
 // ── #5697 on-demand NLP intelligence utilities ──────────────────────────────
 // Four deterministic (classify_event excepted — enum-validated LLM) utilities

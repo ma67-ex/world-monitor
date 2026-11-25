@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { __testing__ as health } from '../api/health.js';
-import { executeTool } from '../api/mcp/dispatch.ts';
-import { CACHE_TOOLS } from '../api/mcp/registry/cache-tools.ts';
+import { __testing__ as health } from '../api/_health.js';
+import { executeTool } from '../api/mcp/_dispatch.ts';
+import { CACHE_TOOLS } from '../api/mcp/registry/_cache-tools.ts';
 import { accumulateHistory, parseSseIndexResponse, parseBdiIndices, parseFredShippingIndex, SHIPPING_SERIES } from '../scripts/seed-supply-chain-trade.mjs';
 import { validate } from './helpers/json-schema-mini.mjs';
 

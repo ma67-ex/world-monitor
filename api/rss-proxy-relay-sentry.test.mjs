@@ -1,5 +1,5 @@
 /**
- * Proves api/rss-proxy.js reports the RIGHT fetch/relay failures to Sentry.
+ * Proves api/_rss-proxy.js reports the RIGHT fetch/relay failures to Sentry.
  *
  * Lives in its own file, not api/rss-proxy.test.mjs, because the seam is the
  * envelope fetch: `_sentry-common.js` parses the DSN ONCE at module load and
@@ -98,7 +98,7 @@ test('a relay-retry AbortError is not reported to Sentry (WORLDMONITOR-11G)', as
   // fetchViaRailway aborts on the feed timeout budget. That AbortError is
   // routine upstream latency on a best-effort SECOND attempt whose failure the
   // caller never sees — the same judgement the outer catch already makes for
-  // `step: 'fetch'` and #7438 made for api/telegram-feed.js.
+  // `step: 'fetch'` and #7438 made for api/_telegram-feed.js.
   const abort = new Error('The operation was aborted');
   abort.name = 'AbortError';
 

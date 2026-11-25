@@ -75,7 +75,7 @@ async function latestBrief(t: { mock: { method: Function } }, store: Record<stri
   const { __resetJwksForTests } = await import('../server/auth-session.ts');
   __resetJwksForTests();
   try {
-    const { default: handler } = await import('../api/latest-brief.ts');
+    const { default: handler } = await import('../api/_latest-brief.ts');
     const res = await handler(new Request('https://worldmonitor.app/api/latest-brief', {
       headers: { authorization: `Bearer ${jwt}`, origin: 'https://worldmonitor.app' },
     }));

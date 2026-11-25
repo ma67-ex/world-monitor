@@ -102,7 +102,7 @@ export function reportServerError(
     // status that is only there can be read one event at a time but never
     // aggregated. Both sibling fingerprint sites mirror every grouping
     // dimension into tags for that reason — analytics-collector-transport.ts
-    // tags `status` beside its fingerprint, and api/user-prefs.ts promotes
+    // tags `status` beside its fingerprint, and api/_user-prefs.ts promotes
     // fields out of `extra` explicitly to make them searchable. Without it
     // `kind:api_cf_5xx` is queryable but `status:503` is not, so triage cannot
     // ask "every 503 this week, across all routes" — the exact question that

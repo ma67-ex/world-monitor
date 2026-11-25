@@ -20,7 +20,7 @@
  *   - TTL = 3 days ≥ 3× 12h cron interval
  *   - atomic publish + extras written via writeExtraKey
  *   - seed-meta written under seed-meta:economic:bis-extended (runSeed)
- *   - health maxStaleMin = 24h = 2× interval (see api/health.js)
+ *   - health maxStaleMin = 24h = 2× interval (see api/_health.js)
  */
 
 import {
@@ -102,7 +102,7 @@ export const KEYS = {
 // published fresh entries — so a DSR-only outage cleanly stales bisDsr in
 // health.js while leaving bisPropertyResidential / bisPropertyCommercial green.
 // The aggregate seed-meta:economic:bis-extended (written by runSeed) is kept
-// as a "seeder ran at all" signal in api/seed-health.js.
+// as a "seeder ran at all" signal in api/_seed-health.js.
 export const META_KEYS = {
   dsr: 'seed-meta:economic:bis-dsr',
   spp: 'seed-meta:economic:bis-property-residential',

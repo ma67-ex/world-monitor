@@ -15,9 +15,9 @@ import {
   readBoundedResponseBody,
   RequestBodyTooLargeError,
   ResponseBodyTooLargeError,
-} from './mcp/bounded-body.js';
-import { MAX_JSON_RPC_BODY_BYTES, MAX_MCP_PROXY_RESPONSE_BYTES } from './mcp/body-limits.js';
-import { McpProxyJsonDepthError, parseMcpProxyJson } from './mcp/bounded-json.js';
+} from './mcp/_bounded-body.js';
+import { MAX_JSON_RPC_BODY_BYTES, MAX_MCP_PROXY_RESPONSE_BYTES } from './mcp/_body-limits.js';
+import { McpProxyJsonDepthError, parseMcpProxyJson } from './mcp/_bounded-json.js';
 import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, checkIpScopedEdgeProof, getClientIp, rateLimitKeyForIp } from '../server/_shared/rate-limit.js';
 import { captureSilentError } from './_sentry-node.js';
 import {
@@ -89,7 +89,7 @@ function logProxyCall(entry: {
   upstream_rpc_code?: number | null;
 }): void {
   // Structured audit log (#3805). Mirrors the `[name] { ...fields }` shape
-  // used by api/cache-purge.js so the existing log-ingest tooling parses it
+  // used by api/_cache-purge.js so the existing log-ingest tooling parses it
   // cleanly. Never include header VALUES — they often carry user-supplied
   // Authorization / API-Key secrets that the proxy intentionally forwards.
   console.log('[mcp-proxy]', {

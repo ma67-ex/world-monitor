@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isOrdinaryMarketDefault, presentDefaultMarketData } from '../api/mcp/registry/cache-tools.ts';
+import { isOrdinaryMarketDefault, presentDefaultMarketData } from '../api/mcp/registry/_cache-tools.ts';
 
 import {
   FIXTURES,

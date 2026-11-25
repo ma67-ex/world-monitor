@@ -3,7 +3,7 @@ name: 'Open Data: Chokepoint Status Snapshot'
 # Publishes the public chokepoint status open dataset (/data/v1/chokepoints/)
 # from the public GetChokepointStatus endpoint. The snapshot job saves the API
 # response and a preview build as an artifact. The publish job writes that
-# day's snapshot straight to the Redis archive that api/open-data-chokepoints.js
+# day's snapshot straight to the Redis archive that api/_open-data-chokepoints.js
 # serves, so nothing waits on a pull request or a deploy. A manual run is a dry
 # run by default: it uploads the artifact and publishes nothing.
 
@@ -21,7 +21,7 @@ on:
       - scripts/build-open-data-chokepoints.mjs
       - tests/open-data-chokepoints.test.mjs
       - tests/open-data-chokepoints-archive.test.mjs
-      - api/open-data-chokepoints.js
+      - api/_open-data-chokepoints.js
       - .github/workflows/open-data-chokepoints.yml
 
 jobs:

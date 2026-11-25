@@ -29,7 +29,7 @@ const ORIGINAL_ENV = { ...process.env };
 let signToken: (claims: Record<string, unknown>) => Promise<string>;
 let signExpiredToken: (claims: Record<string, unknown>) => Promise<string>;
 let resolvePremiumCallerIdentity: typeof import('../server/_shared/premium-check.ts')['resolvePremiumCallerIdentity'];
-let widgetHandler: typeof import('../api/widget-agent.ts')['default'];
+let widgetHandler: typeof import('../api/_widget-agent.ts')['default'];
 let bearerEntitlements: Record<string, unknown>;
 const policyUsers: string[] = [];
 const cacheReads: string[] = [];
@@ -114,7 +114,7 @@ before(async () => {
   }) as typeof fetch;
 
   ({ resolvePremiumCallerIdentity } = await import('../server/_shared/premium-check.ts'));
-  ({ default: widgetHandler } = await import('../api/widget-agent.ts'));
+  ({ default: widgetHandler } = await import('../api/_widget-agent.ts'));
 });
 
 after(() => {
@@ -192,7 +192,7 @@ describe('the bearer arm of resolvePremiumCallerIdentity (#5619 follow-up)', () 
   });
 
   it('blocks restricted widget content before reserving spend or forwarding it to Anthropic', async () => {
-    const { __setWidgetAgentSpendDepsForTests } = await import('../api/widget-agent.ts');
+    const { __setWidgetAgentSpendDepsForTests } = await import('../api/_widget-agent.ts');
     let quotaCalls = 0;
     __setWidgetAgentSpendDepsForTests({ checkRateLimit: async () => null, runRedisPipeline: async () => { quotaCalls++; return [{ result: 1 }, { result: 1 }]; } });
     const original = globalThis.fetch;
@@ -213,7 +213,7 @@ describe('the bearer arm of resolvePremiumCallerIdentity (#5619 follow-up)', () 
     }
   });
   it('forwards an entitled widget request when its policy permits Anthropic', async () => {
-    const { __setWidgetAgentSpendDepsForTests } = await import('../api/widget-agent.ts');
+    const { __setWidgetAgentSpendDepsForTests } = await import('../api/_widget-agent.ts');
     __setWidgetAgentSpendDepsForTests({ checkRateLimit: async () => null, runRedisPipeline: async () => [{ result: 1 }, { result: 1 }] });
     const original = globalThis.fetch;
     let forwarded = false;
@@ -247,7 +247,7 @@ describe('the bearer arm of resolvePremiumCallerIdentity (#5619 follow-up)', () 
 
   it('rejects an expired paid marker at the widget gate', async () => {
     bearerEntitlements = { ...FREE_ROW, features: { ...FREE_ROW.features, tier: 1 }, validUntil: Date.now() - 1, billingStatus: 'renewal_verification_pending' };
-    const { __setWidgetAgentSpendDepsForTests } = await import('../api/widget-agent.ts');
+    const { __setWidgetAgentSpendDepsForTests } = await import('../api/_widget-agent.ts');
     let quotaCalls = 0;
     __setWidgetAgentSpendDepsForTests({ checkRateLimit: async () => null, runRedisPipeline: async () => { quotaCalls++; return [{ result: 1 }, { result: 1 }]; } });
     try {

@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import oref from '../api/oref-alerts.js';
+import oref from '../api/_oref-alerts.js';
 import { checkRateLimit } from '../api/_rate-limit.js';
 import { getCorsHeaders, getOriginDeniedCorsHeaders, isDisallowedOrigin } from '../api/_cors.js';
 import * as channelOAuthState from '../server/_shared/channel-oauth-state.ts';

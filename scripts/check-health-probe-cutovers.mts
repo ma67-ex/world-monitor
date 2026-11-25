@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const HEALTH_URL = new URL('../api/health.js', import.meta.url);
+const HEALTH_URL = new URL('../api/_health.js', import.meta.url);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -170,7 +170,7 @@ function resolveCommit(ref: string): string {
  */
 async function readBaseSeedMeta(ref: string) {
   const commit = resolveCommit(ref);
-  const source = execFileSync('git', ['show', `${commit}:api/health.js`], {
+  const source = execFileSync('git', ['show', `${commit}:api/_health.js`], {
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
   });
@@ -179,7 +179,7 @@ async function readBaseSeedMeta(ref: string) {
   try {
     const module = await import(temporaryUrl.href);
     if (!isRecord(module.__testing__) || !isRecord(module.__testing__.SEED_META)) {
-      throw new Error(`api/health.js at ${commit} does not export __testing__.SEED_META`);
+      throw new Error(`api/_health.js at ${commit} does not export __testing__.SEED_META`);
     }
     return { commit, seedMeta: module.__testing__.SEED_META };
   } finally {
@@ -194,7 +194,7 @@ async function main() {
     import(HEALTH_URL.href),
   ]);
   if (!isRecord(headModule.__testing__) || !isRecord(headModule.__testing__.SEED_META)) {
-    throw new Error('Current api/health.js does not export __testing__.SEED_META');
+    throw new Error('Current api/_health.js does not export __testing__.SEED_META');
   }
   const changed = validateHealthProbeCutovers({
     baseSeedMeta,

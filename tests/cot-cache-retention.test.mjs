@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { resolveSeedMetaTtl } from '../scripts/_seed-utils.mjs';
 import { mapCotPositioning } from '../server/worldmonitor/market/v1/get-cot-positioning.ts';
 

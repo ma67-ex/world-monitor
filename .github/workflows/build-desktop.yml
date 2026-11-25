@@ -594,7 +594,7 @@ jobs:
           echo "Servable (World Monitor identity) assets:"; printf '  %s\n' $SERVABLE
 
           MISSING=""
-          # Mirrors PLATFORM_PATTERNS in api/download.js — every platform the
+          # Mirrors PLATFORM_PATTERNS in api/_download.js — every platform the
           # download endpoint and README advertise. Kept in lockstep by
           # tests/desktop-one-binary-model.test.mjs, which parses both lists.
           for suffix in '_x64-setup\.exe$' '_x64_en-US\.msi$' '_aarch64\.dmg$' '_x64\.dmg$' '_amd64\.AppImage$' '_aarch64\.AppImage$'; do

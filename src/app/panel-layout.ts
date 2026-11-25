@@ -4174,7 +4174,7 @@ export class PanelLayoutManager implements AppModule {
 
     // Always create Pro and MCP add-panel blocks, always visible — this fork
     // has no billing stack behind either CTA (task 08 neutered the server-side
-    // gates on api/_widget-agent.ts and isCallerPremium, which api/mcp-proxy.ts
+    // gates on api/_widget-agent.ts and isCallerPremium, which api/_mcp-proxy.ts
     // uses). They used to be hidden behind hasPremiumAccess() (real upstream
     // Clerk/Convex Pro gate, predates this fork); task 18 (2026-08-24) only
     // removed the stale "PRO" badge on proBlock and missed this actual

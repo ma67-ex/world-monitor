@@ -491,7 +491,7 @@ describe('pair registry', () => {
   });
 
   it('holds each source to its health budget', () => {
-    const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+    const health = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
     for (const [name, { metaKey, maxAgeMin }] of Object.entries(SOURCES)) {
       const at = health.indexOf(`'${metaKey}'`);
       assert.ok(at > 0, `${name} meta key ${metaKey} is registered in health`);

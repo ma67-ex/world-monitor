@@ -11,8 +11,8 @@ import { afterEach, describe, it } from 'node:test';
 
 import { createDomainGateway } from '../server/gateway.ts';
 import { apiKeyChallenge, protectedResourceMetadataUrl, wwwAuthHeader } from '../api/_www-authenticate.ts';
-import { wwwAuthHeader as mcpWwwAuthHeader } from '../api/mcp/auth.ts';
-import resourceMetadata from '../api/oauth-protected-resource.ts';
+import { wwwAuthHeader as mcpWwwAuthHeader } from '../api/mcp/_auth.ts';
+import resourceMetadata from '../api/_oauth-protected-resource.ts';
 
 const VALID_KEY = 'www-authenticate-test-operator-key';
 const MCP_CHALLENGE = 'Bearer realm="worldmonitor", resource_metadata="https://worldmonitor.app/.well-known/oauth-protected-resource"';

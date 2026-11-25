@@ -55,6 +55,16 @@ import supplyChainCountryProductsHandler from './supply-chain/v1/_country-produc
 import supplyChainMultiSectorCostShockHandler from './supply-chain/v1/_multi-sector-cost-shock';
 // @ts-expect-error — JS module, no declaration file
 import supplyChainHormuzTrackerHandler from './supply-chain/_hormuz-tracker';
+import desktopAuthAuthorizeHandler from './desktop-auth/_authorize';
+import desktopAuthTokenHandler from './desktop-auth/_token';
+import desktopKeyStatusHandler from './desktop-key/_status';
+import embedEntitlementHandler from './embed/_entitlement';
+import embedMapFrameHandler from './embed/_map-frame';
+import embedSessionHandler from './embed/_session';
+import userPasskeyOfferHandler from './user/_passkey-offer';
+import mdTwinHandler from './_md-twin';
+// @ts-expect-error — JS module, no declaration file
+import openDataChokepointsHandler from './_open-data-chokepoints';
 
 type EdgeCtx = { waitUntil: (p: Promise<unknown>) => void };
 type EdgeHandler = (req: Request, ctx: EdgeCtx) => Response | Promise<Response>;
@@ -85,6 +95,15 @@ const REGISTRY: Record<string, EdgeHandler> = {
   'scenario/v1/run': scenarioRunHandler,
   'supply-chain/v1/country-products': supplyChainCountryProductsHandler,
   'supply-chain/v1/multi-sector-cost-shock': supplyChainMultiSectorCostShockHandler,
+  'desktop-auth/authorize': desktopAuthAuthorizeHandler,
+  'desktop-auth/token': desktopAuthTokenHandler,
+  'desktop-key/status': desktopKeyStatusHandler,
+  'embed/entitlement': embedEntitlementHandler,
+  'embed/map-frame': embedMapFrameHandler,
+  'embed/session': embedSessionHandler,
+  'user/passkey-offer': userPasskeyOfferHandler,
+  'md-twin': mdTwinHandler,
+  'open-data-chokepoints': openDataChokepointsHandler,
   'supply-chain/hormuz-tracker': supplyChainHormuzTrackerHandler,
 };
 

@@ -6,7 +6,7 @@ import { ApiError } from '../src/generated/server/worldmonitor/infrastructure/v1
 import { __resetKeyPrefixCacheForTests } from '../server/_shared/redis.ts';
 import { __resetRateLimitForTest as resetServerRateLimit } from '../server/_shared/rate-limit.ts';
 import { reverseGeocode } from '../server/worldmonitor/infrastructure/v1/reverse-geocode.ts';
-import edgeReverseGeocode from '../api/reverse-geocode.js';
+import edgeReverseGeocode from '../api/_reverse-geocode.js';
 import { __resetRateLimitForTest as resetEdgeRateLimit } from '../api/_rate-limit.js';
 import { GEOCODE_CACHE_DECIMALS, geocodeCacheCell, geocodeCacheKey } from '../shared/geocode-cache-key.js';
 import {
@@ -381,7 +381,7 @@ describe('reverse-geocode cache identity helper', () => {
     }
 
     const edgeRoute = await import('node:fs/promises').then((fs) => (
-      fs.readFile(new URL('../api/reverse-geocode.js', import.meta.url), 'utf8')
+      fs.readFile(new URL('../api/_reverse-geocode.js', import.meta.url), 'utf8')
     ));
     assert.match(edgeRoute, /from '\.\/_geocode-cache-key\.js'/);
     assert.doesNotMatch(edgeRoute, /from '\.\.\/shared\//);

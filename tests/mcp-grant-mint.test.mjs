@@ -17,8 +17,8 @@ import { strict as assert } from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'node:test';
 
 import { signGrant, verifyGrant, readGrantSecret, GrantConfigError } from '../api/_mcp-grant-hmac.ts';
-import { mintGrantHandler } from '../api/internal/mcp-grant-mint.ts';
-import { grantContextHandler } from '../api/internal/mcp-grant-context.ts';
+import { mintGrantHandler } from '../api/internal/_mcp-grant-mint.ts';
+import { grantContextHandler } from '../api/internal/_mcp-grant-context.ts';
 import { isAllowedRedirectUri } from '../api/oauth/_redirect-uri.js';
 import { OAUTH_BIND_COOKIE, hashOAuthBindValue } from '../api/oauth/_browser-binding.js';
 
@@ -55,7 +55,7 @@ const BIND_COOKIE_HEADER = `${OAUTH_BIND_COOKIE}=${BIND_VALUE}`;
 
 const BASE_NONCE_DATA = {
   client_id: 'client_abc',
-  redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+  redirect_uri: 'https://claude.ai/api/mcp/_auth_callback',
   code_challenge: 'a'.repeat(43),
   state: '',
   bind_hash: await hashOAuthBindValue(BIND_VALUE),
@@ -64,7 +64,7 @@ const BASE_NONCE_DATA = {
 
 const BASE_CLIENT_DATA = {
   client_name: 'Claude Desktop',
-  redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+  redirect_uris: ['https://claude.ai/api/mcp/_auth_callback'],
   last_used: FIXED_NOW - 5000,
 };
 
@@ -759,7 +759,7 @@ describe('grantContextHandler', () => {
   it('falls back to "Unknown Client" when client_name is missing', async () => {
     const redis = new Map();
     redis.set('oauth:nonce:nonce_xyz', BASE_NONCE_DATA);
-    redis.set('oauth:client:client_abc', { redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] });
+    redis.set('oauth:client:client_abc', { redirect_uris: ['https://claude.ai/api/mcp/_auth_callback'] });
     const { deps } = makeContextDeps({ redisGet: async (k) => redis.get(k) ?? null });
     const res = await grantContextHandler(makeGetReq('nonce_xyz'), deps);
     assert.equal(res.status, 200);

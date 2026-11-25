@@ -1,6 +1,6 @@
 // An on-demand bootstrap key is served from a caller-invariant public URL
 // (`?keys=<name>&public=1`) sitting behind a shared CDN. That CDN shield has no
-// idea how often the key's seeder publishes: api/bootstrap.js falls every
+// idea how often the key's seeder publishes: api/_bootstrap.js falls every
 // unprofiled on-demand key back to the SLOW tier, whose shield is s-maxage=7200
 // (2 hours).
 //
@@ -12,7 +12,7 @@
 // never sees the cached copy the browser got.
 //
 // So: for every on-demand key whose seeder declares a freshness budget in
-// api/health.js SEED_META, the CDN shield must not exceed that budget. #6763
+// api/_health.js SEED_META, the CDN shield must not exceed that budget. #6763
 // found bcOpen511 already violating it (90-minute budget, 120-minute shield)
 // and would have added canadaRoads and albertaRoads (45-minute budget) to the
 // list by moving them off the fast tier.
@@ -22,11 +22,11 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { __testing__ } from '../api/bootstrap.js';
+import { __testing__ } from '../api/_bootstrap.js';
 import { bootstrapTierKeyNames } from '../shared/bootstrap-tier-keys.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const healthSrc = readFileSync(join(root, 'api/health.js'), 'utf8');
+const healthSrc = readFileSync(join(root, 'api/_health.js'), 'utf8');
 
 /**
  * SEED_META writes budgets as digits (`45`), underscore-separated digits
@@ -64,7 +64,7 @@ function seedMetaBlock(key: string): string | null {
 }
 
 /**
- * The seeder freshness budget api/health.js declares for a bootstrap key, in
+ * The seeder freshness budget api/_health.js declares for a bootstrap key, in
  * minutes, or null when health does not probe it or declares no budget.
  * Read from SEED_META so the budget and the CDN shield cannot drift apart.
  */
@@ -104,7 +104,7 @@ function completeCacheServingWindowSeconds(header: string, shared: boolean): num
 }
 
 test('SEED_META budgets are actually readable, or this whole suite is vacuous', () => {
-  // Without this, a rename in api/health.js would turn every budget into null
+  // Without this, a rename in api/_health.js would turn every budget into null
   // and the guard below would pass by having nothing to check.
   assert.equal(healthMaxStaleMin('bcOpen511'), 90, 'plain digits');
   // A nested cutover block sits between the key and its closing brace.
@@ -136,7 +136,7 @@ test('no on-demand key is cached at the edge past its freshness budget', () => {
     if (shieldSec > budgetMin * 60) {
       violations.push(
         `${key}: CDN s-maxage=${shieldSec}s (${shieldSec / 60}min) exceeds the `
-        + `${budgetMin}min freshness budget api/health.js declares — add an `
+        + `${budgetMin}min freshness budget api/_health.js declares — add an `
         + 'ON_DEMAND_CACHE_PROFILES entry sized to the publisher interval',
       );
     }

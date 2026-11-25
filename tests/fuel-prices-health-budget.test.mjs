@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { CACHE_TTL } from '../scripts/seed-fuel-prices.mjs';
 
 // seed-fuel-prices runs once a week (Railway cron `0 6 * * 2`) and its data

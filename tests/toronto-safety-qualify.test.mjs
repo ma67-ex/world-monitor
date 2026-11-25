@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import { extractBundleSections } from './helpers/bundle-section-parser.mjs';
 import { bootstrapTierKeyNames } from '../shared/bootstrap-tier-keys.js';
 import { GTA_FIRE_KEY, GTA_POLICE_KEY, GTA_UPDATE_WRITER_ENABLED } from '../scripts/lib/gta-update.mjs';
@@ -162,9 +162,9 @@ describe('Toronto safety qualification wiring (#7012)', () => {
     assert.equal(Object.values(BOOTSTRAP_KEYS).includes(GTA_POLICE_KEY), false);
     assert.equal(Object.hasOwn(SEED_META, 'gtaUpdatePolice'), false);
     assert.equal(ON_DEMAND_KEYS.has('gtaUpdatePolice'), false);
-    const healthSrc = read('api/health.js');
+    const healthSrc = read('api/_health.js');
     assert.equal(/gtaupdate\.com|gta-update-police|safety:toronto:gta-update/.test(healthSrc), false);
-    const seedHealth = read('api/seed-health.js');
+    const seedHealth = read('api/_seed-health.js');
     assert.equal(SAFETY_HINT.test(seedHealth) && /gta-update/.test(seedHealth), false);
     const mcpGrant = read('src/mcp-grant-main.ts');
     assert.equal(/gtaupdate|gta-update/.test(mcpGrant), false);

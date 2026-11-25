@@ -5,7 +5,7 @@
  * Pro MCP daily quota usage. Reads the SAME Redis key shape that U7 writes
  * via INCR-first reservation in `api/mcp.ts` (`mcp:pro-usage:<userId>:<YYYY-MM-DD>`).
  * Single source of truth — the counter key comes from `budgetCounterKey` in
- * `api/mcp/quota.ts`, the same helper the reservation writes through, so a
+ * `api/mcp/_quota.ts`, the same helper the reservation writes through, so a
  * writer/reader drift cannot occur.
  *
  * Response shape:
@@ -20,7 +20,7 @@
  *
  * `limit` is the caller's PLAN allowance (plan 2026-07-25-001 U3b), resolved
  * from `features.planLimits.mcpCallsPerDay` through the SAME `resolveDailyLimit`
- * that `api/mcp/quota.ts` enforces with — `null` means unlimited. Before U3b
+ * that `api/mcp/_quota.ts` enforces with — `null` means unlimited. Before U3b
  * this reported a hardcoded 50, so a Pro Business user at 120 of 250 read
  * "50 / 50" in Settings while enforcement served them fine.
  *
@@ -65,11 +65,11 @@ import {
   resolveAccountMcpBudget,
   resolveMcpBudget,
   type McpBudget,
-} from '../mcp/quota';
+} from '../mcp/_quota';
 import {
   FREE_ACCOUNT_CALLS_PER_DAY,
   freeAccountCallsKey,
-} from '../mcp/free-account-allowance';
+} from '../mcp/_free-account-allowance';
 import { secondsUntilUtcMidnight } from '../../server/_shared/pro-mcp-token';
 
 /** Inner handler — exported for unit tests with injected deps. */

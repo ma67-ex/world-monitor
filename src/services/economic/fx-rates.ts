@@ -165,7 +165,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * On the path these mappers actually take today this is a no-op: the bootstrap
  * endpoint already strips the envelope before the client sees it
- * (`api/bootstrap.js:300` returns `unwrapEnvelope(parsed).data`). The guard is
+ * (`api/_bootstrap.js:300` returns `unwrapEnvelope(parsed).data`). The guard is
  * here for any reader that does NOT go through that endpoint — a server handler
  * or a direct cache read — because the failure it prevents is silent: an
  * enveloped payload has no `rates` key, so every mapper would return `[]` and

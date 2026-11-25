@@ -61,7 +61,7 @@ cd workers/api-cors-preflight && npm test
 # (false positives during deploys). CI already runs it after every Worker deploy
 # (the live-smoke job); run it by hand to check the currently-deployed Worker.
 # It is the only guard that reads the bytes users receive, including the
-# KV-served bootstrap tiers that never reach api/bootstrap.js.
+# KV-served bootstrap tiers that never reach api/_bootstrap.js.
 LIVE_SMOKE=1 tsx --test tests/cors-preflight-live.test.mjs
 ```
 

@@ -385,7 +385,7 @@ test("Toronto roads staleness budget covers its bundle cadence", () => {
   // The staleness budget must still cover the 2h bundle cadence. This is the
   // pairing that broke once already: the interval moved to 2h while the probe
   // kept a 45min budget, so a healthy publisher read STALE_SEED permanently.
-  const health = readFileSync(join(root, "api/health.js"), "utf8");
+  const health = readFileSync(join(root, "api/_health.js"), "utf8");
   const probe = /torontoRoads:\s*\{[\s\S]{0,200}?maxStaleMin:\s*(\d+)/.exec(health);
   assert.ok(probe, "torontoRoads must still have a health probe");
   assert.ok(

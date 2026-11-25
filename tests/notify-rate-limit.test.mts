@@ -6,7 +6,7 @@ import handler, {
   NOTIFY_WRITE_RATE_LIMIT,
   NOTIFY_WRITE_RATE_SCOPE,
   NOTIFY_WRITE_RATE_WINDOW,
-} from '../api/notify.ts';
+} from '../api/_notify.ts';
 
 const originalFetch = globalThis.fetch;
 const originalUpstashUrl = process.env.UPSTASH_REDIS_REST_URL;

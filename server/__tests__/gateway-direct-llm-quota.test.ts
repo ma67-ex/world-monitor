@@ -941,7 +941,7 @@ describe("direct LLM limit resolution by caller class", () => {
 
 // The reservation is charged BEFORE the handler runs, so every outcome that
 // serves no answer has to give the slot back through the reservation's own
-// rollback (#5147's open checklist item; the same defect api/chat-analyst.ts
+// rollback (#5147's open checklist item; the same defect api/_chat-analyst.ts
 // fixed for its self-metered reservation in #7217). The stub routes pin the
 // gateway's decision; the real intelligence routes pin that the handlers'
 // degraded envelopes actually raise the marker the gateway acts on.

@@ -3,7 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { main, fetchWorldBank } from '../scripts/seed-global-tenders.mjs';
 import { listGlobalTenders } from '../server/worldmonitor/economic/v1/list-global-tenders';
 import type { ListGlobalTendersRequest, ServerContext } from '../src/generated/server/worldmonitor/economic/v1/service_server';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { readSectionFreshness } from '../scripts/_bundle-runner.mjs';
 import { createTenderReceipt, TENDER_RECEIPTS_KEY } from '../scripts/_global-tender-receipts.mjs';
 import { withSeedLockFence } from './helpers/seed-lock-fence.mjs';

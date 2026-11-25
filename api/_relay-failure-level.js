@@ -20,7 +20,7 @@
  * hole: relay diagnostics quote syscall names in prose, and an unanchored
  * substring would read `upstream reported ECONNRESET to its peer` as a drop.
  *
- * Shared by api/telegram-feed.js and api/rss-proxy.js (WORLDMONITOR-17M).
+ * Shared by api/_telegram-feed.js and api/_rss-proxy.js (WORLDMONITOR-17M).
  *
  * @param {{ name?: string, message?: string, code?: string } | null | undefined} error
  * @returns {'warning' | 'error'}

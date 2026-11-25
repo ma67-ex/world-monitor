@@ -14,11 +14,11 @@ import { describe, it } from 'node:test';
 import {
   desktopAuthAuthorizeHandler,
   type DesktopAuthorizeDeps,
-} from '../api/desktop-auth/authorize.ts';
+} from '../api/desktop-auth/_authorize.ts';
 import {
   desktopAuthTokenHandler,
   type DesktopTokenDeps,
-} from '../api/desktop-auth/token.ts';
+} from '../api/desktop-auth/_token.ts';
 import {
   DESKTOP_AUTH_CODE_TTL_SECONDS,
   clientIp,

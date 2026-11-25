@@ -12,7 +12,7 @@ import {
   callBody,
 } from './helpers/mcp-pro-deps.mjs';
 import { buildOfficialChinaMacroFixture } from './helpers/china-macro-fixture.mjs';
-import { TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
+import { TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { documentedOutputSchema } from './helpers/mcp-output-schema.mjs';
 

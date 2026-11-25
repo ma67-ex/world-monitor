@@ -61,7 +61,7 @@ export default async function handler(request, ctx) {
   // unconfigured, so a Redis blip degrades to today's behaviour instead of
   // failing the lookup. (#6234)
   // `ctx` is forwarded so the degraded-path Sentry envelope survives isolate
-  // teardown, matching api/reverse-geocode.js. (#6412 review)
+  // teardown, matching api/_reverse-geocode.js. (#6412 review)
   const limited = await checkRateLimit(request, cors, {
     ctx,
     scope: RATE_LIMIT_SCOPE,

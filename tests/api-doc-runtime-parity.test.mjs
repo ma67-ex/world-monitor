@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import analyticsHealthHandler from '../api/analytics-health.js';
-import correlationRuntimeModeHandler from '../api/correlation-runtime-mode.js';
-import securityReportHandler from '../api/security/report.js';
+import analyticsHealthHandler from '../api/_analytics-health.js';
+import correlationRuntimeModeHandler from '../api/_correlation-runtime-mode.js';
+import securityReportHandler from '../api/security/_report.js';
 import middleware from '../middleware.ts';
 import { checkProMcpAccess } from '../server/_shared/pro-mcp-gate.ts';
 import { ENDPOINT_RATE_POLICIES } from '../server/_shared/rate-limit.ts';

@@ -17,8 +17,8 @@ import {
   readDailyAllowance,
   reserveQuota,
   resolveAccountMcpBudget,
-} from '../api/mcp/quota.ts';
-import { quotaHandler } from '../api/user/mcp-quota.ts';
+} from '../api/mcp/_quota.ts';
+import { quotaHandler } from '../api/user/_mcp-quota.ts';
 import { apiKeyDailyKey, apiKeyMemberDailyKey, checkBurst } from '../server/_shared/api-key-rate-limit.ts';
 import {
   __resetHighUsageAlarmForTests,

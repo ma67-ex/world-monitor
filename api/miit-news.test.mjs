@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, test } from 'node:test';
-import handler, { parseMiitNews, renderMiitRss } from './miit-news.js';
+import handler, { parseMiitNews, renderMiitRss } from './_miit-news.js';
 
 const NOW = Date.parse('2026-10-03T17:00:00Z');
 const ARTICLE = 'https://www.miit.gov.cn/zwgk/zcwj/wjfb/tz/art/2026/art_7d2e760b4be94217b8f55caec840b30d.html';

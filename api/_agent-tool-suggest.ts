@@ -1,5 +1,5 @@
-// Shared concierge routing used by the A2A endpoint (api/a2a.ts) and the
-// NLWeb /ask endpoint (api/ask.ts). Deliberately not NLU — a transparent
+// Shared concierge routing used by the A2A endpoint (api/_a2a.ts) and the
+// NLWeb /ask endpoint (api/_ask.ts). Deliberately not NLU — a transparent
 // token-overlap score over the same names + descriptions tools/list
 // publishes anonymously. Name hits outweigh description hits so
 // "chokepoint status" lands on get_chokepoint_status, not on every tool

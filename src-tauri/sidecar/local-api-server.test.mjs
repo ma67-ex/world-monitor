@@ -2664,7 +2664,7 @@ test('Docker rejects native administration without changing configuration, cache
     res.end('{"data":[{"id":"fixture-model"}]}');
   });
   const privatePort = await listen(privateProvider);
-  const relayModule = pathToFileURL(path.resolve(import.meta.dirname, '../../api/oref-alerts.js')).href;
+  const relayModule = pathToFileURL(path.resolve(import.meta.dirname, '../../api/_oref-alerts.js')).href;
   const localApi = await setupApiDir({
     'oref-alerts.js': `export { default } from ${JSON.stringify(relayModule)};`,
     'missing.js': `import './absent.js'; export default () => new Response('unreachable');`,

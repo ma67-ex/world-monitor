@@ -195,7 +195,7 @@ if (process.argv[1]?.endsWith('seed-national-debt.mjs')) {
   
     declareRecords,
     schemaVersion: 1,
-    // Matches api/health.js SEED_META.nationalDebt (60d = 2× monthly interval).
+    // Matches api/_health.js SEED_META.nationalDebt (60d = 2× monthly interval).
     // runSeed only validates the field is present; health.js is the actual
     // alarm source, but keeping these in sync prevents future drift.
     maxStaleMin: 86400,

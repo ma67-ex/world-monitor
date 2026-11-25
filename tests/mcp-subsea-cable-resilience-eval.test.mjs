@@ -11,8 +11,8 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 
-import { TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
-import { McpSourceUnavailableError } from '../api/mcp/source-unavailable.ts';
+import { TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
+import { McpSourceUnavailableError } from '../api/mcp/_source-unavailable.ts';
 import { submarineCablesToCableInputs } from '../shared/analysis-mcp-adapters.ts';
 import { UNDERSEA_CABLES } from '../src/config/geo-map.ts';
 import { installRedis } from './helpers/fake-upstash-redis.mts';

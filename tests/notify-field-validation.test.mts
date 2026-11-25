@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 import { createRequire } from 'node:module';
 
-import handler, { __setNotifyDepsForTests } from '../api/notify.ts';
+import handler, { __setNotifyDepsForTests } from '../api/_notify.ts';
 
 const require = createRequire(import.meta.url);
 

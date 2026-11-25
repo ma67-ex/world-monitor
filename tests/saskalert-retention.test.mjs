@@ -4,7 +4,7 @@ import test from 'node:test';
 import * as sask from '../scripts/lib/saskalert.mjs';
 import { runSeed } from '../scripts/_seed-utils.mjs';
 import { CANADA_ALERT_SOURCES, CANADA_ALERTS_KEY, rebuildCanadaAlertsUnion } from '../scripts/lib/canada-alerts-union.mjs';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { readSectionFreshness } from '../scripts/_bundle-runner.mjs';
 import { withSeedLockFence } from './helpers/seed-lock-fence.mjs';
 

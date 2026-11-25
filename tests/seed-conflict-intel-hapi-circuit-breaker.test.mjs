@@ -196,7 +196,7 @@ test('the channel that served a seed reaches the marker AND the seed-meta record
   assert.equal(demoted.marker.countriesCovered, 2);
   assert.equal(demoted.marker.requiredCountriesTotal, HAPI_REQUIRED_COUNTRIES.length);
   assert.equal(demoted.marker.updatedAt, NOW);
-  // api/health.js relays `errorCode` onto the entry when the fault is
+  // api/_health.js relays `errorCode` onto the entry when the fault is
   // SEED_ERROR and relays `errorReason` nowhere, so without this a demotion and
   // a bot-block are indistinguishable on the public endpoint.
   assert.equal(demoted.channelProvenance.errorCode, 'HDX_HTTP_503');

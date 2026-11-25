@@ -5,11 +5,11 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 vi.mock('../auth-session', () => ({ validateBearerToken: vi.fn(), verifyClerkSessionActive: vi.fn() }));
 import { validateBearerToken } from '../auth-session';
 import { resolveClerkSession } from '../_shared/auth-session';
-import quota from '../../api/user/mcp-quota';
-import revoke from '../../api/user/mcp-revoke';
-import context from '../../api/internal/mcp-grant-context';
-import mint from '../../api/internal/mcp-grant-mint';
-import passkey from '../../api/user/passkey-offer';
+import quota from '../../api/user/_mcp-quota';
+import revoke from '../../api/user/_mcp-revoke';
+import context from '../../api/internal/_mcp-grant-context';
+import mint from '../../api/internal/_mcp-grant-mint';
+import passkey from '../../api/user/_passkey-offer';
 import { createDomainGateway } from '../gateway';
 import { classifyGrantDenial } from '../../src/services/mcp-grant-denial';
 

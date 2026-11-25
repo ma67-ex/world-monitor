@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url);
 const xNews = require('../scripts/lib/x-news-accounts.cjs');
 const registry = JSON.parse(readFileSync(join(__dirname, '../data/x-accounts.json'), 'utf8'));
 const rssSourceTiers = JSON.parse(readFileSync(join(__dirname, '../shared/source-tiers.json'), 'utf8'));
-const healthSrc = readFileSync(join(__dirname, '../api/health.js'), 'utf8');
+const healthSrc = readFileSync(join(__dirname, '../api/_health.js'), 'utf8');
 const relaySrc = readFileSync(join(__dirname, '../scripts/ais-relay.cjs'), 'utf8');
 
 function enabledSourceNames() {

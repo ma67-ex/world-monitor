@@ -14,13 +14,13 @@
 // stay false and tasks/* methods answer TaskNotFound.
 
 import { suggestTools } from './_agent-tool-suggest';
-import { PUBLIC_RESOURCE_REGISTRY } from './mcp/resources/index';
-import { readBoundedRequestBody, RequestBodyTooLargeError } from './mcp/bounded-body';
-import { MAX_JSON_RPC_BODY_BYTES } from './mcp/body-limits';
-import { safeJsonRpcId } from './mcp/utils';
+import { PUBLIC_RESOURCE_REGISTRY } from './mcp/resources/_index';
+import { readBoundedRequestBody, RequestBodyTooLargeError } from './mcp/_bounded-body';
+import { MAX_JSON_RPC_BODY_BYTES } from './mcp/_body-limits';
+import { safeJsonRpcId } from './mcp/_utils';
 import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, checkIpScopedEdgeProof, getClientIp, rateLimitKeyForIp } from '../server/_shared/rate-limit';
 
-// Re-exported so existing consumers (tests, api/ask.ts historically) keep a
+// Re-exported so existing consumers (tests, api/_ask.ts historically) keep a
 // stable import surface; the implementation lives in the route-less helper.
 export { suggestTools, type ToolSuggestion } from './_agent-tool-suggest';
 

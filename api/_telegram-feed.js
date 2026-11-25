@@ -241,7 +241,7 @@ export default async function handler(req) {
     return jsonResponse({ error: 'Method not allowed' }, 405, { ...corsHeaders, Allow: 'GET, OPTIONS' });
   }
 
-  // Same hole #6654 closed on api/x-feed.js: isDisallowedOrigin returns false
+  // Same hole #6654 closed on api/_x-feed.js: isDisallowedOrigin returns false
   // when Origin is absent, so a bare `curl /api/telegram-feed` collected every
   // post body. Origin is not a fix either — it is client-controlled at the
   // wire, so a header-only gate costs an attacker one `-H` (the #3541 bypass
@@ -285,8 +285,8 @@ export default async function handler(req) {
   // an anonymous wms_ token to anyone (30/min/IP, 12h TTL), so without a volume
   // ceiling one token drives unbounded ?limit=200 reads of the R4 corpus for half
   // a day. Pair the gate with a limit the way the sibling credentialed relay
-  // proxies already do (api/polymarket.js requireApiKey+requireRateLimit,
-  // api/rss-proxy.js's direct checkRateLimit call). Separate scopes keep the
+  // proxies already do (api/_polymarket.js requireApiKey+requireRateLimit,
+  // api/_rss-proxy.js's direct checkRateLimit call). Separate scopes keep the
   // capped channel fanout from starving the base feed or interactive resolves.
   // Fails open when Upstash is unconfigured, matching rss-proxy.
   // Deliberately fail-open (the repo default), including for resolve/channel.
@@ -447,7 +447,7 @@ export default async function handler(req) {
     console.warn('[telegram-feed] relay request failed:', error?.message || String(error));
     // Routine transport churn captures at `warning`, not `error` — see
     // relayFailureLevel. Skipping those outright (the previous posture,
-    // inherited from api/rss-proxy.js) left relay degradation with no signal at
+    // inherited from api/_rss-proxy.js) left relay degradation with no signal at
     // all — nothing in scripts/ or .github/workflows/ watches it. `warning`
     // keeps it queryable without counting toward error totals.
     // `mode` is mandatory on every path: the budgets differ by 7s, so without

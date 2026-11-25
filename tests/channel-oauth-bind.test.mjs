@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import handler from '../api/channel-oauth-bind.ts';
+import handler from '../api/_channel-oauth-bind.ts';
 import { createChannelOAuthState, callbackMatchesBrowser } from '../server/_shared/channel-oauth-state.ts';
 import { __resetRateLimitForTest } from '../server/_shared/rate-limit.ts';
 

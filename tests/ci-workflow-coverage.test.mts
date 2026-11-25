@@ -2437,7 +2437,7 @@ describe('CI workflow coverage', () => {
     assert.equal(markdownSays(['package.json']), 'markdown=true', 'package.json defines lint:md');
     assert.equal(markdownSays(['package-lock.json']), 'markdown=true', 'the lockfile pins markdownlint-cli2');
     assert.equal(markdownSays(['src/app/App.ts', 'README.md']), 'markdown=true');
-    assert.equal(markdownSays(['src/app/App.ts', 'api/bootstrap.js']), 'markdown=false');
+    assert.equal(markdownSays(['src/app/App.ts', 'api/_bootstrap.js']), 'markdown=false');
     assert.equal(markdownSays(['docs/adding-endpoints.mdx']), 'markdown=false', 'lint:md targets **/*.md only');
     // The .md-only expectation above is only right while lint:md itself
     // targets nothing else; widening the script must fail here until the

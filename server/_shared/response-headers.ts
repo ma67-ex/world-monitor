@@ -61,7 +61,7 @@ export function drainRetryableResponse(req: Request): boolean {
  * tell a served answer from a degraded one by status alone. A handler that
  * returns such an envelope calls markUnservedLlmResponse(ctx.request); the
  * gateway drains the marker after the handler returns and releases the
- * reservation, the same way api/chat-analyst.ts releases its own reservation
+ * reservation, the same way api/_chat-analyst.ts releases its own reservation
  * when no answer content was streamed (#7217). A handler that delivered any
  * answer content, including a cached or partial one, must not set it.
  */

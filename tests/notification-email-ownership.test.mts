@@ -4,7 +4,7 @@ import Module, { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import notify, { __setNotifyDepsForTests } from '../api/notify.ts';
+import notify, { __setNotifyDepsForTests } from '../api/_notify.ts';
 import { DIGEST_EMAIL_MAX_HTML_BYTES, renderDigestEmailHtml } from '../scripts/lib/digest-email-html.mjs';
 import { selectDigestChannelContent } from '../scripts/lib/digest-channel-content.mjs';
 import { briefIntlLocale, briefPlural, briefT, formatBriefDate } from '../shared/brief-strings.js';

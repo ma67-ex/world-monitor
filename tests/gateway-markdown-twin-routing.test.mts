@@ -8,8 +8,8 @@ import { createDomainGateway } from '../server/gateway.ts';
 import { __resetRateLimitForTest } from '../server/_shared/rate-limit.ts';
 import { __resetRateLimitForTest as __resetLegacyRateLimitForTest } from '../api/_rate-limit.js';
 import { isPageTwinSibling } from '../api/_md-url-twin.ts';
-import mdTwinHandler from '../api/md-twin.ts';
-import notFoundHandler from '../api/not-found.ts';
+import mdTwinHandler from '../api/_md-twin.ts';
+import notFoundHandler from '../api/_not-found.ts';
 import middleware from '../middleware';
 import { createRedisFetch } from './helpers/fake-upstash-redis.mts';
 
@@ -377,7 +377,7 @@ describe('middleware bot gate on /api/**/*.md twins', () => {
   });
 });
 
-describe('legacy /api/*.md twins (api/not-found.ts)', () => {
+describe('legacy /api/*.md twins (api/_not-found.ts)', () => {
   let siblingFetches: string[] = [];
   let limiterKeys: string[] = [];
   let exhausted = new Set<string>();
@@ -453,7 +453,7 @@ describe('legacy /api/*.md twins (api/not-found.ts)', () => {
   });
 });
 
-describe('page twins (api/md-twin.ts) never hop into an API function', () => {
+describe('page twins (api/_md-twin.ts) never hop into an API function', () => {
   let siblingFetches: string[] = [];
 
   beforeEach(() => {

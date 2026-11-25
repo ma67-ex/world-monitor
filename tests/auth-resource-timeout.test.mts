@@ -135,7 +135,7 @@ test('widget-agent request-body read must terminate for a body that never ends',
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (() => never<Response>()) as typeof fetch;
   try {
-    const { default: handler, __setWidgetAgentSpendDepsForTests } = await import('../api/widget-agent.ts?resource-repro=1');
+    const { default: handler, __setWidgetAgentSpendDepsForTests } = await import('../api/_widget-agent.ts?resource-repro=1');
     __setWidgetAgentSpendDepsForTests({
       checkRateLimit: async () => null,
     });

@@ -6,7 +6,7 @@ const originalEnv = Object.fromEntries(keys.map(k => [k,process.env[k]]));
 process.env.UPSTASH_REDIS_REST_URL='https://redis.example.test';
 process.env.UPSTASH_REDIS_REST_TOKEN='test-only';
 process.env.WORLDMONITOR_VALID_KEYS='test-key';
-const {handleSeedHealth} = await import('../api/seed-health.js');
+const {handleSeedHealth} = await import('../api/_seed-health.js');
 after(() => { globalThis.fetch=originalFetch; for(const [k,v] of Object.entries(originalEnv)) {if(v===undefined) delete process.env[k]; else process.env[k]=v;} });
 
 async function bilateralEntry(details) {

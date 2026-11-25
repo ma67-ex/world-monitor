@@ -14,7 +14,7 @@
  *                  premium-locked-content pattern — the panel itself
  *                  is marked premium and the base draws the overlay.
  *
- * The signed URL is generated server-side in `api/latest-brief.ts`
+ * The signed URL is generated server-side in `api/_latest-brief.ts`
  * so the token never lives in the client bundle. The panel only
  * displays + links to it.
  */

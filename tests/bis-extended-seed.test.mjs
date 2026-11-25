@@ -26,7 +26,7 @@ import {
   KEYS,
   META_KEYS,
 } from '../scripts/seed-bis-extended.mjs';
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import { withSeedLockFence } from './helpers/seed-lock-fence.mjs';
 
 // Minimal BIS-style SDMX CSV fixture covering:

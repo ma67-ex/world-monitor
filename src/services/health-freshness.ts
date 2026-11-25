@@ -48,7 +48,7 @@ export interface RefreshHealthFreshnessOptions {
 }
 
 // Ranks are ordinal severity for "pick the worst status of a source". They mirror
-// the server's ok/warn/crit buckets (api/health.js STATUS_COUNTS): crit statuses
+// the server's ok/warn/crit buckets (api/_health.js STATUS_COUNTS): crit statuses
 // rank highest, warn statuses in the middle, ok statuses at 0.
 function statusRank(status: string): number {
   switch (status) {
@@ -128,7 +128,7 @@ export async function refreshDataFreshnessFromHealth(options: RefreshHealthFresh
   }
 
   // REDIS_DOWN now returns HTTP 503 with a JSON body {status:'REDIS_DOWN', ...}
-  // and no `checks` (see api/health.js). Parse the body first and only treat a
+  // and no `checks` (see api/_health.js). Parse the body first and only treat a
   // non-2xx as a hard fetch failure when it ISN'T a recognized Redis-outage
   // payload — otherwise the outage branch below never runs and mapped sources
   // keep stale freshness state during an outage instead of being flagged.

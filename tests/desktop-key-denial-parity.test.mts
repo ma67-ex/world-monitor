@@ -53,7 +53,7 @@ before(async () => {
   gateway = createDomainGateway([
     { method: 'GET', path: REGULAR, handler: async () => Response.json({ items: [{ id: 'a' }] }) },
   ]) as GatewayHandler;
-  bootstrap = (await import('../api/bootstrap.js')).default as BootstrapHandler;
+  bootstrap = (await import('../api/_bootstrap.js')).default as BootstrapHandler;
 });
 
 beforeEach(async () => {
@@ -230,7 +230,7 @@ describe('desktop-key denials are identical on the gateway and bootstrap', () =>
     process.env.DESKTOP_KEY_CLIENT_CHECK = 'enforce';
     const key = mintDesktopKey(0);
     const headers = { 'X-WorldMonitor-Key': key, 'User-Agent': 'python-requests/2.32.3', 'Content-Type': 'application/json' };
-    const chatAnalyst = (await import('../api/chat-analyst.ts')).default as (req: Request) => Promise<Response>;
+    const chatAnalyst = (await import('../api/_chat-analyst.ts')).default as (req: Request) => Promise<Response>;
     const chat = await chatAnalyst(new Request('https://api.worldmonitor.app/api/chat-analyst', {
       method: 'POST', headers, body: JSON.stringify({ query: 'hello' }),
     }));

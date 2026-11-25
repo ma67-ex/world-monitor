@@ -294,7 +294,7 @@ describe('reservoir water extent: seed contract', () => {
   });
 
   it('is registered in health, the climate bundle and the Railway watch paths', () => {
-    const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+    const health = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
     assert.match(health, new RegExp(`orbitalWaterExtent: '${ORBITAL_WATER_EXTENT_KEY}'`));
     assert.match(health, /orbitalWaterExtent: \{ key: 'seed-meta:orbital:water-extent', maxStaleMin: 4320/);
     assert.match(health, /ORBITAL_WATCH_ENABLED \? \[\] : \['orbitalSites', 'orbitalWaterExtent'\]/);
@@ -501,7 +501,7 @@ describe('reservoir water extent: a run that never reaches the archive', () => {
 
 describe('reservoir water extent: cold start', () => {
   it('reaches the health record floor on a first run at the measured request rate', async () => {
-    const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+    const health = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
     const floor = Number(health.match(/orbitalWaterExtent: \{[^}]*minRecordCount: (\d+)/)[1]);
     const targets = reservoirTargets(WATCHED_SITES, watchlist);
     // Every tenth reservoir is a huge lake no single scene images whole (#10714).

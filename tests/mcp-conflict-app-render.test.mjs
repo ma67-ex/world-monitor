@@ -6,7 +6,7 @@ import { feature } from 'topojson-client';
 import { Window } from 'happy-dom';
 import { Ratelimit } from '@upstash/ratelimit';
 import { makeProDeps, proReq, callBody, HMAC_SECRET } from './helpers/mcp-pro-deps.mjs';
-import { CONFLICT_EVENTS_APP_HTML } from '../api/mcp/ui/conflict-events-app.ts';
+import { CONFLICT_EVENTS_APP_HTML } from '../api/mcp/ui/_conflict-events-app.ts';
 import { CONFLICT_MAP_BASE } from '../api/mcp/ui/_conflict-map-base.ts';
 
 const originalFetch = globalThis.fetch;

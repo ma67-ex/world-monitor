@@ -97,7 +97,7 @@ test('Railway-only changes retain unit proof and intentionally skip the browser'
 
 test('runtime, browser harness, assets, build inputs and unknown paths run the browser', () => {
   for (const file of [
-    'src/app/App.ts', 'api/bootstrap.js', 'server/gateway.ts', 'shared/runtime.ts',
+    'src/app/App.ts', 'api/_bootstrap.js', 'server/gateway.ts', 'shared/runtime.ts',
     'public/ai-search.md', 'pro-test/src/App.tsx', 'e2e/bootstrap-request-budget.spec.ts',
     'tests/map-harness.html', 'tests/fixtures/example.json', 'scripts/generate-product-config.mjs',
     'scripts/new-helper.mjs', 'package.json', 'package-lock.json', 'playwright.config.ts',
@@ -109,7 +109,7 @@ test('renames use both names and deletions still select their gates', () => {
   for (const event of ['pull_request', 'push']) {
     for (const file of [
       { filename: 'docs/archived.md', previous_filename: 'src/app/App.ts', status: 'renamed' },
-      { filename: 'api/bootstrap.js', status: 'removed' },
+      { filename: 'api/_bootstrap.js', status: 'removed' },
     ]) {
       const result = classify([file], { event });
       assert.equal(result.code, 'true');

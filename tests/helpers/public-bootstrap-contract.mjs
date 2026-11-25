@@ -1,7 +1,7 @@
 // The response contract for a `&public=1` bootstrap URL, in one place so the
 // handler-level guard and the deployed-URL guard cannot drift.
 //
-// api/bootstrap-auth.test.mjs proves api/bootstrap.js returns this shape by
+// api/bootstrap-auth.test.mjs proves api/_bootstrap.js returns this shape by
 // calling handler() directly. That is necessary and not sufficient: three CORS
 // surfaces sit in front of api.worldmonitor.app, and the Cloudflare Worker
 // stamps its own headers onto the bytes users actually receive — including a

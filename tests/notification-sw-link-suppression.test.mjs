@@ -1,7 +1,7 @@
 /**
  * Failing-first proof for #8401, service-worker half.
  *
- * 1. `api/notification-suppressions.js` splits the Redis set into exact-URL
+ * 1. `api/_notification-suppressions.js` splits the Redis set into exact-URL
  *    digests and `host:` entries, serves them anonymously with a 60s shared
  *    cache, and fails open with `unavailable: true` when Redis cannot be read.
  * 2. `public/link-suppression-check.js` matches clicks against that snapshot
@@ -60,7 +60,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
       ok: true,
       json: async () => ({ result: [EVIL, LONG_EVIL, 'host:evil.example', 'garbage {{{', null, 42] }),
     });
-    const { default: handler } = await import('../api/notification-suppressions.js?edge-split');
+    const { default: handler } = await import('../api/_notification-suppressions.js?edge-split');
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions'));
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -75,7 +75,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
   it('fails open with unavailable:true when Redis cannot be read', async () => {
     console.warn = () => {};
     globalThis.fetch = async () => ({ ok: false, status: 500 });
-    const { readSuppressionSnapshot, default: handler } = await import('../api/notification-suppressions.js?edge-unavail');
+    const { readSuppressionSnapshot, default: handler } = await import('../api/_notification-suppressions.js?edge-unavail');
     // Snapshot helper reports unreadable; the handler maps it to the
     // fail-open shape with no-store (never CDN-cache the fail-open).
     const snap = await readSuppressionSnapshot();
@@ -92,7 +92,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
   it('logs safe reasons for every unreadable Redis shape', async () => {
     const warnings = [];
     console.warn = (...args) => warnings.push(args.join(' '));
-    const { readSuppressionSnapshot, default: handler } = await import('../api/notification-suppressions.js?edge-logging');
+    const { readSuppressionSnapshot, default: handler } = await import('../api/_notification-suppressions.js?edge-logging');
 
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -120,7 +120,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
 
   it('keeps non-ASCII host entries as the punycode host a URL parses to', async () => {
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: ['host:b\u00fccher.example'] }) });
-    const { default: handler } = await import('../api/notification-suppressions.js?edge-idn');
+    const { default: handler } = await import('../api/_notification-suppressions.js?edge-idn');
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions'));
     assert.deepEqual((await res.json()).hosts, ['xn--bcher-kva.example']);
   });
@@ -128,7 +128,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
   it('refuses query strings so a random query cannot bypass the shared cache into Redis', async () => {
     let redisReads = 0;
     globalThis.fetch = async () => { redisReads++; return { ok: true, json: async () => ({ result: [] }) }; };
-    const { default: handler } = await import('../api/notification-suppressions.js?edge-query');
+    const { default: handler } = await import('../api/_notification-suppressions.js?edge-query');
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions?bust=123'));
     assert.equal(res.status, 400);
     assert.equal(redisReads, 0, 'a cache-busting query must not reach Redis');
@@ -136,7 +136,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
   });
 
   it('rejects non-GET methods', async () => {
-    const { default: handler } = await import('../api/notification-suppressions.js?edge-method');
+    const { default: handler } = await import('../api/_notification-suppressions.js?edge-method');
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions', { method: 'POST' }));
     assert.equal(res.status, 405);
   });
@@ -377,7 +377,7 @@ describe('alert referrer tag does not defeat suppression (endpoint + service wor
 
   async function publishedSnapshot(entries, tag) {
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: entries }) });
-    const { default: handler } = await import(`../api/notification-suppressions.js?${tag}`);
+    const { default: handler } = await import(`../api/_notification-suppressions.js?${tag}`);
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions'));
     return res.json();
   }

@@ -4,8 +4,8 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { appChunkRuntimeCache, createDashboardPrecache } from './shared/pwa-precache';
 import type { OutputBundle } from 'rollup';
 import { resolve, dirname, extname, basename, posix, relative, isAbsolute } from 'path';
-import { mkdir, readFile, writeFile } from 'fs/promises';
-import { statSync } from 'fs';
+import { cp, mkdir, readFile, writeFile } from 'fs/promises';
+import { existsSync, statSync } from 'fs';
 import { brotliCompress } from 'zlib';
 import { promisify } from 'util';
 import pkg from './package.json';
@@ -1293,6 +1293,8 @@ export default defineConfig(({ mode, command }) => {
           // public file. Production served /sw.js.map until this was set.
           sourcemap: emitPublicSourceMaps,
           globPatterns: ['assets/**/*.{js,css}'],
+          // Cesium (God's Eye 3D, ~4.5MB) loads on demand; never precache it.
+          globIgnores: ['**/cesium-*.js'],
           manifestTransforms: [dashboardPrecache.manifestTransform],
           navigateFallback: null,
           skipWaiting: true,

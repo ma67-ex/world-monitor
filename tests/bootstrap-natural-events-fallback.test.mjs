@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 
-import handler from '../api/bootstrap.js';
+import handler from '../api/_bootstrap.js';
 import { NATURAL_EVENTS_CONE_MAX_POINTS } from '../api/_natural-events-dashboard.js';
 
 const NATURAL_EVENTS_KEY = 'natural:events:v1';

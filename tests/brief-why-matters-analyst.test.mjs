@@ -1193,7 +1193,7 @@ describe('sectionsForCategory — structural relevance gating', () => {
 
 describe('endpoint env flag parsing', () => {
   async function configFor(env) {
-    const { readConfig } = await import('../api/internal/brief-why-matters.ts');
+    const { readConfig } = await import('../api/internal/_brief-why-matters.ts');
     return readConfig(env);
   }
 

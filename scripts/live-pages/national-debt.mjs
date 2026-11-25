@@ -12,7 +12,7 @@ import {
 import ISO2_TO_ISO3 from '../../shared/iso2-to-iso3.js';
 import weoFiscalPeriods from '../shared/weo-fiscal-periods.mjs';
 
-// Monthly seed; health allows 60 days (api/health.js nationalDebt).
+// Monthly seed; health allows 60 days (api/_health.js nationalDebt).
 const MAX_AGE_MS = 60 * 24 * 3_600_000;
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];

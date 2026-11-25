@@ -392,7 +392,7 @@ const withSharedLimits = (planKey, apiRequestsPerDay, tier = 2) => ({
   validUntil: Date.now() + DAY,
 });
 
-describe('api/mcp/auth.ts — pre-check resolves the plan MCP daily limit (U3 / KTD6)', () => {
+describe('api/mcp/_auth.ts — pre-check resolves the plan MCP daily limit (U3 / KTD6)', () => {
   it('pro context carries the plan limit through to the caller (pro_business → 250)', async () => {
     const { deps } = makeProDeps({ getEntitlements: async () => withLimits('pro_business_monthly', 250) });
     const res = await authMod.runContextPreChecks(PRO_CONTEXT, deps, RESOURCE_META_URL, CORS);
@@ -481,7 +481,7 @@ describe('api/mcp/auth.ts — pre-check resolves the plan MCP daily limit (U3 / 
   });
 });
 
-describe('api/mcp/auth.ts — buildAuthHeaders credential class', () => {
+describe('api/mcp/_auth.ts — buildAuthHeaders credential class', () => {
   it('user_key signs the internal HMAC and never forwards the dashboard key', async () => {
     const { verifyInternalMcpRequest } = await import('../server/_shared/mcp-internal-hmac.ts');
     const url = 'https://example.test/api/intelligence/v1/get-country-risk?countryCode=US';
@@ -658,7 +658,7 @@ const withBurst = (planKey, mcpBurstRequestsPerMinute, tier = 2) => ({
   validUntil: Date.now() + DAY,
 });
 
-describe('api/mcp/auth.ts — the minute burst is the plan\'s, not a constant', () => {
+describe('api/mcp/_auth.ts — the minute burst is the plan\'s, not a constant', () => {
   it('the pre-check resolves the plan burst for both credential doors', async () => {
     for (const context of [PRO_CONTEXT, USER_KEY_CONTEXT]) {
       const { deps } = makeProDeps({ getEntitlements: async () => withBurst('api_business', 300) });
@@ -901,7 +901,7 @@ describe('api/mcp/_auth.ts — applyAnonDiscoveryLimit (#5379 Gap 10)', () => {
 // malformed body, and the caller is handed a retryable 503 + `Retry-After`.
 // Reporting that at Sentry's default `error` level paged on-call for routine
 // upstream blips (6 events across 5 releases in 17 days, every one isolated) —
-// the exact condition api/user-prefs.ts and api/_rate-limit.js already
+// the exact condition api/_user-prefs.ts and api/_rate-limit.js already
 // downgrade. The asymmetry with the sibling `catch` is load-bearing, so it is
 // pinned here too: a THROWN validator is an unexpected defect and must keep
 // paging.
@@ -911,7 +911,7 @@ describe('api/mcp/_auth.ts — applyAnonDiscoveryLimit (#5379 Gap 10)', () => {
 // from source text — the same lever tests/rate-limit.test.mts uses on the
 // rate-limit capture, for exactly this reason.
 // ---------------------------------------------------------------------------
-describe('api/mcp/auth.ts — a transient Convex verdict degrades, it does not page (WORLDMONITOR-ZR)', () => {
+describe('api/mcp/_auth.ts — a transient Convex verdict degrades, it does not page (WORLDMONITOR-ZR)', () => {
   it('a transient validate verdict still fails closed on a retryable 503', async () => {
     const { deps } = makeProDeps({ validateProMcpToken: async () => ({ ok: 'transient' }) });
     const res = await authMod.runContextPreChecks(PRO_CONTEXT, deps, RESOURCE_META_URL, CORS);
@@ -928,7 +928,7 @@ describe('api/mcp/auth.ts — a transient Convex verdict degrades, it does not p
 
   it('the transient capture carries level: warning, and the thrown-validator catch does NOT', async () => {
     const fs = await import('node:fs');
-    const src = fs.readFileSync(new URL('../api/mcp/auth.ts', import.meta.url), 'utf8');
+    const src = fs.readFileSync(new URL('../api/mcp/_auth.ts', import.meta.url), 'utf8');
 
     const transientAt = src.indexOf("validation.ok === 'transient'");
     assert.ok(transientAt > 0, 'the transient branch still exists');

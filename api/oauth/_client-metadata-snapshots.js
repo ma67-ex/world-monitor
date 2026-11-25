@@ -15,7 +15,7 @@ export const CLIENT_METADATA_SNAPSHOTS = {
     client_id: 'https://claude.ai/oauth/mcp-oauth-client-metadata',
     client_name: 'Claude',
     redirect_uris: [
-      'https://claude.ai/api/mcp/auth_callback'
+      'https://claude.ai/api/mcp/_auth_callback'
     ],
     token_endpoint_auth_method: 'none',
     grant_types: [

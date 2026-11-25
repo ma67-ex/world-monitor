@@ -29,7 +29,7 @@ const routeByPath = new Map(routes.map((r) => [r.route, r]));
 const seedOnlyRoutes = routes.filter((r) => r.seedOnly);
 
 // Exact entries that are not sebuf RPC routes: the bootstrap endpoint is a
-// legacy api/bootstrap.js entry with no generated route behind it.
+// legacy api/_bootstrap.js entry with no generated route behind it.
 const NON_RPC_EXACT = new Set(['/api/bootstrap']);
 
 describe('handler classifier', () => {

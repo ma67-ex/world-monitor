@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, test } from 'node:test';
-import handler from '../api/youtube/live.js';
+import handler from '../api/youtube/_live.js';
 import { __resetRateLimitForTest } from '../api/_rate-limit.js';
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };

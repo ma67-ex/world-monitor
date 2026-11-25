@@ -28,7 +28,7 @@ import {
   tokenHandler,
   __resetOAuthTokenRateLimitForTest,
   __setOAuthTokenRatelimitForTest,
-} from '../api/oauth/token.ts';
+} from '../api/oauth/_token.ts';
 import {
   REFRESH_ATTEMPT_MARKER_TTL_SECONDS,
   REFRESH_ATTEMPT_TTL_SECONDS,
@@ -64,7 +64,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const CLIENT_ID = 'client_abc';
-const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
+const REDIRECT_URI = 'https://claude.ai/api/mcp/_auth_callback';
 const USER_ID = 'user_pro_123';
 const MCP_TOKEN_ID = 'k57_mcp_token_id';
 const TOKEN_TTL_SECONDS = 3600;
@@ -2528,7 +2528,7 @@ describe('oauth/token rate-limit degradation (#7270)', () => {
   });
 
   it('source contract: missing-config and throw paths capture with a stable fingerprint', () => {
-    const src = readFileSync(fileURLToPath(new URL('../api/oauth/token.ts', import.meta.url)), 'utf8');
+    const src = readFileSync(fileURLToPath(new URL('../api/oauth/_token.ts', import.meta.url)), 'utf8');
     assert.match(src, /oauthToken:missing-config/);
     assert.match(
       src,
@@ -2622,7 +2622,7 @@ describe('oauth/token rate-limit degradation (#7270)', () => {
       joined.includes('rl:oauth-token:<redacted>'),
       `expected identifier-bearing keys to be redacted, got: ${joined}`,
     );
-    const src = readFileSync(fileURLToPath(new URL('../api/oauth/token.ts', import.meta.url)), 'utf8');
+    const src = readFileSync(fileURLToPath(new URL('../api/oauth/_token.ts', import.meta.url)), 'utf8');
     assert.match(
       src,
       /const sanitized = sanitizeTokenRateLimitError\(err\)/,
@@ -2773,8 +2773,8 @@ describe('Vercel Connect public client, end to end', () => {
     };
 
     try {
-      const { default: registerHandler } = await import('../api/oauth/register.js');
-      const { default: authorizeHandler } = await import('../api/oauth/authorize.js');
+      const { default: registerHandler } = await import('../api/oauth/_register.js');
+      const { default: authorizeHandler } = await import('../api/oauth/_authorize.js');
 
       const registered = await registerHandler(new Request('https://worldmonitor.app/oauth/register', {
         method: 'POST',

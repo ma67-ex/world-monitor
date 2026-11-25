@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CHROME_UA } from '../scripts/_seed-utils.mjs';
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import {
   CWFIS_ACTIVE_LAYER,
   CWFIS_FETCH_TIMEOUT_MS,

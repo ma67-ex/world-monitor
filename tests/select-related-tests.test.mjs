@@ -23,8 +23,8 @@ const FILES = {
   'package.json': JSON.stringify({ scripts: { 'test:data': 'node scripts/run-data-tests.mjs tests/*.test.mjs tests/*.test.mts' } }),
   'src/feature.ts': 'export const feature = 1;\n',
   'api/mcp.ts': "import { registry } from './mcp/registry/index.ts';\nexport default registry;\n",
-  'api/mcp/registry/index.ts': "export { tools as registry } from './nlp-tools.ts';\n",
-  'api/mcp/registry/nlp-tools.ts': 'export const tools = [];\n',
+  'api/mcp/registry/_index.ts': "export { tools as registry } from './nlp-tools.ts';\n",
+  'api/mcp/registry/_nlp-tools.ts': 'export const tools = [];\n',
   'server/helper.js': 'module.exports = 1;\n',
   'scripts/railway-services.json': '{}\n',
   'tests/helpers/deps.mjs': "export { feature } from '../../src/feature.ts';\n",
@@ -52,7 +52,7 @@ describe('selectRelatedTests', () => {
   });
 
   it('follows a template-literal dynamic import with a query string, transitively', () => {
-    assert.deepEqual(selectRelatedTests({ root, inventory, changed: ['api/mcp/registry/nlp-tools.ts'] }), ['tests/template.test.mjs']);
+    assert.deepEqual(selectRelatedTests({ root, inventory, changed: ['api/mcp/registry/_nlp-tools.ts'] }), ['tests/template.test.mjs']);
   });
 
   it('follows require()', () => {

@@ -14,7 +14,7 @@ async function loadHealth(enabled) {
   if (enabled === undefined) delete process.env.ORBITAL_WATCH_ENABLED;
   else process.env.ORBITAL_WATCH_ENABLED = enabled;
   try {
-    const mod = await import(`../api/health.js?orbital-watch=${encodeURIComponent(String(enabled))}`);
+    const mod = await import(`../api/_health.js?orbital-watch=${encodeURIComponent(String(enabled))}`);
     return mod.__testing__;
   } finally {
     if (previous === undefined) delete process.env.ORBITAL_WATCH_ENABLED;

@@ -11,11 +11,11 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mcpHandler } from '../api/mcp/handler.ts';
-import { CHATGPT_HIDDEN_TOOLS } from '../api/mcp/host-policy.ts';
-import { CHATGPT_POINTER_ONLY_TOOLS, pointerOnlyNewsResult } from '../api/mcp/chatgpt-news.ts';
-import { CHATGPT_TOOL_LIST_RESPONSE, TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
-import { AGENT_GUIDE, CHATGPT_AGENT_GUIDE, CHATGPT_MODERN_SERVER_INSTRUCTIONS, CHATGPT_SERVER_INSTRUCTIONS } from '../api/mcp/constants.ts';
+import { mcpHandler } from '../api/mcp/_handler.ts';
+import { CHATGPT_HIDDEN_TOOLS } from '../api/mcp/_host-policy.ts';
+import { CHATGPT_POINTER_ONLY_TOOLS, pointerOnlyNewsResult } from '../api/mcp/_chatgpt-news.ts';
+import { CHATGPT_TOOL_LIST_RESPONSE, TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
+import { AGENT_GUIDE, CHATGPT_AGENT_GUIDE, CHATGPT_MODERN_SERVER_INSTRUCTIONS, CHATGPT_SERVER_INSTRUCTIONS } from '../api/mcp/_constants.ts';
 import { HMAC_SECRET, callBody, makeProDeps, proReq } from './helpers/mcp-pro-deps.mjs';
 
 const CHATGPT_UA = 'openai-mcp/1.0.0';

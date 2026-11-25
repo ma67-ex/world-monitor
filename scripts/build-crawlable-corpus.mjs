@@ -772,7 +772,7 @@ function dataDownload(contentUrl, encodingFormat = 'application/json') {
 }
 
 // The daily archive is licensed apart from the corpus downloads (CC BY 4.0, not
-// the Terms of Service) and is served by api/open-data-chokepoints.js, so its
+// the Terms of Service) and is served by api/_open-data-chokepoints.js, so its
 // files are never written by this build. tests/crawlable-corpus.test.mjs pins
 // these values to scripts/build-open-data-chokepoints.mjs.
 export const CHOKEPOINT_OPEN_DATA = Object.freeze({

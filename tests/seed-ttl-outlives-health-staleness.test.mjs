@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 import { ACLED_TTL } from '../scripts/seed-conflict-intel.mjs';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { CABLE_HEALTH_CACHE_TTL_SECONDS } from '../server/worldmonitor/infrastructure/v1/get-cable-health.ts';
 
 const { DIGEST_WARM_HEARTBEAT_TTL_SECONDS } = createRequire(import.meta.url)('../scripts/lib/news-digest-warm.cjs');

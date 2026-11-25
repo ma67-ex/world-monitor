@@ -38,7 +38,7 @@ export const FRESHNESS_REGISTRY = [
   { key: 'intelligence:cross-source-signals:v1', maxAgeMin: 45,    feedsAxes: ['coercive_pressure', 'evidence'], metaKey: 'seed-meta:intelligence:cross-source-signals' },
   { key: 'relay:oref:history:v1',                maxAgeMin: 15,    feedsAxes: ['coercive_pressure', 'triggers'], metaKey: 'seed-meta:relay:oref:history' },
   { key: 'economic:macro-signals:v1',            maxAgeMin: 60,    feedsAxes: ['capital_stress'] },
-  { key: 'economic:national-debt:v1',            maxAgeMin: 86400, feedsAxes: ['capital_stress'], metaKey: 'seed-meta:economic:national-debt' }, // monthly seed (30d cron), 60d window absorbs one missed run — mirrors api/health.js nationalDebt. metaKey is the primary freshness source (payload's seededAt is also recognized by extractTimestamp as a fallback).
+  { key: 'economic:national-debt:v1',            maxAgeMin: 86400, feedsAxes: ['capital_stress'], metaKey: 'seed-meta:economic:national-debt' }, // monthly seed (30d cron), 60d window absorbs one missed run — mirrors api/_health.js nationalDebt. metaKey is the primary freshness source (payload's seededAt is also recognized by extractTimestamp as a fallback).
   { key: 'economic:stress-index:v1',             maxAgeMin: 120,   feedsAxes: ['capital_stress'] },
   { key: 'resilience:static:index:v1',           maxAgeMin: 576000, feedsAxes: ['energy_vulnerability'], metaKey: 'seed-meta:resilience:static' }, // annual static snapshot; country records behind this index are the audited import-dependency producer. The compute module reads the derived resilience:static:energy-import:v1 projection hydrated at snapshot load.
   { key: 'economic:eu-gas-storage:v1',           maxAgeMin: 2880,  feedsAxes: ['energy_vulnerability'], metaKey: 'seed-meta:economic:eu-gas-storage' }, // runSeed writes seed-meta with numeric fetchedAt; metaKey takes priority over payload fields, defense-in-depth against a future refactor that strips fetchedAt/seededAt from the payload (regression risk that produced #3728).
@@ -53,7 +53,7 @@ export const FRESHNESS_REGISTRY = [
   { key: 'aviation:delays:faa:v1',               maxAgeMin: 60,    feedsAxes: ['mobility'], metaKey: 'seed-meta:aviation:faa' },
   { key: 'aviation:delays:intl:v3',              maxAgeMin: 90,    feedsAxes: ['mobility'], metaKey: 'seed-meta:aviation:intl' },
   { key: 'aviation:notam:closures:v2',           maxAgeMin: 120,   feedsAxes: ['mobility'], metaKey: 'seed-meta:aviation:notam' },
-  { key: 'intelligence:gpsjam:v2',               maxAgeMin: 1440,  feedsAxes: ['mobility', 'airspace'], metaKey: 'seed-meta:intelligence:gpsjam' }, // gpsjam.org is a DAILY source (restored from Wingbits, PR #4987); 1440min matches api/health.js gpsjam.maxStaleMin so snapshots don't mark it stale hours after a healthy daily seed.
+  { key: 'intelligence:gpsjam:v2',               maxAgeMin: 1440,  feedsAxes: ['mobility', 'airspace'], metaKey: 'seed-meta:intelligence:gpsjam' }, // gpsjam.org is a DAILY source (restored from Wingbits, PR #4987); 1440min matches api/_health.js gpsjam.maxStaleMin so snapshots don't mark it stale hours after a healthy daily seed.
   // military:flights:v1 already carries top-level fetchedAt, no metaKey needed.
   { key: 'military:flights:v1',                  maxAgeMin: 30,    feedsAxes: ['mobility', 'reroute_intensity'] },
 ];

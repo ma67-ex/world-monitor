@@ -42,7 +42,7 @@ function fakeGitHub({ prs, verdicts }) {
 const green = { state: 'success', description: 'All required PR gates passed [gate-contract:abc]' };
 const stale = {
   state: 'failure',
-  description: 'Stale base: main changed 1 file(s) here: api/widget-agent.ts [gate-contract:abc]',
+  description: 'Stale base: main changed 1 file(s) here: api/_widget-agent.ts [gate-contract:abc]',
 };
 const broken = {
   state: 'failure',

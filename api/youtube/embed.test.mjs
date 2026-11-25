@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import handler from './embed.js';
+import handler from './_embed.js';
 import { TRUSTED_RETURN_URL_ORIGINS } from '../../convex/payments/returnUrlOrigin.ts';
 
 function makeRequest(query = '') {

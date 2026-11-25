@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CACHE_TOOLS, filterConflictPanelEvents } from '../api/mcp/registry/cache-tools.ts';
+import { CACHE_TOOLS, filterConflictPanelEvents } from '../api/mcp/registry/_cache-tools.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Registry now lives split across two files. Concatenate them so the

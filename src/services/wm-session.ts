@@ -558,7 +558,7 @@ type MintOutcome =
   | { ok: false; cause: 'refused'; status: number; keyRejected: boolean }
   | { ok: false; cause: Exclude<MintFailureCause, 'refused'> };
 
-// api/wm-session.js answers exactly this on a 401 for a submitted legacy key.
+// api/_wm-session.js answers exactly this on a 401 for a submitted legacy key.
 // A 401 from anything in front of it (the desktop sidecar's auth gate answers
 // `{ error: 'Unauthorized' }`, Deployment Protection answers HTML) says
 // nothing about the key.

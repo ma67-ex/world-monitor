@@ -25,7 +25,7 @@ process.env.UPSTASH_REDIS_REST_URL = 'https://mock-upstash.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
 process.env.WORLDMONITOR_VALID_KEYS = 'test-health-admin-key';
 
-const { default: handler, __testing__ } = await import('../api/health.js');
+const { default: handler, __testing__ } = await import('../api/_health.js');
 const {
   HEALTH_VERDICT_SNAPSHOT_KEY: HEALTH_SNAPSHOT_KEY,
   HEALTH_VERDICT_COMPACT_SNAPSHOT_KEY: HEALTH_COMPACT_SNAPSHOT_KEY,
@@ -842,7 +842,7 @@ test('the probe reaches fetch through a forwarding wrapper, not a detached refer
 
 test('a deployment configured through CONVEX_URL alone is probed at its .convex.site twin, not flagged misconfigured', async () => {
   // The gateways resolve CONVEX_SITE_URL ?? CONVEX_URL with .convex.cloud →
-  // .convex.site (api/create-checkout.ts, customer-portal.ts,
+  // .convex.site (api/_create-checkout.ts, customer-portal.ts,
   // notification-channels.ts); the probe must accept the same shape (#8282 review, P1).
   process.env.VERCEL = '1';
   process.env.VERCEL_ENV = 'production';
@@ -895,7 +895,7 @@ test('the gate check counts in summary.total exactly once, so the partition inva
 
 test('the probe hits exactly the URL the gateways build, path and trailing slash included', async () => {
   // The gateways append the route to the configured string as-is
-  // (api/create-checkout.ts). Probing a normalised origin instead could pass
+  // (api/_create-checkout.ts). Probing a normalised origin instead could pass
   // while checkout hits a different, dead endpoint (#8282 review, P1).
   productionEnv();
   process.env.CONVEX_SITE_URL = 'https://convex-site.test/base/';

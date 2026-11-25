@@ -27,7 +27,7 @@ type ConvexCall = { path: string; body: Record<string, unknown> };
 
 async function load() {
   const [{ default: entry }, { PUBLIC_NO_AUTH_RPC_PATHS }, { PREMIUM_RPC_PATHS }] = await Promise.all([
-    import('../api/feedback/v1/[rpc].ts'),
+    import('../api/feedback/v1/_rpc.ts'),
     import('../server/gateway.ts'),
     import('../src/shared/premium-paths.ts'),
   ]);

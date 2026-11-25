@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as XLSX from '@e965/xlsx';
 import { CII_COUNTRY_CODES } from '../shared/cii-weights.ts';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import {
   buildStructuralPrior, seedStructuralPrior, PRIOR_YEAR, PRIOR_INDICATOR,
   PRIOR_KEY, PRIOR_META_KEY, PRIOR_ACTIVATION_KEY, PRIOR_BULK_URL, PRIOR_SCORED_COUNTRIES,

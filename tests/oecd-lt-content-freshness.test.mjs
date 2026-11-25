@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import {
   ECB_IRS_MARKETS,
   OECD_LT_MARKETS,

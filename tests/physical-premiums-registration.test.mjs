@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import {
   EDUCATION_PRIORITY_UTC_DAY,
   EDUCATION_PRIORITY_UTC_HOUR,
@@ -62,7 +62,7 @@ describe('physical premium production registration', () => {
   it('aligns paper freshness with the daily publisher and health alarm', () => {
     const bundle = read('scripts/seed-bundle-macro.mjs');
     const runbook = read('docs/railway-seed-consolidation-runbook.md');
-    const healthSrc = read('api/health.js');
+    const healthSrc = read('api/_health.js');
 
     assert.match(
       bundle,
@@ -85,7 +85,7 @@ describe('physical premium production registration', () => {
   });
 
   it('registers canonical-key, freshness, and two-record health checks', () => {
-    const healthSrc = read('api/health.js');
+    const healthSrc = read('api/_health.js');
     assert.match(healthSrc, /physicalPremiums:\s+'market:physical-premium:v1'/);
     assert.match(healthSrc, /physicalDivergence:\s+'market:physical-divergence:v1'/);
     assert.match(healthSrc, /physicalPremiums:\s+\{[\s\S]*?key: 'seed-meta:market:physical-premium'/);
@@ -95,11 +95,11 @@ describe('physical premium production registration', () => {
     assert.match(healthSrc, /'physicalPremiums',/);
     assert.match(healthSrc, /physicalDivergence:\s+\{[\s\S]*?key: 'seed-meta:market:physical-divergence'[\s\S]*?minRecordCount: 2/);
     assert.match(healthSrc, /physicalDivergence:\s+\{[\s\S]*?enforceInputFreshUntil: true/);
-    assert.match(read('api/seed-health.js'), /'market:physical-divergence':\s+\{[\s\S]*?enforceInputFreshUntil: true/);
+    assert.match(read('api/_seed-health.js'), /'market:physical-divergence':\s+\{[\s\S]*?enforceInputFreshUntil: true/);
     assert.match(healthSrc, /physicalDivergence: SEED_META\.physicalDivergence\.activationKey/);
     assert.match(healthSrc, /'physicalDivergence',/);
 
-    const seedHealth = read('api/seed-health.js');
+    const seedHealth = read('api/_seed-health.js');
     assert.match(
       seedHealth,
       /'market:physical-premium':\s+\{[\s\S]*?key: 'seed-meta:market:physical-premium',[\s\S]*?intervalMin: 2160,[\s\S]*?minRecordCount: 2,[\s\S]*?activationKey: 'seed-activated:market:physical-premium'/,

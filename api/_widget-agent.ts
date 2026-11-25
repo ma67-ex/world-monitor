@@ -255,7 +255,7 @@ export default async function handler(
   // source (DNS failure, connection reset, TLS error, hung upstream), but the
   // pre-relay auth lookups are network-backed too, so the boundary sits at the
   // handler edge rather than around the fetch alone. Mirrors the sibling
-  // premium edge routes api/chat-analyst.ts and api/latest-brief.ts: capture
+  // premium edge routes api/_chat-analyst.ts and api/_latest-brief.ts: capture
   // server-side for a real trace, and answer with a CORS-correct transient
   // 503 — never 403, so a relay blip can never read as an entitlement denial.
   //

@@ -1,25 +1,25 @@
-import { loadToolAliases } from '../alias';
-import { stripBillingCopy } from '../chatgpt-copy';
-import { TOOL_DESCRIPTION_MAX_BYTES } from '../constants';
-import { CHATGPT_HIDDEN_TOOLS } from '../host-policy';
-import { JMESPATH_SCHEMA } from '../jmespath';
-import { RESPONSE_MODE_SCHEMA, SPOKEN_LANGUAGE_SCHEMA } from '../spoken';
-import { advertisedOutputSchema } from '../structured-content';
-import type { McpAccessClass, PublicToolShape, ToolDef } from '../types';
-import { compressDescription, utf8ByteLength } from '../utils';
-import { CACHE_TOOLS, RETIRED_CACHE_TOOLS } from './cache-tools';
-import { NLP_TOOLS } from './nlp-tools';
+import { loadToolAliases } from '../_alias';
+import { stripBillingCopy } from '../_chatgpt-copy';
+import { TOOL_DESCRIPTION_MAX_BYTES } from '../_constants';
+import { CHATGPT_HIDDEN_TOOLS } from '../_host-policy';
+import { JMESPATH_SCHEMA } from '../_jmespath';
+import { RESPONSE_MODE_SCHEMA, SPOKEN_LANGUAGE_SCHEMA } from '../_spoken';
+import { advertisedOutputSchema } from '../_structured-content';
+import type { McpAccessClass, PublicToolShape, ToolDef } from '../_types';
+import { compressDescription, utf8ByteLength } from '../_utils';
+import { CACHE_TOOLS, RETIRED_CACHE_TOOLS } from './_cache-tools';
+import { NLP_TOOLS } from './_nlp-tools';
 import { orbitalSiteImageryTools } from './_orbital-site-imagery';
-import { RETIRED_RPC_TOOLS, RPC_TOOLS } from './rpc-tools';
-import { COUNTRY_VIEW_TOOLS } from './country-view';
-import { NEWS_DASHBOARD_TOOLS } from './news-dashboard';
-import { SOURCE_TOOLS } from './source-tools';
-import { MACRO_TOOLS } from './macro-tools';
-import { STOCK_TOOLS } from './stock-tools';
-import { COST_SHOCK_TOOLS } from './cost-shock-tools';
-import { PUBLIC_DOMAIN_TOOLS } from './public-domain-tools';
-import { TARIFF_TOOLS } from './tariff-tools';
-import { WEBCAM_TOOLS } from './webcam-tools';
+import { RETIRED_RPC_TOOLS, RPC_TOOLS } from './_rpc-tools';
+import { COUNTRY_VIEW_TOOLS } from './_country-view';
+import { NEWS_DASHBOARD_TOOLS } from './_news-dashboard';
+import { SOURCE_TOOLS } from './_source-tools';
+import { MACRO_TOOLS } from './_macro-tools';
+import { STOCK_TOOLS } from './_stock-tools';
+import { COST_SHOCK_TOOLS } from './_cost-shock-tools';
+import { PUBLIC_DOMAIN_TOOLS } from './_public-domain-tools';
+import { TARIFF_TOOLS } from './_tariff-tools';
+import { WEBCAM_TOOLS } from './_webcam-tools';
 
 // `openai/toolInvocation` status labels for every tool that renders a ui://
 // view. Keyed by tool name; tests/mcp-view-metadata.test.mjs fails if a tool
@@ -38,8 +38,8 @@ const TOOL_INVOCATION_LABELS: Record<string, { invoking: string; invoked: string
   open_news_dashboard: { invoking: 'Opening the news dashboard…', invoked: 'Opened the news dashboard' },
   open_country_brief: { invoking: 'Opening the country brief…', invoked: 'Opened the country brief' },
 };
-import { FEEDBACK_TOOLS } from './feedback-tools';
-import { TRAVEL_RISK_TOOLS } from './travel-risk-tool';
+import { FEEDBACK_TOOLS } from './_feedback-tools';
+import { TRAVEL_RISK_TOOLS } from './_travel-risk-tool';
 
 // Merged tool registry — cache tools first (no `_execute`), then RPC tools
 // (with `_execute`), then the NLP utilities. Order is observable: `tools/list`
@@ -120,16 +120,16 @@ export const SUMMARY_SCHEMA = {
 for (const tool of TOOL_REGISTRY) {
   const props = tool.inputSchema.properties;
   if (props && '_jmespath' in props) {
-    throw new Error(`api/mcp/registry/index.ts: tool "${tool.name}" declares its own '_jmespath' property — collides with universal JMESPATH_SCHEMA injection. Remove the per-tool declaration.`);
+    throw new Error(`api/mcp/registry/_index.ts: tool "${tool.name}" declares its own '_jmespath' property — collides with universal JMESPATH_SCHEMA injection. Remove the per-tool declaration.`);
   }
   if (tool._execute === undefined && props && 'summary' in props) {
-    throw new Error(`api/mcp/registry/index.ts: cache tool "${tool.name}" declares its own 'summary' property — collides with universal SUMMARY_SCHEMA injection. Remove the per-tool declaration.`);
+    throw new Error(`api/mcp/registry/_index.ts: cache tool "${tool.name}" declares its own 'summary' property — collides with universal SUMMARY_SCHEMA injection. Remove the per-tool declaration.`);
   }
   if (props && 'response_mode' in props) {
-    throw new Error(`api/mcp/registry/index.ts: tool "${tool.name}" declares its own 'response_mode' property — collides with the RESPONSE_MODE_SCHEMA injection for tools with a _spoken narrator. Remove the per-tool declaration.`);
+    throw new Error(`api/mcp/registry/_index.ts: tool "${tool.name}" declares its own 'response_mode' property — collides with the RESPONSE_MODE_SCHEMA injection for tools with a _spoken narrator. Remove the per-tool declaration.`);
   }
   if (props && 'spoken_language' in props) {
-    throw new Error(`api/mcp/registry/index.ts: tool "${tool.name}" declares its own 'spoken_language' property — collides with the SPOKEN_LANGUAGE_SCHEMA injection for tools with a _spoken narrator. Remove the per-tool declaration.`);
+    throw new Error(`api/mcp/registry/_index.ts: tool "${tool.name}" declares its own 'spoken_language' property — collides with the SPOKEN_LANGUAGE_SCHEMA injection for tools with a _spoken narrator. Remove the per-tool declaration.`);
   }
 }
 
@@ -211,7 +211,7 @@ export function buildPublicTool(
     // returned object must not corrupt the module-level outputSchema literal.
     // Advertised as `anyOf [documented shape, projection / soft-envelope
     // shapes]` so the `structuredContent` every call returns validates in a
-    // strict client whatever the response kind (api/mcp/structured-content.ts).
+    // strict client whatever the response kind (api/mcp/_structured-content.ts).
     outputSchema: advertisedOutputSchema(structuredClone(tool.outputSchema), {
       permitDeprecation: TOOL_ALIASES.targetNames().has(tool.name),
       permitSpoken: tool._spoken !== undefined,

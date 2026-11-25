@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { SHIPPING_TTL, TRADE_FLOW_META_KEY, TRADE_TTL, TARIFF_TTL } from '../scripts/seed-supply-chain-trade.mjs';
 
 const { classifyKey, STANDALONE_KEYS, SEED_META } = __testing__;

@@ -45,7 +45,6 @@ import healthHandler from '../_health';
 import httpMessageSignaturesDirectoryHandler from '../_http-message-signatures-directory';
 import invalidateUserApiKeyCacheHandler from '../_invalidate-user-api-key-cache';
 import latestBriefHandler from '../_latest-brief';
-import mcpProxyHandler from '../_mcp-proxy';
 import notificationChannelsHandler from '../_notification-channels';
 import notifyHandler from '../_notify';
 import oauthAuthorizationServerHandler from '../_oauth-authorization-server';
@@ -80,6 +79,17 @@ import versionHandler from '../_version';
 import widgetAgentHandler from '../_widget-agent';
 // @ts-expect-error — JS module, no declaration file
 import wmSessionHandler from '../_wm-session';
+import channelOauthBindHandler from '../_channel-oauth-bind';
+// @ts-expect-error — JS module, no declaration file
+import miitNewsHandler from '../_miit-news';
+// @ts-expect-error — JS module, no declaration file
+import notificationSuppressionsHandler from '../_notification-suppressions';
+import proBusinessUpgradeHandler from '../_pro-business-upgrade';
+import travelRiskAssessmentHandler from '../_travel-risk-assessment';
+import userApiKeysHandler from '../_user-api-keys';
+import userEmbedKeysHandler from '../_user-embed-keys';
+// @ts-expect-error — JS module, no declaration file
+import xFeedHandler from '../_x-feed';
 
 type EdgeCtx = { waitUntil: (p: Promise<unknown>) => void };
 type EdgeHandler = (req: Request, ctx: EdgeCtx) => Response | Promise<Response>;
@@ -104,7 +114,6 @@ const REGISTRY: Record<string, EdgeHandler> = {
   'http-message-signatures-directory': httpMessageSignaturesDirectoryHandler,
   'invalidate-user-api-key-cache': invalidateUserApiKeyCacheHandler,
   'latest-brief': latestBriefHandler,
-  'mcp-proxy': mcpProxyHandler,
   'notification-channels': notificationChannelsHandler,
   'notify': notifyHandler,
   'oauth-authorization-server': oauthAuthorizationServerHandler,
@@ -123,6 +132,14 @@ const REGISTRY: Record<string, EdgeHandler> = {
   'seed-health': seedHealthHandler,
   'symbol-search': symbolSearchHandler,
   'telegram-feed': telegramFeedHandler,
+  'channel-oauth-bind': channelOauthBindHandler,
+  'miit-news': miitNewsHandler,
+  'notification-suppressions': notificationSuppressionsHandler,
+  'pro-business-upgrade': proBusinessUpgradeHandler,
+  'travel-risk-assessment': travelRiskAssessmentHandler,
+  'user-api-keys': userApiKeysHandler,
+  'user-embed-keys': userEmbedKeysHandler,
+  'x-feed': xFeedHandler,
   'user-prefs': userPrefsHandler,
   'version': versionHandler,
   'widget-agent': widgetAgentHandler,
@@ -138,7 +155,9 @@ export default async function handler(req: Request, ctx: EdgeCtx): Promise<Respo
   // not parts[3] as this file assumed on first deploy (#5839d9b regression:
   // every route hit "Unknown endpoint: " with an empty name).
   const parts = url.pathname.split('/');
-  const name = parts[2] ?? '';
+  // `gw` is set by vercel.json for sources outside /api/ (/a2a, /ask, ...),
+  // where the preserved original pathname has no /api/<name> segment.
+  const name = url.searchParams.get('gw') || (parts[2] ?? '');
   const target = REGISTRY[name];
   if (!target) {
     return new Response(JSON.stringify({ error: `Unknown endpoint: ${name}` }), {

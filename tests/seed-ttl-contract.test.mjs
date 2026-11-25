@@ -1,4 +1,4 @@
-// A key api/health.js monitors must stay in Redis longer than its staleness budget.
+// A key api/_health.js monitors must stay in Redis longer than its staleness budget.
 // Otherwise a seeder that is merely late lets the data expire first, and health
 // reports EMPTY (crit) instead of STALE_SEED (warn) while consumers get nothing.
 //
@@ -18,7 +18,7 @@ import { isTestRuntime } from '../scripts/_env-file.mjs';
 import { probeEnv, recordRunSeedCalls, seedMetaWriters } from './helpers/runseed-probe.mjs';
 
 const SCRIPTS = fileURLToPath(new URL('../scripts/', import.meta.url));
-const { __testing__: { SEED_META } } = await import('../api/health.js');
+const { __testing__: { SEED_META } } = await import('../api/_health.js');
 
 // Health entries whose runSeed data TTL does not outlive maxStaleMin today.
 const TTL_DEBT = new Set([
@@ -370,7 +370,7 @@ describe('seed data TTL against the health staleness budget', () => {
     const monitored = new Set(Object.values(SEED_META).map((e) => e.key));
     const unwatched = [...writers.keys()].filter((k) => !monitored.has(k));
     assert.deepEqual(added(unwatched, UNMONITORED).map((k) => `${k} (${writers.get(k).writer})`), [],
-      'add a SEED_META entry in api/health.js for these, with a maxStaleMin the data outlives');
+      'add a SEED_META entry in api/_health.js for these, with a maxStaleMin the data outlives');
     assert.deepEqual(retired(unwatched, UNMONITORED), [], 'these are now monitored or no longer written; delete them from UNMONITORED');
   });
 

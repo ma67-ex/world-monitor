@@ -169,7 +169,7 @@ export default async function handler(
     return htmlResponse(req, 503, UNAVAILABLE_PAGE);
   }
   // The pointer is JSON-encoded at write time (both
-  // api/brief/share-url.ts and api/brief/[userId]/[issueDate].ts
+  // api/brief/_share-url.ts and api/brief/[userId]/[issueDate].ts
   // JSON.stringify the encoded string before SET). readRawJsonFromUpstash
   // parses it back to a bare JS string, which decodePublicPointer
   // handles directly. We also accept an object form ({userId, issueSlot})

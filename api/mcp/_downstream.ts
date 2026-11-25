@@ -4,10 +4,10 @@ import {
   RpcValidationError,
   parseSafeRpcViolations,
   throwIfBillingDenial,
-} from './billing-denial';
-import type { RpcValidationViolation } from './billing-denial';
-import { readBoundedResponseText } from './bounded-body';
-import { emitTelemetry } from './telemetry';
+} from './_billing-denial';
+import type { RpcValidationViolation } from './_billing-denial';
+import { readBoundedResponseText } from './_bounded-body';
+import { emitTelemetry } from './_telemetry';
 import type {
   McpAuthContext,
   McpToolExecutionContext,

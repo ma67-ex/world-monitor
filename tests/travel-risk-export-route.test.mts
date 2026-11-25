@@ -9,8 +9,8 @@ import { readFileSync } from 'node:fs';
 import { strict as assert } from 'node:assert';
 
 import { getEntitlementFeatures } from '../convex/config/productCatalog';
-import { McpSourceUnavailableError } from '../api/mcp/source-unavailable';
-import { createTravelRiskTool } from '../api/mcp/registry/travel-risk-tool';
+import { McpSourceUnavailableError } from '../api/mcp/_source-unavailable';
+import { createTravelRiskTool } from '../api/mcp/registry/_travel-risk-tool';
 import type { TravelRiskResult } from '../api/mcp/registry/_travel-risk-document';
 import {
   createTravelRiskExportHandler,
@@ -400,7 +400,7 @@ describe('travel risk export route: with the real tool behind it', () => {
 });
 
 describe('travel risk export route: the edge wiring', () => {
-  const source = readFileSync(new URL('../api/travel-risk-assessment.ts', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../api/_travel-risk-assessment.ts', import.meta.url), 'utf8');
 
   it('applies its own per-account budget on top of the shared one', () => {
     assert.match(source, /checkRateLimit\(request, cors, \{ principalUserId: userId \}\)/);

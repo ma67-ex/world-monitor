@@ -56,7 +56,7 @@ export interface ProMcpValidateResult {
  *                 No neg-cache write — a blip should not mark a legitimate
  *                 token as bad for 60s.
  *
- * Refresh-grant callers (api/oauth/token.ts) need this distinction so a
+ * Refresh-grant callers (api/oauth/_token.ts) need this distinction so a
  * transient Convex blip does NOT consume the user's refresh token. See
  * F3 in the U7+U8 review pass.
  */
@@ -331,7 +331,7 @@ export async function validateProMcpToken(
  * where transient and revoked both fail-closed (the caller returns 401 and
  * the client retries via OAuth — no information loss).
  *
- * The refresh-grant path in `api/oauth/token.ts` MUST call
+ * The refresh-grant path in `api/oauth/_token.ts` MUST call
  * `validateProMcpToken` directly to distinguish transient from revoked,
  * otherwise a Convex blip silently consumes the refresh token.
  */
@@ -424,7 +424,7 @@ export async function clearProMcpTokenNegCache(tokenId: string): Promise<void> {
  * Redis key shape for the Pro daily-quota INCR/DECR counter.
  *
  * U7 (api/mcp.ts) writes via INCR-first reservation on every `tools/call`.
- * U9 (api/user/mcp-quota.ts) reads the same key for the settings UI.
+ * U9 (api/user/_mcp-quota.ts) reads the same key for the settings UI.
  * BOTH MUST CALL THIS HELPER — drift between writer and reader produces
  * silent UI-vs-enforcement disagreement (the failure mode this helper exists
  * to prevent).

@@ -16,7 +16,7 @@ import { escapeHtml } from '../src/utils/sanitize';
 
 const root = resolve(import.meta.dirname, '..');
 const relaySource = readFileSync(resolve(root, 'scripts/ais-relay.cjs'), 'utf8');
-const healthSource = readFileSync(resolve(root, 'api/health.js'), 'utf8');
+const healthSource = readFileSync(resolve(root, 'api/_health.js'), 'utf8');
 const enLocale = JSON.parse(readFileSync(resolve(root, 'src/locales/en.json'), 'utf8')) as LocaleTree;
 const deLocale = JSON.parse(readFileSync(resolve(root, 'src/locales/de.json'), 'utf8')) as LocaleTree;
 
@@ -345,7 +345,7 @@ describe('layer explanation metadata', () => {
       'canadaRoads limitations must say Alberta roadconditions is not ingested',
     );
     const roadsEvidence = getLayerExplanation('canadaRoads').evidence;
-    for (const path of ['scripts/seed-provincial-511.mjs', 'scripts/seed-toronto-road-restrictions.mjs', 'scripts/seed-open511.mjs', 'api/health.js', 'src/services/canada-roads.ts']) {
+    for (const path of ['scripts/seed-provincial-511.mjs', 'scripts/seed-toronto-road-restrictions.mjs', 'scripts/seed-open511.mjs', 'api/_health.js', 'src/services/canada-roads.ts']) {
       assert.ok(roadsEvidence.includes(path), `canadaRoads evidence must cite ${path}`);
     }
   });
@@ -367,7 +367,7 @@ describe('layer explanation metadata', () => {
       'weather limitations must not still claim coverage is US + Canada only',
     );
     const weatherEvidence = getLayerExplanation('weather').evidence;
-    for (const path of ['scripts/ais-relay.cjs', 'scripts/_weather-alert-select.mjs', 'api/health.js', 'src/services/weather.ts']) {
+    for (const path of ['scripts/ais-relay.cjs', 'scripts/_weather-alert-select.mjs', 'api/_health.js', 'src/services/weather.ts']) {
       assert.ok(weatherEvidence.includes(path), `weather evidence must cite ${path}`);
     }
   });
@@ -384,7 +384,7 @@ describe('layer explanation metadata', () => {
       'canadaAlerts limitations must state the supported provincial scope',
     );
     const canadaAlertsEvidence = getLayerExplanation('canadaAlerts').evidence;
-    for (const path of ['scripts/seed-alberta-emergency-alert.mjs', 'scripts/seed-bc-emergency-info.mjs', 'scripts/seed-saskalert.mjs', 'api/health.js', 'src/services/canada-alerts.ts']) {
+    for (const path of ['scripts/seed-alberta-emergency-alert.mjs', 'scripts/seed-bc-emergency-info.mjs', 'scripts/seed-saskalert.mjs', 'api/_health.js', 'src/services/canada-alerts.ts']) {
       assert.ok(canadaAlertsEvidence.includes(path), `canadaAlerts evidence must cite ${path}`);
     }
   });

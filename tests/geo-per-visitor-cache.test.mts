@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 // @ts-expect-error - plain JS edge handler, no type declarations
-import handler from '../api/geo.js';
+import handler from '../api/_geo.js';
 // One predicate, shared with the vercel.json half of this guard in
 // tests/deploy-config.test.mjs, so the two cannot drift apart.
 import { CDN_CACHE_HEADERS, isSharedCacheable } from './helpers/shared-cache-policy.mjs';
@@ -11,7 +11,7 @@ import { CDN_CACHE_HEADERS, isSharedCacheable } from './helpers/shared-cache-pol
  * `/api/geo` derives its whole body from per-request IP-geo headers, so its
  * answer differs for every visitor. No cache layer in front of it keys on those
  * headers: Vercel's CDN is not given a `Vary`, and the Cloudflare zone in front
- * of api.worldmonitor.app ignores `Vary` outright (see api/bootstrap.js
+ * of api.worldmonitor.app ignores `Vary` outright (see api/_bootstrap.js
  * TIER_CACHE). A shared-cacheable response therefore pins the FIRST visitor's
  * country onto every later caller at that PoP, and the client silently trusts
  * it (src/utils/user-location.ts only falls back when the value is 'XX') to
@@ -47,7 +47,7 @@ describe('/api/geo per-visitor cache contract', () => {
     // Bare max-age with no `public` and no `s-maxage`: explicit freshness alone
     // is enough for a shared cache to store and reuse.
     assert.equal(isSharedCacheable('max-age=300'), true);
-    // TIER_CACHE.slow from api/bootstrap.js -- the most likely "restore browser
+    // TIER_CACHE.slow from api/_bootstrap.js -- the most likely "restore browser
     // caching" edit, because it reads as an in-house-approved value.
     assert.equal(isSharedCacheable('max-age=300, stale-while-revalidate=600, stale-if-error=3600'), true);
     // s-maxage=0 is fresh for zero seconds, but stale-while-revalidate still

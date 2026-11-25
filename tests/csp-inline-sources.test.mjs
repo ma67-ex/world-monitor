@@ -15,9 +15,9 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import authorizeHandler, { consentPage } from '../api/oauth/authorize.js';
-import { authorizeProHandler } from '../api/oauth/authorize-pro.ts';
-import youtubeEmbedHandler from '../api/youtube/embed.js';
+import authorizeHandler, { consentPage } from '../api/oauth/_authorize.js';
+import { authorizeProHandler } from '../api/oauth/_authorize-pro.ts';
+import youtubeEmbedHandler from '../api/youtube/_embed.js';
 
 const ROOT = new URL('..', import.meta.url);
 const STATIC_NONCE = "'nonce-wm-static-bootstrap'";
@@ -25,8 +25,8 @@ const STATIC_NONCE = "'nonce-wm-static-bootstrap'";
 // Served under a different CSP, or not served as a page under ours.
 const EXEMPT = {
   // Own CSP rules in vercel.json.
-  'api/slack/oauth/callback.ts': '/api/slack/oauth/callback',
-  'api/discord/oauth/callback.ts': '/api/discord/oauth/callback',
+  'api/slack/oauth/_callback.ts': '/api/slack/oauth/callback',
+  'api/discord/oauth/_callback.ts': '/api/discord/oauth/callback',
   'public/wm-widget-sandbox.html': '/wm-widget-sandbox.html',
   'embed.html': '/embed.html',
   // MCP App resources: the MCP server inlines them and the host renders them
@@ -40,9 +40,9 @@ const EXEMPT_DIRS = ['api/mcp/ui/'];
 // Handlers whose inline scripts are allowed by hash under their own route CSP.
 // Their scripts are checked against that CSP from the rendered page below.
 const ROUTE_CSP_FILES = {
-  'api/oauth/authorize.js': ['/oauth/authorize', '/api/oauth/authorize'],
-  'api/oauth/authorize-pro.ts': ['/oauth/authorize-pro', '/api/oauth/authorize-pro'],
-  'api/youtube/embed.js': ['/api/youtube/embed'],
+  'api/oauth/_authorize.js': ['/oauth/authorize', '/api/oauth/authorize'],
+  'api/oauth/_authorize-pro.ts': ['/oauth/authorize-pro', '/api/oauth/authorize-pro'],
+  'api/youtube/_embed.js': ['/api/youtube/embed'],
 };
 
 // Vite source pages for /pro and /welcome; the build adds the script nonces,
@@ -163,27 +163,27 @@ describe('served HTML runs under the site-wide CSP', () => {
 const ROUTE_PAGES = [
   {
     name: 'OAuth consent page',
-    routes: ROUTE_CSP_FILES['api/oauth/authorize.js'],
+    routes: ROUTE_CSP_FILES['api/oauth/_authorize.js'],
     nginx: 'docker/nginx-oauth-authorize-security-headers.conf',
-    render: () => consentPage({ client_name: 'Claude', redirect_uri: 'https://claude.ai/api/mcp/auth_callback' }, 'n').text(),
+    render: () => consentPage({ client_name: 'Claude', redirect_uri: 'https://claude.ai/api/mcp/_auth_callback' }, 'n').text(),
   },
   {
     // Also document.write()n into the consent page after a failed POST, where
     // it runs under the consent page's CSP: the same route rule.
     name: 'OAuth error page',
-    routes: ROUTE_CSP_FILES['api/oauth/authorize.js'],
+    routes: ROUTE_CSP_FILES['api/oauth/_authorize.js'],
     nginx: 'docker/nginx-oauth-authorize-security-headers.conf',
     render: async () => (await authorizeHandler(new Request('https://api.worldmonitor.app/oauth/authorize'))).text(),
   },
   {
     name: 'Pro OAuth error page',
-    routes: ROUTE_CSP_FILES['api/oauth/authorize-pro.ts'],
+    routes: ROUTE_CSP_FILES['api/oauth/_authorize-pro.ts'],
     nginx: 'docker/nginx-oauth-authorize-security-headers.conf',
     render: async () => (await authorizeProHandler(new Request('https://api.worldmonitor.app/oauth/authorize-pro'), {})).text(),
   },
   {
     name: 'YouTube embed page',
-    routes: ROUTE_CSP_FILES['api/youtube/embed.js'],
+    routes: ROUTE_CSP_FILES['api/youtube/_embed.js'],
     nginx: 'docker/nginx-youtube-embed-security-headers.conf',
     render: async () => (await youtubeEmbedHandler(new Request('https://worldmonitor.app/api/youtube/embed?videoId=iEpJwprxDdk'))).text(),
   },

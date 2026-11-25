@@ -4,10 +4,10 @@
 // route's query, compacts each record to the fields agents read, and attaches
 // the method constants the methodVersion pins.
 import { COUNTRY_ARG_HINT, echoCountryInput, resolveCountryArg } from '../_country-args';
-import { buildAuthHeaders } from '../auth';
-import { RpcValidationError } from '../billing-denial';
-import { assertMcpToolFetchOk, fetchMcpDownstream } from '../downstream';
-import type { RpcToolDef } from '../types';
+import { buildAuthHeaders } from '../_auth';
+import { RpcValidationError } from '../_billing-denial';
+import { assertMcpToolFetchOk, fetchMcpDownstream } from '../_downstream';
+import type { RpcToolDef } from '../_types';
 import type {
   GetNo2ActivityResponse,
   No2ActivityRegion,

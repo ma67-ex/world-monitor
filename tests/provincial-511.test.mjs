@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { __testing__ as limiterTesting } from '../scripts/_511-rate-limit.mjs';
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import {
   ALBERTA_511,
   CHROME_UA,
@@ -828,7 +828,7 @@ test('manitobaRoads probe watches the exact key its seeder writes', () => {
   // writes — which reads as a permanently EMPTY source, the very state the ack
   // was suppressing. Without this the removal takes the check with it.
   const seeder = readFileSync(new URL('../scripts/seed-provincial-511.mjs', import.meta.url), 'utf8');
-  const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+  const health = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
   assert.match(seeder, /MANITOBA_META_KEY = 'seed-meta:infra:manitoba-511'/);
   assert.match(seeder, /MANITOBA_KEY = 'infra:manitoba-511:v1'/);
   assert.match(health, /manitobaRoads:\s*\{\s*\n\s*key: 'seed-meta:infra:manitoba-511'/);

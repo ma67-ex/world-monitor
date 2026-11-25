@@ -1,5 +1,5 @@
 // Shared cache-policy predicate for endpoints whose response body varies per
-// request (see api/geo.js). Lives here rather than inline in each test because
+// request (see api/_geo.js). Lives here rather than inline in each test because
 // two copies of a security predicate drift: widen one, forget the other, and the
 // guard that was not widened silently starts clearing values the other rejects.
 //

@@ -4,7 +4,7 @@
 // `writeSeedMeta` used whatever override it was handed. scripts/seed-bls-series.mjs
 // passed its own data key (`bls:series:<id>`) as the override, so every daily run
 // wrote the series and then immediately overwrote it with the 44-byte
-// `{fetchedAt, recordCount}` heartbeat, on the 7-day meta TTL. api/health.js
+// `{fetchedAt, recordCount}` heartbeat, on the 7-day meta TTL. api/_health.js
 // watched the canonical key and `seed-meta:economic:bls-series`, both written
 // correctly by runSeed, so the seeder read HEALTHY for six months while the RPC
 // served an empty body — and a 503 storm once #8360 stopped swallowing the miss.

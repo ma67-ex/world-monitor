@@ -1,4 +1,4 @@
-import { __testing__ as health } from '../../api/health.js';
+import { __testing__ as health } from '../../api/_health.js';
 import { CII_INPUT_POLICY } from '../../api/_cii-input-health.js';
 
 export const CII_RISK_SCORES_META_KEY = 'seed-meta:intelligence:risk-scores';

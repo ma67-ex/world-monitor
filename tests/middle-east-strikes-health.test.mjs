@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 process.env.IRAN_EVENTS_ENABLED = 'true';
-const { __testing__ } = await import('../api/health.js');
+const { __testing__ } = await import('../api/_health.js');
 const { classifyKey, BOOTSTRAP_KEYS, STANDALONE_KEYS, SEED_META, ACTIVATION_MARKERS } = __testing__;
 
 const NOW = 1_700_000_000_000;
@@ -69,7 +69,7 @@ test('Telegram freshness counts only polls that read at least one channel', () =
 });
 
 test('seed-health marks the feed stale on the same budget', async () => {
-  const src = readFileSync(new URL('../api/seed-health.js', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../api/_seed-health.js', import.meta.url), 'utf8');
   const interval = Number(/'conflict:iran-events':\s*\{[^}]*intervalMin:\s*(\d+)/.exec(src)?.[1]);
   assert.ok(interval * 2 <= SEED_META.iranEvents.maxStaleMin && interval * 2 >= 30, `intervalMin ${interval}`);
 });
@@ -118,7 +118,7 @@ test('the tally data outlives its 30-day window and its health budget', () => {
 });
 
 test('seed-health keeps the tally pending until its first healthy publish, like /api/health', () => {
-  const src = readFileSync(new URL('../api/seed-health.js', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../api/_seed-health.js', import.meta.url), 'utf8');
   const entry = /'conflict:strike-pressure':\s*\{([^}]*)\}/.exec(src)?.[1] ?? '';
   assert.match(entry, new RegExp(`activationKey: '${SEED_META.strikePressure.activationKey}'`));
 });
@@ -150,7 +150,7 @@ test('the v2 shadow tally is a standalone key with its own seed-meta and activat
   assert.match(lib, new RegExp(`PRESSURE_KEY = '${PRESSURE_V2_KEY}'`));
   assert.match(lib, new RegExp(`PRESSURE_SEED_META_KEY = '${SEED_META.strikePressureV2.key}'`));
   assert.match(lib, new RegExp(`PRESSURE_ACTIVATION_KEY = '${SEED_META.strikePressureV2.activationKey}'`));
-  const src = readFileSync(new URL('../api/seed-health.js', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../api/_seed-health.js', import.meta.url), 'utf8');
   const entry = /'conflict:strike-pressure:v2':\s*\{([^}]*)\}/.exec(src)?.[1] ?? '';
   assert.match(entry, new RegExp(`activationKey: '${SEED_META.strikePressureV2.activationKey}'`));
 });

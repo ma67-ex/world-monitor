@@ -254,7 +254,7 @@ describe('intel-history domain allowlist', () => {
   });
 
   it('the MCP tool enum matches the contract', () => {
-    const source = readFileSync(resolve(root, 'api/mcp/registry/rpc-tools.ts'), 'utf8');
+    const source = readFileSync(resolve(root, 'api/mcp/registry/_rpc-tools.ts'), 'utf8');
     const literal = /const INTEL_HISTORY_DOMAINS = \[([^\]]+)\]/.exec(source)?.[1] ?? '';
     const domains = [...literal.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
     assert.deepEqual(domains, [...HISTORY_DOMAINS]);

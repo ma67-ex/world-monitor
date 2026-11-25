@@ -1081,7 +1081,7 @@ describe('api/mcp.ts — /.well-known/mcp dual-role alias', () => {
     // ship inside the function bundle, so no read here
     // may depend on the network. Import the implementation directly with a
     // unique query so no module-scope state carries over from other tests.
-    const fresh = await import(`../api/mcp/handler.ts?unreachable=${Date.now()}-${Math.random()}`);
+    const fresh = await import(`../api/mcp/_handler.ts?unreachable=${Date.now()}-${Math.random()}`);
     const isolatedServer = await startMcpServer(fresh.mcpHandler, deps);
     const isolatedAliasUrl = isolatedServer.url.replace('/mcp', '/.well-known/mcp');
     const successfulStaticFetch = globalThis.fetch;
@@ -1367,9 +1367,9 @@ describe('api/mcp.ts — rate-limit denials stay correlatable over the wire (#78
   });
 });
 
-describe('api/mcp/handler.ts — SSE replay byte budget', () => {
+describe('api/mcp/_handler.ts — SSE replay byte budget', () => {
   it('one principal at its session cap cannot evict another principal\'s replay', async () => {
-    const { __sseReplayStoreForTest: store } = await import('../api/mcp/handler.ts');
+    const { __sseReplayStoreForTest: store } = await import('../api/mcp/_handler.ts');
     store.reset();
     try {
       const big = 'x'.repeat(120 * 1024);

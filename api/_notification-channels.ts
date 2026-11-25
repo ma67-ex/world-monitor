@@ -273,8 +273,8 @@ async function convexRelay(
       'User-Agent': 'worldmonitor-edge/1.0',
     },
     body: JSON.stringify(body),
-    // Matches the 15s timeout api/customer-portal.ts and
-    // api/create-checkout.ts already use for the same Convex host.
+    // Matches the 15s timeout api/_customer-portal.ts and
+    // api/_create-checkout.ts already use for the same Convex host.
     // Without this, a hung relay call outlives the edge runtime's invocation
     // budget before the handler's own catch can run finish() to release the
     // idempotency lock this endpoint holds across the call — leaving retries
@@ -540,7 +540,7 @@ export default async function handler(req: Request, ctx: { waitUntil: (p: Promis
     // welcome path can send mail, so a signed-in Pro user must not be able to
     // drive either without bound. Per-user, after the Pro gate so the limiter
     // is not spent on callers the upsell already turns away. A limiter outage
-    // fails closed like api/notify.ts: a retryable 503, never an open door.
+    // fails closed like api/_notify.ts: a retryable 503, never an open door.
     const scoped = await notificationChannelsDeps.checkScopedRateLimit(
       NOTIFICATION_CHANNELS_WRITE_RATE_SCOPE,
       NOTIFICATION_CHANNELS_WRITE_RATE_LIMIT,

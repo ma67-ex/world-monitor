@@ -132,7 +132,7 @@ describe('fetchWithTimeout', () => {
 
 describe('createRelayHandler', () => {
   it('serves OREF success publicly and keeps unavailable responses out of caches', async () => {
-    const { default: handler } = await import('../api/oref-alerts.js');
+    const { default: handler } = await import('../api/_oref-alerts.js');
     mockFetchOk();
     const response = await handler(makeRequest('https://worldmonitor.app/api/oref-alerts'));
     assert.equal(response.headers.get('access-control-allow-origin'), '*');
@@ -339,7 +339,7 @@ describe('createRelayHandler', () => {
   });
 
   // Keeping the failure OUT of the response body is only half the fix: the two
-  // routes with no cfg.fallback (api/opensky.js, api/polymarket.js) would then
+  // routes with no cfg.fallback (api/_opensky.js, api/_polymarket.js) would then
   // answer an outage with a bare 502 and leave no trace anywhere. Pin the
   // server-side record so the body assertions above cannot lock in silence.
   it('records the cause server-side even though the body stays generic', async () => {

@@ -14,7 +14,7 @@ import {
   publishSnapshotToRedis,
   writeSnapshotFiles,
 } from '../scripts/build-open-data-chokepoints.mjs';
-import handler, { OPEN_DATA_CHOKEPOINT_KEYS } from '../api/open-data-chokepoints.js';
+import handler, { OPEN_DATA_CHOKEPOINT_KEYS } from '../api/_open-data-chokepoints.js';
 
 const UPSTASH_URL = 'https://upstash.test';
 const body = JSON.parse(readFileSync(new URL('./fixtures/chokepoints-status-2026-11-02.json', import.meta.url), 'utf8')).body;

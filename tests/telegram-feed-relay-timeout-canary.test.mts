@@ -55,7 +55,7 @@ process.env.WM_SESSION_SECRET = SESSION_SECRET;
 const ENVELOPE_URL_PREFIX = 'https://sentry.test/api/12345/envelope';
 const RELAY_URL_PREFIX = 'https://relay.example.com';
 
-const { default: handler, relayFailureLevel } = await import('../api/telegram-feed.js');
+const { default: handler, relayFailureLevel } = await import('../api/_telegram-feed.js');
 const { issueSessionToken } = await import('../api/_session.js');
 
 const originalFetch = globalThis.fetch;

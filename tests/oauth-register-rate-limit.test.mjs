@@ -38,7 +38,7 @@ beforeEach(async () => {
     }
     return Response.json(pipeline ? results : results[0]);
   };
-  ({ default: handler } = await import(`../api/oauth/register.js?test=${crypto.randomUUID()}`));
+  ({ default: handler } = await import(`../api/oauth/_register.js?test=${crypto.randomUUID()}`));
 });
 
 afterEach(() => {
@@ -60,7 +60,7 @@ function request(redirect = 'http://localhost:4200/callback') {
 }
 
 it('admits public clients and preserves hosted and loopback redirects', async () => {
-  for (const uri of ['http://localhost:4200/callback', 'http://127.0.0.1:9000/callback', 'https://claude.ai/api/mcp/auth_callback']) {
+  for (const uri of ['http://localhost:4200/callback', 'http://127.0.0.1:9000/callback', 'https://claude.ai/api/mcp/_auth_callback']) {
     const response = await handler(request(uri));
     assert.equal(response.status, 201);
     assert.equal(response.headers.get('access-control-allow-origin'), '*');

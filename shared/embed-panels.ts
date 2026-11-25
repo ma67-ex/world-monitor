@@ -3,7 +3,7 @@
  *
  * `/embed?panel=` may only render these ids. Keep this module free of browser
  * and server imports so both the embed entry (`src/embed/`) and the
- * entitlement edge handler (`api/embed/entitlement.ts`) share one contract.
+ * entitlement edge handler (`api/embed/_entitlement.ts`) share one contract.
  *
  * X / tweet bodies are intentionally absent: embed partners receive derived
  * facts plus permalinks only. Do not add an X panel that dumps post text.

@@ -11,7 +11,7 @@ import {
 } from '../scripts/wildfire/cwfis-wfs.mjs';
 import { mergeWildfireSourcesWithBc, canadianWildfireAfterPublish } from '../scripts/wildfire/bc-fire-points.mjs';
 import { observeWildfireSource } from '../scripts/wildfire/source-outcome.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 
 process.env.WM_SEED_RETRY_DELAY_MS = '1';
 const NOW = Date.parse('2026-09-07T06:20:00Z');

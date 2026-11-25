@@ -176,7 +176,7 @@ test('ICAO failure past the health budget lets last-good closures expire', () =>
 });
 
 test('the seeder retention budget equals the health budget for notamClosures', async () => {
-  const { __testing__: health } = await import('../api/health.js');
+  const { __testing__: health } = await import('../api/_health.js');
   const source = readFileSync(join(root, 'scripts', 'seed-aviation.mjs'), 'utf8');
   const match = source.match(/const NOTAM_MAX_STALE_MIN = (\d+);/);
   assert.ok(match, 'seed-aviation.mjs must declare NOTAM_MAX_STALE_MIN');

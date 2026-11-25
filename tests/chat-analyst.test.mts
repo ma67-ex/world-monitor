@@ -1934,7 +1934,7 @@ describe('assembleAnalystContext — the named instrument reaches the Market Dat
   });
 
   it('a prior-turn instrument stays in the block when the follow-up pivots', async () => {
-    // api/chat-analyst.ts builds the retrieval query as `${query} ${prevUserTurn}`.
+    // api/_chat-analyst.ts builds the retrieval query as `${query} ${prevUserTurn}`.
     const harness = withStubbedRedis({ 'market:commodities-bootstrap:v1': liveCommoditiesFixture() });
     try {
       const ctx = await assembleAnalystContext(undefined, 'all', 'And natural gas? Why is Brent up today?');
@@ -2143,7 +2143,7 @@ describe('chat-analyst-grounding — withPriceGrounding over the SSE stream', ()
 
 describe('api/chat-analyst handler — the served stream is price-grounded', () => {
   it('grounds the served stream outermost, leaving the quota wrapper on the raw provider stream', () => {
-    const src = readFileSync(new URL('../api/chat-analyst.ts', import.meta.url), 'utf-8');
+    const src = readFileSync(new URL('../api/_chat-analyst.ts', import.meta.url), 'utf-8');
     assert.match(src, /const stream = withPriceGrounding\(\s*prependSseEvents\(/,
       'the price check wraps the quota/meta wrapper, which keeps reading llmStream directly');
     assert.match(src, /step:\s*'price-grounding'/, 'an ungrounded price is reported server-side');
@@ -2421,8 +2421,8 @@ describe('Issue #11244 — assembleAnalystContext intelHistory retrieval, AI-rou
       'live market quotes and prior user-turn figures remain grounded',
     );
 
-    const apiSrc = readFileSync(new URL('../api/chat-analyst.ts', import.meta.url), 'utf-8');
+    const apiSrc = readFileSync(new URL('../api/_chat-analyst.ts', import.meta.url), 'utf-8');
     assert.match(apiSrc, /const groundText = buildAnalystPriceGroundText\(/,
-      'api/chat-analyst.ts must build price groundText without dated intelHistory records');
+      'api/_chat-analyst.ts must build price groundText without dated intelHistory records');
   });
 });

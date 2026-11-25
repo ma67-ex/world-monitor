@@ -17,12 +17,12 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, afterEach, before, describe, it } from 'node:test';
 
-import authorizeHandler, { consentPage } from '../api/oauth/authorize.js';
+import authorizeHandler, { consentPage } from '../api/oauth/_authorize.js';
 import { OAUTH_BIND_COOKIE, hashOAuthBindValue } from '../api/oauth/_browser-binding.js';
 
 const BASE_PARAMS = {
   client_name: 'Claude Desktop',
-  redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+  redirect_uri: 'https://claude.ai/api/mcp/_auth_callback',
   client_id: 'client_abc',
   response_type: 'code',
   code_challenge: 'a'.repeat(43),

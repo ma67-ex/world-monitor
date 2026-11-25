@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import handler from '../api/mcp.ts';
-import { TOOL_REGISTRY, buildPublicTool, toolAccess, toolWeight } from '../api/mcp/registry/index.ts';
+import { TOOL_REGISTRY, buildPublicTool, toolAccess, toolWeight } from '../api/mcp/registry/_index.ts';
 
 const previousFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = previousFetch; });

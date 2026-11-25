@@ -35,7 +35,7 @@ Dynamic Client Registration. Returns a `client_id` (public clients, no secret).
 **Request**:
 ```json
 {
-  "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+  "redirect_uris": ["https://claude.ai/api/mcp/_auth_callback"],
   "client_name": "Claude Desktop",
   "token_endpoint_auth_method": "none"
 }
@@ -46,7 +46,7 @@ Dynamic Client Registration. Returns a `client_id` (public clients, no secret).
 {
   "client_id": "7c3b08f0-0c1f-4a9c-8a52-69e13d2a5d5e",
   "client_name": "Claude Desktop",
-  "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+  "redirect_uris": ["https://claude.ai/api/mcp/_auth_callback"],
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none"

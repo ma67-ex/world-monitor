@@ -1598,7 +1598,7 @@ async function composeBriefsForRun(rules, nowMs, { deadlineMs } = {}) {
     // raw = true pins the bare-key read (#7674): the seeder fleet publishes
     // bare rows and must keep doing so even if VERCEL_ENV ever leaks into
     // this container's runtime. The api readers of this key are hard-locked
-    // raw too (api/latest-brief.ts and the brief routes).
+    // raw too (api/_latest-brief.ts and the brief routes).
     const insightsRaw = await readRawJsonFromUpstash(INSIGHTS_KEY, 3_000, true);
     if (insightsRaw) insightsNumbers = extractInsights(insightsRaw).numbers;
   } catch (err) {

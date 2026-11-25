@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { afterEach, test } from 'node:test';
-import handler from '../api/polymarket.js';
+import handler from '../api/_polymarket.js';
 import { __resetRateLimitForTest } from '../api/_rate-limit.js';
 const source = readFileSync(new URL('../scripts/ais-relay.cjs', import.meta.url), 'utf8');
 const region = source.slice(source.indexOf('const POLYMARKET_ENABLED ='), source.indexOf('// Periodic cache cleanup to prevent memory leaks', source.indexOf('const POLYMARKET_ENABLED =')));

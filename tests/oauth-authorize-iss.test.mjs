@@ -83,7 +83,7 @@ after(() => {
   }
 });
 
-const { default: authorizeHandler, resolveAuthorizationIssuer } = await import('../api/oauth/authorize.js');
+const { default: authorizeHandler, resolveAuthorizationIssuer } = await import('../api/oauth/_authorize.js');
 
 function registerClient() {
   store.set(`oauth:client:${CLIENT_ID}`, JSON.stringify({ client_name: 'ChatGPT', redirect_uris: [REDIRECT_URI] }));
@@ -118,7 +118,7 @@ function submitConsent(nonce, { host = 'api.worldmonitor.app', xhr = false, apiK
 
 describe('RFC 9207 — authorization server metadata', () => {
   it('advertises authorization_response_iss_parameter_supported on every host', async () => {
-    const { default: asHandler } = await import('../api/oauth-authorization-server.ts');
+    const { default: asHandler } = await import('../api/_oauth-authorization-server.ts');
     for (const host of ['worldmonitor.app', 'www.worldmonitor.app', 'api.worldmonitor.app']) {
       const res = await asHandler(new Request(`https://${host}/.well-known/oauth-authorization-server`, { headers: { host } }));
       const json = await res.json();

@@ -1,9 +1,9 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Window } from 'happy-dom';
-import { WORLD_BRIEF_APP_HTML } from '../api/mcp/ui/world-brief-app.ts';
-import { buildStructuredContent } from '../api/mcp/structured-content.ts';
-import { applyJmespath } from '../api/mcp/jmespath.ts';
+import { WORLD_BRIEF_APP_HTML } from '../api/mcp/ui/_world-brief-app.ts';
+import { buildStructuredContent } from '../api/mcp/_structured-content.ts';
+import { applyJmespath } from '../api/mcp/_jmespath.ts';
 
 const windows = [];
 const payload = {

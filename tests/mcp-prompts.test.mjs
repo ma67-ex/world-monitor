@@ -529,7 +529,7 @@ describe('api/mcp.ts — prompts capability + JMESPath-vs-schema parity', () => 
     }),
     // Tariff fixtures mirror the route bodies plus the MCP-layer `coverage`
     // object (tests/mcp-tariff-tools.test.mts, buildCoverage in
-    // api/mcp/registry/tariff-tools.ts).
+    // api/mcp/registry/_tariff-tools.ts).
     get_us_import_duty: () => ({
       hsCode: '870380',
       partnerCountry: '156',

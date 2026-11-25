@@ -212,7 +212,7 @@ describe('get_world_brief story corroboration (#4925 item 3)', () => {
   });
 
   it('documents the roster on topStories items', async () => {
-    const { RPC_TOOLS } = await import('../api/mcp/registry/rpc-tools.ts');
+    const { RPC_TOOLS } = await import('../api/mcp/registry/_rpc-tools.ts');
     const tool = RPC_TOOLS.find((entry) => entry.name === 'get_world_brief');
     const item = tool.outputSchema.properties.topStories.items;
     assert.deepEqual(item.properties.publishers.items.required, ['name', 'tier', 'labels', 'labelsUnlisted']);
@@ -258,7 +258,7 @@ describe('get_world_brief story corroboration (#4925 item 3)', () => {
   });
 
   it('documents sourceProvenance on topStories items', async () => {
-    const { RPC_TOOLS } = await import('../api/mcp/registry/rpc-tools.ts');
+    const { RPC_TOOLS } = await import('../api/mcp/registry/_rpc-tools.ts');
     const tool = RPC_TOOLS.find((entry) => entry.name === 'get_world_brief');
     const provenance = tool.outputSchema.properties.topStories.items.properties.sourceProvenance;
     assert.equal(provenance.type, 'array');
@@ -366,7 +366,7 @@ describe('get_world_brief story corroboration (#4925 item 3)', () => {
   });
 
   // 12 stories (the headline cap) each at the 500-char title clip and the
-  // 12-outlet cap. If a response exceeds the budget, api/mcp/dispatch.ts
+  // 12-outlet cap. If a response exceeds the budget, api/mcp/_dispatch.ts
   // replaces the entire response with { _budget_exceeded: true }, a
   // user-visible regression, not a silent truncation.
   // Each story also carries ten publisher families of six case-variant

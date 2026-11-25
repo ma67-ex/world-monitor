@@ -5,8 +5,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CACHE_TOOLS } from '../api/mcp/registry/cache-tools.ts';
-import { __testing__ as health } from '../api/health.js';
+import { CACHE_TOOLS } from '../api/mcp/registry/_cache-tools.ts';
+import { __testing__ as health } from '../api/_health.js';
 
 test('get_aviation_status freshness follows the aggregate it reads', () => {
   const tool = CACHE_TOOLS.find((t) => t.name === 'get_aviation_status');

@@ -63,7 +63,7 @@ async function getRatelimit(policy) {
 // so the user is unaffected. Capture those at `warning` so a sustained Redis
 // outage still escalates by volume without a transient script-timeout drowning
 // genuine error-level signal in the dashboard (WORLDMONITOR-RX; mirrors the
-// SERVICE_UNAVAILABLE `level: 'warning'` precedent in api/user-prefs.ts). A
+// SERVICE_UNAVAILABLE `level: 'warning'` precedent in api/_user-prefs.ts). A
 // `missing-config` stage is a real deploy misconfiguration and any novel error
 // is unclassified — both stay at `error` so on-call still sees them.
 //
@@ -129,7 +129,7 @@ function logRateLimitDegraded(stage, err, ctx) {
 
 // One-per-isolate latch for edge-proof rejections. Spoofed cf-connecting-ip
 // headers are caller-controlled on a direct origin hit; reporting every 403
-// would create an amplification path (mirrors api/mcp/auth.ts). (#8402)
+// would create an amplification path (mirrors api/mcp/_auth.ts). (#8402)
 const EDGE_PROOF_RATE_LIMIT_LATCH = Symbol.for('worldmonitor.rate-limit.edge-proof-reported.v1');
 
 function reportEdgeProofRequiredOnce(stage, err, ctx) {

@@ -1,4 +1,4 @@
-import { buildAppHtml } from './shell';
+import { buildAppHtml } from './_shell';
 
 const STYLES = `
   .filters { display: flex; gap: 12px; margin: 14px 0 6px; flex-wrap: wrap; }

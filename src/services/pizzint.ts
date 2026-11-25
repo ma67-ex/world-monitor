@@ -134,7 +134,7 @@ function isCacheablePizzIntStatus(status: PizzIntStatus): boolean {
 
 // ---- pizzint.watch direct source (SITREP fork, no WorldMonitor backend) ----
 // pizzint.watch sends no Access-Control-Allow-Origin, so the browser can't
-// call it directly -- api/pizzint-proxy.js re-serves it same-origin with
+// call it directly -- api/_pizzint-proxy.js re-serves it same-origin with
 // permissive CORS. See docs/plans/2026-08-15-...-plan.md.
 
 interface PizzintWatchLocation {

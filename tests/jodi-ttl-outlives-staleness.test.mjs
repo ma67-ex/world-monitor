@@ -29,7 +29,7 @@ import {
   MAX_JODI_GAS_CONTENT_AGE_MIN,
 } from '../scripts/shared/jodi-content-age.mjs';
 import { monthPeriodEnd } from '../scripts/shared/jodi-demand-change.mjs';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import {
   extractBundleSections,
   resolveExpr,

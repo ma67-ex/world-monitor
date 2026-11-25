@@ -10,7 +10,7 @@ import { cachedFetchJsonWithMeta } from './redis';
 /**
  * Domains the intel-history collectors write (scripts/_seed-history.mjs callers).
  * Mirrored by the three request protos' `domain` pattern and the MCP enum in
- * api/mcp/registry/rpc-tools.ts; tests/intel-history-endpoints.test.mts pins
+ * api/mcp/registry/_rpc-tools.ts; tests/intel-history-endpoints.test.mts pins
  * all of them to the domains the collectors actually write.
  */
 export const HISTORY_DOMAINS: readonly string[] = Object.freeze([

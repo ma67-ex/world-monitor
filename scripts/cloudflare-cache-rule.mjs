@@ -141,7 +141,7 @@ export const EDGE_CACHED_FAMILIES = Object.freeze([...CONTENT_CORPUS_PREFIXES, '
  *   make this rule the last writer of `edge_ttl` for those URLs and replace that
  *   month with "respect origin" — which, for Vercel's static default of
  *   `max-age=0, must-revalidate`, means an origin round-trip on every request.
- * docs: `/docs/mcp` is the docs MCP server (api/docs-mcp.ts — no-store JSON-RPC
+ * docs: `/docs/mcp` is the docs MCP server (api/_docs-mcp.ts — no-store JSON-RPC
  *   over GET and POST), and `/docs/_*` is Mintlify's own asset and API space
  *   (`/docs/_next/…`, `/docs/_mintlify/…`). Neither is a document.
  */

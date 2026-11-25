@@ -2,7 +2,7 @@
  * Alert-capability model for the free-tier alert ladder (#4273).
  *
  * Pure data + predicates shared by the three write-path gates (the edge
- * handler `api/notification-channels.ts`, and the Convex mutations in
+ * handler `api/_notification-channels.ts`, and the Convex mutations in
  * `convex/alertRules.ts` / `convex/notificationChannels.ts`) and by the
  * product catalog, so the ladder's numbers have one home. The delivery-time
  * clamp in `scripts/notification-relay.cjs` mirrors the FREE_* values in CJS

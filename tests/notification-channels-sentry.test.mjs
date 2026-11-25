@@ -23,7 +23,7 @@ test('notification GET and POST relay failures deliver distinct Sentry fingerpri
   };
 
   try {
-    notification = await import('../api/notification-channels.ts');
+    notification = await import('../api/_notification-channels.ts');
     const relayFailure = new Error('relay requestId=dynamic-123');
     notification.__setNotificationChannelsDepsForTests({
       checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),
@@ -94,7 +94,7 @@ test('notification GET and POST timeout captures are downgraded to warning', asy
   };
 
   try {
-    notification = await import(`../api/notification-channels.ts?timeout=${Date.now()}`);
+    notification = await import(`../api/_notification-channels.ts?timeout=${Date.now()}`);
     for (const method of ['GET', 'POST']) {
       for (const errorName of ['TimeoutError', 'AbortError']) {
         await t.test(`${method} ${errorName}`, async () => {

@@ -39,7 +39,7 @@ import iso3ToIso2 from './shared/iso3-to-iso2.json' with { type: 'json' };
 
 // Both UCDP writers (scripts/ais-relay.cjs and scripts/seed-ucdp-events.mjs)
 // publish the projection under these keys. The bootstrap slow tier reads the
-// first; api/health.js watches the second.
+// first; api/_health.js watches the second.
 export const UCDP_BOOTSTRAP_KEY = 'conflict:ucdp-events-bootstrap:v1';
 export const UCDP_BOOTSTRAP_META_KEY = 'seed-meta:conflict:ucdp-events-bootstrap';
 

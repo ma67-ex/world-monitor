@@ -1,4 +1,4 @@
-import { readPluginDocument } from './news-dashboard-app';
+import { readPluginDocument } from './_news-dashboard-app';
 
 export const PREVIOUS_MARKET_RADAR_UI_URI = 'ui://worldmonitor/market-radar-v2.html';
 export const LEGACY_MARKET_RADAR_UI_URI = 'ui://worldmonitor/market-radar.html';

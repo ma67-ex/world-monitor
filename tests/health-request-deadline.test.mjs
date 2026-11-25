@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 process.env.UPSTASH_REDIS_REST_URL = 'https://mock-upstash.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
 
-const { default: handler, __testing__: t } = await import('../api/health.js');
+const { default: handler, __testing__: t } = await import('../api/_health.js');
 
 const SITE = 'https://relay-deadline.convex.site';
 const EDGE_FIRST_BYTE_LIMIT_MS = 25_000;

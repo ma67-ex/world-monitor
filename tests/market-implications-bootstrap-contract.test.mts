@@ -3,7 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { createRedisFetch } from './helpers/fake-upstash-redis.mts';
 import rpc from '../api/infrastructure/v1/[rpc].ts';
 import intelligence from '../api/intelligence/v1/[rpc].ts';
-import bootstrap from '../api/bootstrap.js';
+import bootstrap from '../api/_bootstrap.js';
 import { issueSessionToken } from '../api/_session.js';
 import { publishBootstrapTier } from '../scripts/publish-bootstrap-tiers.mjs';
 import { listMarketImplications } from '../server/worldmonitor/intelligence/v1/list-market-implications.ts';

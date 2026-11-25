@@ -1143,7 +1143,7 @@ export const CREDENTIAL_BEARING_HEADERS = [
   'Authorization',
   'X-WorldMonitor-Key',
   'X-Api-Key',
-  // Widget tester keys (validated in api/widget-agent.ts:273-274). Both are
+  // Widget tester keys (validated in api/_widget-agent.ts:273-274). Both are
   // per-principal credentials like the operator keys above: X-Widget-Key
   // unlocks basic, X-Pro-Key unlocks Pro-tier generation.
   'X-Widget-Key',
@@ -1249,7 +1249,7 @@ export function createDomainGateway(
     // controllable, and emitting it as `customer_id` would let unauthenticated
     // callers poison per-customer dashboards (per koala #3403 review). We only
     // populate `widgetKey` after validating it against the configured
-    // WIDGET_AGENT_KEY — same check used in api/widget-agent.ts.
+    // WIDGET_AGENT_KEY — same check used in api/_widget-agent.ts.
     const rawWidgetKey = request.headers.get('x-widget-key') ?? null;
     const widgetAgentKey = process.env.WIDGET_AGENT_KEY ?? '';
     const validatedWidgetKey =
@@ -2742,7 +2742,7 @@ export function createDomainGateway(
     // charges the caller's daily allowance up front (INCR before the handler
     // runs); every path below that ends without serving an answer releases
     // it through this handle instead of leaving the slot spent (#5147, and
-    // the same defect api/chat-analyst.ts fixed for its own reservation in
+    // the same defect api/_chat-analyst.ts fixed for its own reservation in
     // #7217). rollback is idempotent, so calling it from more than one exit
     // path is safe.
     let directLlmRollback: (() => Promise<void>) | null = null;
@@ -2762,7 +2762,7 @@ export function createDomainGateway(
         ? `docker:${hashKeySync(deriveIp(request) ?? 'unknown')}`
         : null;
       // Operator keys carry no account, so they are metered per key on the
-      // bucket api/widget-agent.ts already charges for the same key.
+      // bucket api/_widget-agent.ts already charges for the same key.
       const operatorQuotaUserId = isEnterpriseAuth
         ? await operatorKeyQuotaPrincipal(enterpriseCredential)
         : null;

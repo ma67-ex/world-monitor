@@ -11,7 +11,7 @@ process.env.CONVEX_SITE_URL = 'https://fake.convex.site';
 process.env.CONVEX_TENANT_RELAY_SECRET = 'gateway-secret';
 const { resolveVerifiedClerkSession } = await import('../server/_shared/auth-session.ts');
 const { lookupClerkPlan, verifyClerkSessionActive } = await import('../server/auth-session.ts');
-const { default: route, userEmbedKeyCreateHandler, userEmbedKeyCreateRateLimitPolicy } = await import('../api/user-embed-keys.ts');
+const { default: route, userEmbedKeyCreateHandler, userEmbedKeyCreateRateLimitPolicy } = await import('../api/_user-embed-keys.ts');
 
 let privateKey: CryptoKey;
 let verifiedUser: string;

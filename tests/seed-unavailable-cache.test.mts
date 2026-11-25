@@ -248,7 +248,7 @@ for (const [path, key, payload, field] of requiredCases) {
   itRejectsRequiredSeedFailures(path, key, payload, body => assert.deepEqual((body as Record<string, unknown>)[field], payload[field]));
 }
 
-// #8424: get-bls-series reads the canonical key api/health.js vouches for. The
+// #8424: get-bls-series reads the canonical key api/_health.js vouches for. The
 // per-series keys it used to read were overwritten by their own seed-meta record
 // on every run from 2026-03-23, and health never looked at them.
 const BLS_CANONICAL_KEY = 'bls:series:v1';

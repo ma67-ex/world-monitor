@@ -151,7 +151,7 @@ export function classifyPublicEmbedFrameSearch(
  * Classify a full request. Anything that is not the exact public shape returns
  * null and is served uncacheable — including a stray `?rpc=` echo, which this
  * static route does not receive today (there is no dynamic segment in
- * `api/embed/map-frame.ts`), and which would fail closed toward `no-store`
+ * `api/embed/_map-frame.ts`), and which would fail closed toward `no-store`
  * rather than toward a shared entry if that ever changed.
  */
 function stripTrailingSlashes(value: string): string {

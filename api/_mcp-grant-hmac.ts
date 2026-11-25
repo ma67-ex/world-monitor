@@ -2,11 +2,11 @@
  * HMAC sign / verify helpers for the Pro-MCP cross-subdomain grant token.
  *
  * Used by:
- *   - U3 `api/internal/mcp-grant-mint.ts` — signs `{userId, nonce, exp}`
+ *   - U3 `api/internal/_mcp-grant-mint.ts` — signs `{userId, nonce, exp}`
  *     after a Clerk-authenticated Pro user clicks "Authorize" on the apex
  *     consent page, returns a redirect URL whose `grant=` query parameter
  *     carries the signed payload.
- *   - U5 `api/oauth/authorize-pro.ts` — verifies the grant on the api
+ *   - U5 `api/oauth/_authorize-pro.ts` — verifies the grant on the api
  *     subdomain before consuming the matching `mcp-grant:<nonce>` Redis
  *     one-shot and issuing the OAuth code.
  *

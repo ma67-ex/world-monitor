@@ -85,7 +85,7 @@ it('Vite validates RSS redirect destinations before sending requests', async () 
   redirectTarget = '/next';
   const response = await originalFetch(`${base}/api/rss-proxy?url=${encodeURIComponent('https://feeds.bbci.co.uk/start')}`);
   assert.equal(response.status, 200);
-  // Match api/rss-proxy.js: feed bytes are data, never a same-origin document.
+  // Match api/_rss-proxy.js: feed bytes are data, never a same-origin document.
   assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8');
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(response.headers.get('content-security-policy'), "sandbox; default-src 'none'");

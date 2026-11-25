@@ -110,7 +110,7 @@ export const COUNTRY_EVENTS_META_KEY = 'seed-meta:gdelt:bulk:country-events';
 export const COUNTRY_EVENTS_ACTIVATION_KEY = 'seed-activated:gdelt:bulk:country-events';
 const CONFLICT_TTL = 6 * 60 * 60;
 const UNREST_TTL = 4.5 * 60 * 60;
-// 3h, NOT 45min: api/health.js gates positiveGeoEvents at maxStaleMin 60 AND
+// 3h, NOT 45min: api/_health.js gates positiveGeoEvents at maxStaleMin 60 AND
 // treats a missing payload as a hard failure, so a TTL under that window makes a
 // merely-late materializer page as EMPTY/crit before STALE_SEED can warn — the
 // #5309 ACLED_TTL zero-headroom class. The old warm relay masked this with a
@@ -127,12 +127,12 @@ const POSITIVE_EVENTS_META_KEY = 'seed-meta:positive-events:geo';
 // The index has no dashboard consumer — only the search route's country form
 // and the weekly freeze read it — so it is a standalone health dataset
 // (AGENTS.md): published with its own seed-meta record and gated in
-// api/health.js at the same 45-minute budget as the canonical intel key,
+// api/_health.js at the same 45-minute budget as the canonical intel key,
 // or an evicted or stale index would stay invisible until the next Monday's
 // freeze answered `seed-unavailable` and failed its coverage floor.
 export const COUNTRY_ARTICLES_META_KEY = 'seed-meta:gdelt:bulk:country-articles';
 // Durable activation marker (no TTL), SET after the first successful index
-// publish. api/health.js reads the probe as pending until it exists, so the
+// publish. api/_health.js reads the probe as pending until it exists, so the
 // window between this deploy and the materializer's first tick is not a
 // crit, and strict afterwards — a marker that cannot expire is what keeps a
 // materializer that published once and died from reading as pending again.

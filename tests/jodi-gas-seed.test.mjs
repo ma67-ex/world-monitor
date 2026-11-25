@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 import * as gasSeed from '../scripts/seed-jodi-gas.mjs';
 import { MAX_JODI_GAS_CONTENT_AGE_MIN } from '../scripts/shared/jodi-content-age.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import {
   CANONICAL_KEY,
   MIN_COUNTRIES,

@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { TENDER_SOURCE_RETENTION_MS } from '../scripts/_global-tenders.mjs';
 import { CACHE_TTL_SECONDS, SOURCE_STATUS_TTL_SECONDS } from '../scripts/seed-global-tenders.mjs';
 import { STALE_AFTER_MS } from '../server/worldmonitor/economic/v1/list-global-tenders.ts';

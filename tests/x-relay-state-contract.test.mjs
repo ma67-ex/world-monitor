@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 // Importing scripts/ais-relay.cjs starts its server. Keep only relay wiring
 // checks here; tests/x-poll-cycle.test.mjs executes the extracted cycle behavior.
 const relay = readFileSync(new URL('../scripts/ais-relay.cjs', import.meta.url), 'utf8');
-const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+const health = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
 const healthDocs = readFileSync(new URL('../docs/health-endpoints.mdx', import.meta.url), 'utf8');
 const railwayServices = JSON.parse(
   readFileSync(new URL('../scripts/railway-services.json', import.meta.url), 'utf8'),

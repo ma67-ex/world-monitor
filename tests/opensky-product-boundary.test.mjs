@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import handler from '../api/opensky.js';
+import handler from '../api/_opensky.js';
 
 describe('OpenSky legacy proxy product boundary', () => {
   const originalFetch = globalThis.fetch;

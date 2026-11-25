@@ -7,7 +7,7 @@
 // The relay stops blocked links BEFORE delivery, but a push notification
 // already sitting on a device carries its URL in `notification.data.url`.
 // This module consults the anonymous edge endpoint
-// (api/notification-suppressions.js) on click, and when the click target is
+// (api/_notification-suppressions.js) on click, and when the click target is
 // suppressed the SW shows a "link blocked" notice instead of navigating —
 // the operator's revoke path for the already-delivered case.
 //
@@ -34,7 +34,7 @@
   // (withAlertReferrer in scripts/shared/notify-fields.cjs), so the URL a push
   // carries differs from the one an operator blocked. The tag is not part of
   // the link's identity and is dropped before the digest. Same list as the
-  // relay matcher and api/notification-suppressions.js.
+  // relay matcher and api/_notification-suppressions.js.
   var ALERT_REFERRER_PARAMS = [
     'utm_source=worldmonitor',
     'utm_medium=alert',

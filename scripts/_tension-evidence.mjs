@@ -15,7 +15,7 @@ const DAY = 24 * HOUR;
 const FUTURE_SKEW_MS = 5 * MIN;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// maxAgeMin mirrors each source's SEED_META budget in api/health.js.
+// maxAgeMin mirrors each source's SEED_META budget in api/_health.js.
 export const SOURCES = {
   strikeEvents: { key: 'conflict:iran-events:v1', metaKey: 'seed-meta:conflict:iran-events', maxAgeMin: 45 },
   strikeTally: { key: 'conflict:strike-pressure:v1', metaKey: 'seed-meta:conflict:strike-pressure', maxAgeMin: 45 },

@@ -370,7 +370,7 @@ function createXPollCycle(deps = {}) {
           // A rejected slot keeps the last-good COUNTS but must stop claiming
           // completeness: polled/expected/failed freeze together with `complete`,
           // so normalizeCoverage cannot self-correct and the panel's degraded
-          // banner (api/x-feed.js -> XIntelPanel) would never render through an
+          // banner (api/_x-feed.js -> XIntelPanel) would never render through an
           // outage, even while seed metadata reports the rejected attempt.
           ? { ...xState.lastCoverage, complete: false }
           : xState.lastCoverage),

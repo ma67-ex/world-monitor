@@ -618,7 +618,7 @@ describe('validateBootstrapCacheDocs', () => {
   // Drift from the code side: the docs stand still while api/_bootstrap.js moves.
   it('catches a handler-side tier change the docs never followed', () => {
     const drifted = parseBootstrapCacheContract(
-      read('api/bootstrap.js').replace("fast: 'max-age=60,", "fast: 'max-age=120,"),
+      read('api/_bootstrap.js').replace("fast: 'max-age=60,", "fast: 'max-age=120,"),
     );
     const failures = validateBootstrapCacheDocs(
       { bootstrapCache: drifted },
@@ -659,7 +659,7 @@ describe('validateBootstrapCacheDocs', () => {
       failures.length,
       BOOTSTRAP_CACHE_DOC_FILES.length * Object.keys(REAL_CACHE.onDemandProfiles).length,
     );
-    assert.ok(hit(failures, 'publishes an own cache profile for `chinaDecisionSignals`, but api/bootstrap.js declares none'));
+    assert.ok(hit(failures, 'publishes an own cache profile for `chinaDecisionSignals`, but api/_bootstrap.js declares none'));
   });
 
   // Every other doc fixture swaps a captured VALUE, so the "anchor present but

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { CANADA_ALERT_SOURCES, CANADA_ALERTS_KEY } from '../scripts/lib/canada-alerts-union.mjs';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/bc-emergency-info.geojson', import.meta.url)));

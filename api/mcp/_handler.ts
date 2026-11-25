@@ -12,8 +12,8 @@ import {
   runContextPreChecks,
   validateProMcpAuthorization,
   wwwAuthHeader,
-} from './auth';
-import { readBoundedRequestBody, RequestBodyTooLargeError } from './bounded-body';
+} from './_auth';
+import { readBoundedRequestBody, RequestBodyTooLargeError } from './_bounded-body';
 import {
   allSupportedProtocolVersionsNewestFirst,
   CHATGPT_MODERN_SERVER_INSTRUCTIONS,
@@ -24,13 +24,13 @@ import {
   negotiateProtocolVersion,
   SERVER_INSTRUCTIONS,
   SERVER_INFO,
-} from './constants';
-import { dispatchToolsCall } from './dispatch';
-import { MCP_GUIDE_MARKDOWN, MCP_SERVER_CARD_WITHOUT_TOOLS_JSON, MCP_SETUP_HTML } from './discovery-documents.generated';
-import { serverCardTools } from './server-card-tools';
-import { buildPromptResponse, PROMPT_LIST_RESPONSE, WITHOUT_SUMMARY_TOOLS_PROMPT_LIST_RESPONSE } from './prompts/index';
-import { CHATGPT_TOOL_LIST_RESPONSE, FREE_TIER_TOOL_NAMES, TOOL_LIST_BYTES, TOOL_LIST_RESPONSE, TRAVEL_RISK_TOOL_NAMES } from './registry/index';
-import { applyChatGptCommercePolicy, applyViewDomainPolicy, CHATGPT_HIDDEN_TOOLS, declaredClientName, isChatGptHost, mintSessionId } from './host-policy';
+} from './_constants';
+import { dispatchToolsCall } from './_dispatch';
+import { MCP_GUIDE_MARKDOWN, MCP_SERVER_CARD_WITHOUT_TOOLS_JSON, MCP_SETUP_HTML } from './_discovery-documents.generated';
+import { serverCardTools } from './_server-card-tools';
+import { buildPromptResponse, PROMPT_LIST_RESPONSE, WITHOUT_SUMMARY_TOOLS_PROMPT_LIST_RESPONSE } from './prompts/_index';
+import { CHATGPT_TOOL_LIST_RESPONSE, FREE_TIER_TOOL_NAMES, TOOL_LIST_BYTES, TOOL_LIST_RESPONSE, TRAVEL_RISK_TOOL_NAMES } from './registry/_index';
+import { applyChatGptCommercePolicy, applyViewDomainPolicy, CHATGPT_HIDDEN_TOOLS, declaredClientName, isChatGptHost, mintSessionId } from './_host-policy';
 import {
   ACCOUNT_RESOURCE_LIST_RESPONSE,
   buildAccountAllowanceResourceResponse,
@@ -40,28 +40,28 @@ import {
   isPublicResourceUri,
   RESOURCE_LIST_RESPONSE,
   RESOURCE_TEMPLATE_LIST_RESPONSE,
-} from './resources/index';
-import { rpcError, rpcOk, withMcpNoStore } from './rpc';
+} from './resources/_index';
+import { rpcError, rpcOk, withMcpNoStore } from './_rpc';
 import {
   MODERN_ONLY_METHODS,
   modernListenResponse,
   modernMethodNotFound,
   shapeModernResponse,
   validateModernRequest,
-} from './modern';
+} from './_modern';
 import {
   buildSkillResourceRead,
   buildSkillsGetResponse,
   buildSkillsListResponse,
   isSkillUri,
   isSkillResourceUri,
-} from './skill-extension/index';
-import { buildUiResourceRead, isUiResourceUri, UI_RESOURCE_LIST_RESPONSE } from './ui/registry';
-import { emitTelemetry, principalIdForLog } from './telemetry';
+} from './skill-extension/_index';
+import { buildUiResourceRead, isUiResourceUri, UI_RESOURCE_LIST_RESPONSE } from './ui/_registry';
+import { emitTelemetry, principalIdForLog } from './_telemetry';
 import { classifyAgentClientHints, sanitizeClientName } from '../../shared/agent-client-source';
 import { hashKeySync } from '../../server/_shared/usage-identity';
 import { deriveRequestId } from '../../server/_shared/usage';
-import { attachRequestIdToErrors } from './request-id';
+import { attachRequestIdToErrors } from './_request-id';
 import {
   createMcpUsage,
   emitMcpRequestEvent,
@@ -69,8 +69,8 @@ import {
   setUsageProtocolVersion,
   setUsageRpc,
   type McpUsage,
-} from './usage';
-import { clientAcceptsSse, safeJsonRpcId, utf8ByteLength } from './utils';
+} from './_usage';
+import { clientAcceptsSse, safeJsonRpcId, utf8ByteLength } from './_utils';
 import {
   isMcpAliasRequest,
   MCP_CANONICAL_ENDPOINT_ERROR_CODE,
@@ -79,8 +79,8 @@ import {
   MCP_CANONICAL_LINK,
   mcpCanonicalLocation,
 } from '../../shared/mcp-host-policy';
-import type { McpAuthContext, McpHandlerDeps } from './types';
-import type { McpBudget } from './quota';
+import type { McpAuthContext, McpHandlerDeps } from './_types';
+import type { McpBudget } from './_quota';
 
 // MCP methods servable WITHOUT authentication — on the machine-discovery
 // aliases only (WELL_KNOWN_MCP_PATHS). The transport paths (`/mcp`, `/api/mcp`)
@@ -289,7 +289,7 @@ type StoredSseSession = {
 const SSE_CONTENT_TYPE = 'text/event-stream; charset=utf-8';
 // no-store forbids storage outright; no-cache is vacuous alongside it (RFC 9111
 // §5.2) so it is omitted. no-transform is load-bearing for SSE framing. This also
-// matches the sibling no-store work in api/mcp/rpc.ts (#4502).
+// matches the sibling no-store work in api/mcp/_rpc.ts (#4502).
 const MCP_CACHE_CONTROL = 'no-store, no-transform';
 // JSON-RPC IDs are client-controlled and get echoed in every success/error
 // envelope. Keep ordinary scalar IDs correlatable, but reject IDs that could
@@ -669,7 +669,7 @@ async function handleAuthenticatedSseReplay(
 ): Promise<Response> {
   const auth = await resolveAuthContext(req, deps, resourceMetadataUrl, corsHeaders);
   if (!auth.ok) {
-    usage.phase = '_auth';
+    usage.phase = 'auth';
     return auth.response;
   }
   setUsageContext(usage, auth.context);
@@ -1075,7 +1075,7 @@ async function mcpHandlerInner(
   // POSTs are a client error regardless of auth, so returning -32600 here (rather
   // than 401-then-32600) leaks nothing. The byte cap (#7406) sits ahead of
   // JSON.parse so an oversized body never reaches method dispatch — matching
-  // api/docs-mcp.ts (HTTP 413 + JSON-RPC -32600).
+  // api/_docs-mcp.ts (HTTP 413 + JSON-RPC -32600).
   let body: JsonRpcRequest;
   let modernEra = false;
   try {
@@ -1265,7 +1265,7 @@ async function mcpHandlerInner(
       // downgrade; a valid principal is attributed for telemetry + limits.
       const auth = await resolveAuthContext(req, deps, resourceMetadataUrl, corsHeaders, id);
       if (!auth.ok) {
-        usage.phase = '_auth';
+        usage.phase = 'auth';
         return auth.response;
       }
       context = auth.context;
@@ -1316,7 +1316,7 @@ async function mcpHandlerInner(
   } else {
     const auth = await resolveAuthContext(req, deps, resourceMetadataUrl, corsHeaders, id);
     if (!auth.ok) {
-      usage.phase = '_auth';
+      usage.phase = 'auth';
       return auth.response;
     }
     context = auth.context;
@@ -1438,7 +1438,7 @@ async function mcpHandlerInner(
       // explicit `{ kind: 'free' }` principal rather than leaving context null.
       // The guard narrows the type and hard-fails closed if that ever changes.
       if (!context) {
-        usage.phase = '_auth';
+        usage.phase = 'auth';
         return authRequiredResponse(id, resourceMetadataUrl, corsHeaders);
       }
       const dispatched = await dispatchToolsCall(
@@ -1564,7 +1564,7 @@ async function mcpHandlerInner(
       // telemetry path. `context` is always set here — a non-public
       // resources/read runs the gated path above; the guard fails closed.
       if (!context) {
-        usage.phase = '_auth';
+        usage.phase = 'auth';
         return authRequiredResponse(id, resourceMetadataUrl, corsHeaders);
       }
       {

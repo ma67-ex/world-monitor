@@ -7,7 +7,7 @@ import {
   PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES,
   PORTWATCH_MAX_CACHE_AGE_MS,
 } from '../scripts/_portwatch-content-freshness.mjs';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { getCountryPortActivity } from '../server/worldmonitor/intelligence/v1/get-country-port-activity';
 import { installRedis } from './helpers/fake-upstash-redis.mts';
 
@@ -242,7 +242,7 @@ test('natural 168-to-60 expiry cliff preserves publication and reports incomplet
   assert.equal(expiredResponse.stale, true);
   assert.equal(expiredResponse.ports.length, 1);
   process.env.WORLDMONITOR_VALID_KEYS = 'test-key';
-  const { handleSeedHealth } = await import('../api/seed-health.js');
+  const { handleSeedHealth } = await import('../api/_seed-health.js');
   const seedHealthResponse = await handleSeedHealth(new Request('https://api.worldmonitor.app/api/seed-health', {
     headers: { 'X-WorldMonitor-Key': 'test-key' },
   }), { now: NOW });

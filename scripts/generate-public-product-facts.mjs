@@ -27,10 +27,10 @@ import { INTEL_HOTSPOTS } from '../shared/geo-data.ts';
 import { PIPELINES } from '../shared/pipelines-data.ts';
 import { ORBITAL_WATCH_PLAN_LINES, orbitalWatchAccess } from '../shared/orbital-watch-pricing.ts';
 import { TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
-import { MCP_DOMAIN_SUMMARY, MCP_TAGS, MCP_TOOL_CATEGORIES } from '../api/mcp/domains.ts';
-import { serverCardTools } from '../api/mcp/server-card-tools.ts';
+import { MCP_DOMAIN_SUMMARY, MCP_TAGS, MCP_TOOL_CATEGORIES } from '../api/mcp/_domains.ts';
+import { serverCardTools } from '../api/mcp/_server-card-tools.ts';
 import { UI_RESOURCE_LIST_RESPONSE } from '../api/mcp/ui/_registry.ts';
-import { FREE_ACCOUNT_CALLS_PER_DAY } from '../api/mcp/upgrade-constants.ts';
+import { FREE_ACCOUNT_CALLS_PER_DAY } from '../api/mcp/_upgrade-constants.ts';
 import { publishedRankedCountries } from './build-crawlable-corpus.mjs';
 import { commandPaletteCommandCount } from './lib/command-palette-count.mjs';
 import { defaultOnLayerStats } from './lib/default-map-layer-count.mjs';
@@ -362,7 +362,7 @@ const RESTATED_FACT_PHRASES = new Map([
   ['public/llms-full.txt', [PROVIDERS_ACROSS_HOSTS]],
   ['public/llms.txt', [{ pattern: /\b\d+ crisis trackers\b/g, occurrences: 1, keys: ['crisisTrackers'] }]],
   ['blog-site/src/content/blog/what-is-worldmonitor-real-time-global-intelligence.md', [PROVIDERS_ACROSS_HOSTS]],
-  ['api/oauth/authorize.js', [CONSENT_PROVIDERS]],
+  ['api/oauth/_authorize.js', [CONSENT_PROVIDERS]],
   ['mcp-grant.html', [CONSENT_PROVIDERS]],
 ]);
 const RESTATED_FACT_VALUES = {
@@ -474,7 +474,7 @@ transform('public/.well-known/mcp/server-card.json', (source) => {
     `open_country_brief → ${viewFilename('open_country_brief', 'country-view')}`,
   );
   card.metadata.mcpApps.uiResources = UI_RESOURCE_LIST_RESPONSE.map(resource => resource.uri);
-  // Categories and tags come from api/mcp/domains.ts. The per-tool category is
+  // Categories and tags come from api/mcp/_domains.ts. The per-tool category is
   // card-only; the live tools/list _meta stays access + weight (no wire change).
   // ui.resourceUri mirrors the live MCP Apps link so a scanner that cannot
   // authenticate still sees which tools render an app.
@@ -482,7 +482,7 @@ transform('public/.well-known/mcp/server-card.json', (source) => {
   card.tags = [...MCP_TAGS];
   card.tools = serverCardTools();
   const uncategorised = card.tools.filter((tool) => !tool._meta['worldmonitor/category']).map((tool) => tool.name);
-  if (uncategorised.length) throw new Error(`${uncategorised.join(', ')} has no category in api/mcp/domains.ts`);
+  if (uncategorised.length) throw new Error(`${uncategorised.join(', ')} has no category in api/mcp/_domains.ts`);
   return renderJsonDomainSurface(json(card), SERVER_CARD_DOMAIN_SURFACE, MCP_DOMAIN_SUMMARY);
 });
 

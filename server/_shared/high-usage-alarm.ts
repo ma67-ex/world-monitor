@@ -109,7 +109,7 @@ export function reportHighUsageIfCrossed(opts: {
 
 /**
  * The direct-LLM quota principal for an operator key: `wm:` plus the first 32
- * hex chars of its SHA-256. This is the bucket `api/widget-agent.ts` already
+ * hex chars of its SHA-256. This is the bucket `api/_widget-agent.ts` already
  * charged, so moving the gateway and chat-analyst onto it adds their calls to
  * the existing counter rather than starting a second one.
  */

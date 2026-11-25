@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import {
   CANADA_ALERTS_LEGACY_KEY,
   CANADA_ALERTS_SIBLING_KEY,

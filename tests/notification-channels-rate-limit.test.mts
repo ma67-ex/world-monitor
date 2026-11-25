@@ -3,7 +3,7 @@
  * durable-welcome path can send mail, so every signed-in writer — Pro or
  * free-ladder (#4273) — needs a per-user write budget. The limiter runs after
  * the billing-verification gate and fails closed on a limiter outage
- * (retryable 503), matching api/notify.ts.
+ * (retryable 503), matching api/_notify.ts.
  */
 import assert from 'node:assert/strict';
 import { afterEach, describe, it, mock } from 'node:test';
@@ -23,7 +23,7 @@ async function importFreshNotificationChannels() {
   process.env.CONVEX_TENANT_RELAY_SECRET = 'relay-secret';
   process.env.UPSTASH_REDIS_REST_URL = 'https://upstash.test';
   process.env.UPSTASH_REDIS_REST_TOKEN = 'upstash-token';
-  return import(`../api/notification-channels.ts?test=${Date.now()}-${Math.random()}`);
+  return import(`../api/_notification-channels.ts?test=${Date.now()}-${Math.random()}`);
 }
 
 function makeRequest(method: 'GET' | 'POST', body?: Record<string, unknown>): Request {

@@ -7,7 +7,7 @@ import { after, describe, it } from 'node:test';
 // frames are all anonymous `(vc/edge/function` with no source map and
 // `in_app=false`. Sentry's default grouping keys on that stack, so every
 // capture sharing it collapses together — the pathology
-// `api/mcp/error-fingerprint.ts` was written to close for `api/mcp`, and which
+// `api/mcp/_error-fingerprint.ts` was written to close for `api/mcp`, and which
 // `tests/mcp-pro-token-fingerprint.test.mts` already pins for the Pro-token
 // gate.
 //
@@ -38,7 +38,7 @@ delete process.env.RSS_RELAY_URL;
 const ENVELOPE_URL_PREFIX = 'https://sentry.test/api/12345/envelope';
 const FEED_URL = 'https://techcrunch.com/feed';
 
-const { default: handler } = await import('../api/rss-proxy.js');
+const { default: handler } = await import('../api/_rss-proxy.js');
 
 const originalFetch = globalThis.fetch;
 after(() => {

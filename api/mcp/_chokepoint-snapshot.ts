@@ -1,6 +1,6 @@
 import { CHOKEPOINT_THREAT_LEVELS } from '../../shared/chokepoint-threat-levels.js';
 import { narrowFlowSource } from '../../server/_shared/flow-source';
-import { argStr, argStrList, ciIncludes, pickMapKeysLike } from './filters';
+import { argStr, argStrList, ciIncludes, pickMapKeysLike } from './_filters';
 // @ts-expect-error — shared Edge-safe JavaScript content contract.
 import { buildContentFreshnessAssessment } from '../_content-freshness.js';
 

@@ -9,7 +9,7 @@
         "client_name": "Claude",
         "client_uri": "https://claude.ai",
         "redirect_uris": [
-          "https://claude.ai/api/mcp/auth_callback"
+          "https://claude.ai/api/mcp/_auth_callback"
         ],
         "grant_types": [
           "authorization_code",

@@ -74,8 +74,8 @@ function isActivePaidEntitlement(ent: DirectLlmEntitlementShape | null | undefin
 /**
  * THE decision point for "what daily direct-LLM budget does this caller get".
  *
- * Both enforcement surfaces — `server/gateway.ts`, `api/chat-analyst.ts`, and
- * `api/widget-agent.ts` (the self-metered edge proxies) — INCR the same
+ * Both enforcement surfaces — `server/gateway.ts`, `api/_chat-analyst.ts`, and
+ * `api/_widget-agent.ts` (the self-metered edge proxies) — INCR the same
  * `llm:direct-usage:<userId>:<date>` key, so they must agree. One counter
  * enforced against two different caps is the class of bug this centralizes
  * away: it tells a Pro Business customer "limit 500" on one surface while

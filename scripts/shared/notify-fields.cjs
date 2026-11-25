@@ -6,7 +6,7 @@
  * scripts/notification-relay.cjs runs on Railway under scripts/package.json
  * (no TS loader) and Dockerfile.relay COPYs scripts/** explicitly, so the
  * relay cannot import the .ts source. This file is the require()'able copy
- * the relay consumes; the .ts file is the Edge-bundled copy api/notify.ts
+ * the relay consumes; the .ts file is the Edge-bundled copy api/_notify.ts
  * consumes. The two MUST stay byte-equivalent in behaviour — enforced by
  * tests/notify-fields-parity.test.mjs, which derives the export surface from
  * both modules and runs every vector against both, failing on any divergence.
@@ -178,7 +178,7 @@ function sanitizeNotificationLinkUrl(value) {
 //
 // The link-suppression matchers remove exactly these tags before comparing
 // (scripts/shared/notification-link-suppression.cjs,
-// api/notification-suppressions.js, public/link-suppression-check.js), so a
+// api/_notification-suppressions.js, public/link-suppression-check.js), so a
 // new channel here must be added to all three.
 const NOTIFY_ALERT_UTM_SOURCE = 'worldmonitor';
 const NOTIFY_ALERT_UTM_MEDIUM = 'alert';

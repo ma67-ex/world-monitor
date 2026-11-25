@@ -14,7 +14,7 @@ import { extractBundleSections } from './helpers/bundle-section-parser.mjs';
 import { sectionWorstCaseMs, BUNDLE_PREFLIGHT_HEADROOM_MS } from '../scripts/_bundle-runner.mjs';
 import { fetchRegionalEnergyFeed, regionalEnergySeedOptions } from '../scripts/_regional-energy-source.mjs';
 import feeds from '../scripts/shared/regional-energy-feeds.json' with { type: 'json' };
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import {
   parsePgcb, parseNiso, parseCammesa, parseEskom, parseOns,
   parseAnpTrade, parseAnpPriceRows, parsePetrobangla, parseGse,

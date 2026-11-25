@@ -1,5 +1,5 @@
 /**
- * PARITY: server/_shared/notify-fields.ts (Edge, consumed by api/notify.ts)
+ * PARITY: server/_shared/notify-fields.ts (Edge, consumed by api/_notify.ts)
  * and scripts/shared/notify-fields.cjs (Railway relay, consumed by
  * scripts/notification-relay.cjs) must stay behaviour-equivalent.
  *

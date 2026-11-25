@@ -3,14 +3,14 @@ import { after, describe, it } from 'node:test';
 
 // ─── #7204: the relay fetch must never escape as an opaque platform 5xx ─────
 //
-// `api/widget-agent.ts` attaches `corsHeaders` to all fifteen of its other
+// `api/_widget-agent.ts` attaches `corsHeaders` to all fifteen of its other
 // exits, but the relay call itself was unguarded and the handler had no outer
 // `try`. A relay DNS failure, connection reset, or TLS error therefore threw
 // straight out of the handler and became a Vercel platform 5xx *without* CORS
 // headers — the browser saw a CORS error rather than a readable status, so the
 // widget could not tell "relay is down" from "you are not allowed".
 //
-// These tests pin the sibling contract `api/chat-analyst.ts:99-121` already
+// These tests pin the sibling contract `api/_chat-analyst.ts:99-121` already
 // documents: capture server-side, and answer with a CORS-correct transient 503
 // (never a 403 — a relay blip must never read as an entitlement denial).
 //
@@ -42,7 +42,7 @@ const RELAY_POST_URL = 'https://proxy.worldmonitor.app/widget-agent';
 const RELAY_HEALTH_URL = 'https://proxy.worldmonitor.app/widget-agent/health';
 const ORIGIN = 'https://www.worldmonitor.app';
 
-const { default: handler, __setWidgetAgentSpendDepsForTests } = await import('../api/widget-agent.ts');
+const { default: handler, __setWidgetAgentSpendDepsForTests } = await import('../api/_widget-agent.ts');
 __setWidgetAgentSpendDepsForTests({
   checkRateLimit: async () => null,
   runRedisPipeline: async (commands) => {

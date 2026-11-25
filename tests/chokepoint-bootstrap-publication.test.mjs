@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import handler from '../api/bootstrap.js';
+import handler from '../api/_bootstrap.js';
 import { assembleBootstrapTierPayload } from '../scripts/publish-bootstrap-tiers.mjs';
 
 const capture = JSON.parse(readFileSync(new URL('./fixtures/chokepoints-routing-advice-2026-09-10.json', import.meta.url), 'utf8'));

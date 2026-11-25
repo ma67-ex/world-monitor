@@ -102,10 +102,10 @@ describe('IP-scoped endpoint rate limits reject unproven CF client IP (#8402)', 
   });
 
   for (const [path, module] of [
-    ['/api/skills/fetch-agentskills', '../api/skills/fetch-agentskills.ts'],
-    ['/ask', '../api/ask.ts'],
-    ['/a2a', '../api/a2a.ts'],
-    ['/docs/mcp', '../api/docs-mcp.ts'],
+    ['/api/skills/fetch-agentskills', '../api/skills/_fetch-agentskills.ts'],
+    ['/ask', '../api/_ask.ts'],
+    ['/a2a', '../api/_a2a.ts'],
+    ['/docs/mcp', '../api/_docs-mcp.ts'],
   ]) {
     it(`rejects unproven CF headers through the real ${path} handler`, async () => {
       process.env.CF_EDGE_PROOF_SECRET = 'edge-secret-xyz';
@@ -135,7 +135,7 @@ describe('IP-scoped endpoint rate limits reject unproven CF client IP (#8402)', 
 
   it('keeps standalone direct-origin and proven Cloudflare requests usable', async () => {
     process.env.CF_EDGE_PROOF_SECRET = 'edge-secret-xyz';
-    const { default: handler } = await import('../api/skills/fetch-agentskills.ts');
+    const { default: handler } = await import('../api/skills/_fetch-agentskills.ts');
     for (const proofHeaders of [
       {},
       { 'cf-connecting-ip': '203.0.113.7', 'x-wm-edge-proof': 'edge-secret-xyz' },

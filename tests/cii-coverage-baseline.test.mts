@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 
 // Pin the approved C0 independently so editing the first baseline cannot erase its floor.
 const scored = 'US RU CN UA IR IL TW KP SA TR PL DE FR GB IN PK SY YE MM VE CU MX BR AE KR IQ AF LB EG JP QA'.split(' ');

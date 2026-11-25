@@ -61,7 +61,7 @@ vi.mock("../../api/_sentry-edge.js", () => ({
   captureSilentError: vi.fn(),
 }));
 
-import handler from "../../api/chat-analyst";
+import handler from "../../api/_chat-analyst";
 import { runRedisPipeline } from "../_shared/redis";
 import { desktopKeyDailyKey, desktopKeyMinuteKey } from "../_shared/desktop-key-meter";
 

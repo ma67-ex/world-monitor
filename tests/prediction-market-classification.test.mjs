@@ -17,7 +17,7 @@ import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { isGeopoliticalMarket } from '../scripts/_bet-templates-markets-classify.mjs';
 import {
   CATEGORIES,

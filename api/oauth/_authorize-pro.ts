@@ -20,7 +20,7 @@
  *      across users).
  *   4. Atomically `GETDEL oauth:nonce:<n>` → recovers
  *      `{client_id, redirect_uri, code_challenge, state}` written by
- *      `api/oauth/authorize.js`. One-shot — replay fails on the second hit.
+ *      `api/oauth/_authorize.js`. One-shot — replay fails on the second hit.
  *   5. Resolves the client (non-consuming read of `oauth:client:<client_id>`,
  *      or the CIMD document for a URL client_id, #9244) for client_name +
  *      redirect_uri re-check (defense-in-depth; DCR validated this at
@@ -95,7 +95,7 @@ import { clientAllowsRedirectUri, describeClientFailure, isClientMetadataDocumen
 // @ts-expect-error — JS module, no declaration file
 import { isAllowedRedirectUri } from './_redirect-uri.js';
 
-/** OAuth authorization-code TTL — matches `api/oauth/authorize.js:10`. */
+/** OAuth authorization-code TTL — matches `api/oauth/_authorize.js:10`. */
 const CODE_TTL_SECONDS = 600;
 
 const PAGE_HEADERS: Record<string, string> = {
@@ -119,7 +119,7 @@ function escapeHtml(str: string): string {
 
 /**
  * HTML error response — mirrors the visual style of
- * `api/oauth/authorize.js::htmlError` (line 89). Kept identical so the
+ * `api/oauth/_authorize.js::htmlError` (line 89). Kept identical so the
  * user experience is consistent between the legacy API-key path and the
  * Pro Clerk path. Status defaults to 400; pass 500/503 for server-side
  * issues so monitoring distinguishes them, but copy is vague to the user.
@@ -167,7 +167,7 @@ function proRequiredPage(): Response {
  *     signal still goes out as `Retry-After` + `X-Billing-Verification` for
  *     monitoring and for any non-browser client following the redirect.
  *  2. **No locale fan-out.** This page is hardcoded `lang="en"` with literal
- *     English copy (matching `api/oauth/authorize.js::htmlError`), so it is not
+ *     English copy (matching `api/oauth/_authorize.js::htmlError`), so it is not
  *     part of the ~25-locale surface — new copy here costs no translation work.
  */
 function billingVerificationPage(
@@ -198,7 +198,7 @@ function billingVerificationPage(
 }
 
 // ---------------------------------------------------------------------------
-// Redis helpers — match the on-the-wire format used by api/oauth/authorize.js
+// Redis helpers — match the on-the-wire format used by api/oauth/_authorize.js
 // (raw `oauth:*` and `mcp-grant:*` keys, no env prefix).
 // ---------------------------------------------------------------------------
 
@@ -636,7 +636,7 @@ export default async function handler(req: Request): Promise<Response> {
     redisGet: rawRedisGet,
     redisSetEx: rawRedisSetEx,
     verifyGrant,
-    // Keyed by the grant's user, because api/internal/mcp-grant-mint.ts limits
+    // Keyed by the grant's user, because api/internal/_mcp-grant-mint.ts limits
     // minting per user (20 / 10 min). Fail closed like the mint.
     rateLimit: (request, userId) => checkRateLimit(request, { 'Cache-Control': 'no-store' }, {
       scope: 'oauth-authorize-pro', identifier: `user:${userId}`, limit: 30, window: '10 m', failClosed: true,

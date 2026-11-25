@@ -63,7 +63,7 @@ export const SEED_META_TTL_SECONDS = Math.max(TTL_SECONDS, Math.ceil(FRESHNESS_G
 // quota with room for the other keyed jobs that share it.
 export const REQUEST_BUDGET = Number(process.env.COMTRADE_EXT_REQUEST_BUDGET) || 260;
 // Same deliberately loose floor as the core run (110 of 197 reporters). Keep
-// in step with api/health.js and api/seed-health.js.
+// in step with api/_health.js and api/_seed-health.js.
 export const MIN_COUNTRY_COVERAGE = 110;
 
 /** @param {number} writtenCount @returns {'ok' | 'partial'} */

@@ -4,7 +4,7 @@ import { lua, lauxlib, lualib, to_luastring, to_jsstring } from 'fengari';
 
 process.env.UPSTASH_REDIS_REST_URL = 'https://mock-upstash.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
-const { default: handler, handleHealth, __testing__: keys } = await import('../api/health.js');
+const { default: handler, handleHealth, __testing__: keys } = await import('../api/_health.js');
 const realFetch = globalThis.fetch;
 const realNow = Date.now;
 afterEach(() => { globalThis.fetch = realFetch; Date.now = realNow; });

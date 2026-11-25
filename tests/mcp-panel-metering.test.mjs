@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Ratelimit } from '@upstash/ratelimit';
 import { HMAC_SECRET, callBody, makeProDeps, proReq } from './helpers/mcp-pro-deps.mjs';
-import { admitCountryPanel, authorizePanelRead, PANEL_READ_LIMIT } from '../api/mcp/panel-requests.ts';
+import { admitCountryPanel, authorizePanelRead, PANEL_READ_LIMIT } from '../api/mcp/_panel-requests.ts';
 import { countryActivityQueries } from '../shared/country-activity-query.ts';
 import { dailyCounterKey, envPrefix } from '../server/_shared/pro-mcp-token.ts';
 
@@ -342,7 +342,7 @@ describe('one allocation per embedded panel', () => {
     Object.assign(process.env, originalEnv);
   });
   it('reserves one unit per registered panel root, even when its readers fan out or fail', async () => {
-    const { TOOL_REGISTRY } = await import('../api/mcp/registry/index.ts');
+    const { TOOL_REGISTRY } = await import('../api/mcp/registry/_index.ts');
     const roots = TOOL_REGISTRY.filter(tool => tool._uiResourceUri);
     assert.equal(roots.length, 12);
     for (const root of roots) {
@@ -492,7 +492,7 @@ describe('paid curated market panel through the MCP handler', () => {
     testContext.mock.timers.enable({ apis: ['Date'], now });
     const { readFileSync } = await import('node:fs');
     const { buildProducerBackedPhysicalComparisonFixture } = await import('./helpers/mcp-producer-fixtures.mjs');
-    const { CACHE_TOOLS } = await import('../api/mcp/registry/cache-tools.ts');
+    const { CACHE_TOOLS } = await import('../api/mcp/registry/_cache-tools.ts');
     const fixture = JSON.parse(readFileSync(new URL('./fixtures/jmespath-samples/fat-get-market-data.response.json', import.meta.url), 'utf8'));
     const physical = buildProducerBackedPhysicalComparisonFixture('ok');
     fixture.data['physical-premium'] = physical.premium;
@@ -730,7 +730,7 @@ describe('paid curated market panel through the MCP handler', () => {
   });
   it('canonicalizes refresh UUID identity for existing country and news admissions', async () => {
     const { pipe } = makeProDeps();
-    const { admitNewsPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitNewsPanel } = await import('../api/mcp/_panel-requests.ts');
     const request_id = '550E8400-E29B-41D4-A716-446655440000';
     const now = Date.UTC(2026, 9, 4, 12);
     for (const [admit, name, args, readArgs] of [
@@ -772,7 +772,7 @@ describe('paid curated market panel through the MCP handler', () => {
     const token = first.body.result.structuredContent.panelRequest.token;
     const reads = fetched.length;
     assert.equal((await invoke(deps, { panel_request: token, refresh: true, request_id: crypto.randomUUID() })).body.error?.code, -32602);
-    const news = (await import('../api/mcp/panel-requests.ts')).admitNewsPanel;
+    const news = (await import('../api/mcp/_panel-requests.ts')).admitNewsPanel;
     const grant = await news(context, budget, pipe.pipeline, {});
     assert.equal((await invoke(deps, { panel_request: grant.token })).body.error?.code, -32602);
     await assert.rejects(readPanel({ ...context, userId: 'other' }, pipe.pipeline, 'get_market_data', {}, token));
@@ -835,7 +835,7 @@ describe('paid curated market panel through the MCP handler', () => {
   });
   it('does not cache an execution error and can recover with the original paid receipt', async () => {
     const { deps, pipe } = makeProDeps();
-    const { admitMarketPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitMarketPanel } = await import('../api/mcp/_panel-requests.ts');
     const grant = await admitMarketPanel(context, budget, pipe.pipeline, {});
     sourceFailure = true;
     const failed = await invoke(deps, { asset_class: ['equity'], panel_request: grant.token });
@@ -849,7 +849,7 @@ describe('paid curated market panel through the MCP handler', () => {
   });
   it('keeps incomplete and stale market seeds recoverable without changing refresh expiry on replay', async () => {
     const { pipe } = makeProDeps();
-    const { admitMarketPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitMarketPanel } = await import('../api/mcp/_panel-requests.ts');
     const now = Date.UTC(2026, 9, 4, 12);
     const args = { refresh: true, request_id: crypto.randomUUID() };
     const receipt = await admitMarketPanel(context, budget, pipe.pipeline, args, now);
@@ -884,7 +884,7 @@ describe('paid forecast panel admission', () => {
     process.env.MCP_INTERNAL_HMAC_SECRET = HMAC_SECRET;
     process.env.MCP_TELEMETRY = 'false';
     handler = (await import('../api/mcp.ts')).mcpHandler;
-    forecastTool = (await import('../api/mcp/registry/index.ts')).TOOL_REGISTRY.find(tool => tool.name === 'get_forecast_predictions');
+    forecastTool = (await import('../api/mcp/registry/_index.ts')).TOOL_REGISTRY.find(tool => tool.name === 'get_forecast_predictions');
     previousExecute = forecastTool._execute;
     forecastTool._execute = async (_args, _origin, _context, execution) => ({ data: { predictions: { generatedAt: '1720000000000', predictions: [{ id: 'controlled', title: 'Controlled forecast' }] } }, panelRequest: execution.panelRequest });
   });
@@ -921,7 +921,7 @@ describe('paid forecast panel admission', () => {
     }
   });
   it('allows only fixed forecast list and exact case reads within the forecast scope', async () => {
-    const { admitForecastPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitForecastPanel } = await import('../api/mcp/_panel-requests.ts');
     assert.equal(typeof admitForecastPanel, 'function');
     const { pipe } = makeProDeps();
     const grant = await admitForecastPanel(context, budget, pipe.pipeline, {});
@@ -940,7 +940,7 @@ describe('paid forecast panel admission', () => {
     assert.equal(pipe.count, 1);
   });
   it('keeps forecast namespace distinct and enforces owner, expiry and the durable read limit', async () => {
-    const { admitForecastPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitForecastPanel } = await import('../api/mcp/_panel-requests.ts');
     const { pipe } = makeProDeps();
     const now = Date.UTC(2026, 9, 4, 12);
     const grant = await admitForecastPanel(context, budget, pipe.pipeline, {}, now);
@@ -960,7 +960,7 @@ describe('paid forecast panel admission', () => {
     assert.equal(pipe.count, 2);
   });
   it('does not grant forecast panels against API per-tool budgets', async () => {
-    const { admitForecastPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitForecastPanel } = await import('../api/mcp/_panel-requests.ts');
     const { pipe } = makeProDeps();
     await assert.rejects(admitForecastPanel(context, { allowance: 'api', limit: 1000 }, pipe.pipeline, {}));
     assert.equal(pipe.count, 0);
@@ -969,7 +969,7 @@ describe('paid forecast panel admission', () => {
     const second = await invoke(deps, 'get_forecast_predictions');
     assert.equal(first.body.result.structuredContent.panelRequest, undefined);
     assert.equal(second.body.result.structuredContent.panelRequest, undefined);
-    assert.equal(apiPipe.count, 2 * (await import('../api/mcp/registry/index.ts')).toolWeight(forecastTool));
+    assert.equal(apiPipe.count, 2 * (await import('../api/mcp/registry/_index.ts')).toolWeight(forecastTool));
   });
   it('refreshes opening notices while never storing receipts inside the replay snapshot', async () => {
     const { deps, pipe } = makeProDeps();
@@ -1094,7 +1094,7 @@ describe('forecast panel transport through production cache reads', () => {
     assert.deepEqual(result.body.result.structuredContent.data.predictions.predictions, [{ ...canonical.predictions[0], firstSeenAt: null, firstSeenProbability: null, change24h: null, change7d: null }]);
     assert.equal(result.body.result.structuredContent.panelRequest, undefined);
     await invoke(deps, 'get_forecast_predictions', { limit: 1 });
-    const { TOOL_REGISTRY, toolWeight } = await import('../api/mcp/registry/index.ts');
+    const { TOOL_REGISTRY, toolWeight } = await import('../api/mcp/registry/_index.ts');
     assert.equal(pipe.count, 2 * toolWeight(TOOL_REGISTRY.find(tool => tool.name === 'get_forecast_predictions')));
     const detail = await invoke(deps, 'get_forecast_case', { forecast_id: 'original-0', generated_at: String(canonical.generatedAt) });
     assert.deepEqual(detail.body.result.structuredContent.data.forecastCase.forecast, canonical.predictions[0]);
@@ -1282,7 +1282,7 @@ describe('paid prediction panel through the MCP handler', () => {
     await assert.rejects(readPanel(context, pipe.pipeline, 'open_news_dashboard', {}, token));
     await assert.rejects(readPanel({ ...context, userId: 'foreign' }, pipe.pipeline, 'get_prediction_markets', {}, token));
     await assert.rejects(readPanel(context, pipe.pipeline, 'get_prediction_markets', {}, token, Date.parse(first.body.result.structuredContent.panelRequest.expiresAt)));
-    const { admitMarketPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitMarketPanel } = await import('../api/mcp/_panel-requests.ts');
     const foreign = await admitMarketPanel(context, budget, pipe.pipeline, {});
     assert.equal((await invoke(deps, { panel_request: foreign.token })).body.error?.code, -32602);
     for (let i = 1; i < 64; i++) assert.equal((await invoke(deps, { query: `case${i}`, panel_request: token })).body.error, undefined);
@@ -1390,7 +1390,7 @@ describe('paid prediction panel through the MCP handler', () => {
   });
   it('keeps structured unavailable and unknown prediction data recoverable', async () => {
     const { pipe } = makeProDeps();
-    const { admitPredictionPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitPredictionPanel } = await import('../api/mcp/_panel-requests.ts');
     const grant = await admitPredictionPanel(context, budget, pipe.pipeline, {});
     const reader = await authorizePanelRead(context, pipe.pipeline, 'get_prediction_markets', {}, grant.token);
     for (const value of [null, false, 0, 'unknown', []]) {
@@ -1527,7 +1527,7 @@ describe('public forecast reliability cache and completed output', () => {
   });
   it('checks completed UTF-8 public bytes including the signed receipt before saving 131072/131073 results', async testContext => {
     const fixtureContext = await fixture(testContext, values());
-    const tool = (await import('../api/mcp/registry/index.ts')).TOOL_REGISTRY.find(entry => entry.name === 'get_forecast_predictions');
+    const tool = (await import('../api/mcp/registry/_index.ts')).TOOL_REGISTRY.find(entry => entry.name === 'get_forecast_predictions');
     const old = tool._execute; testContext.after(() => { tool._execute = old; });
     let target = 131072;
     tool._execute = async (unusedArguments, unusedOptions, unusedContext, execution) => {
@@ -1777,7 +1777,7 @@ describe('bounded public Natural paid panel presentation', () => {
     assert.ok(bytes(raw) <= 131072); assert.equal(raw.data.events.events.length, 2);
     assert.ok(raw.data.events.events[0].conePolygon[0].points.length <= 96);
     assert.equal(raw.transportCoverage.details.find(item => item.event_id === 'a').original_count, 1900);
-    const { admitNewsPanel } = await import('../api/mcp/panel-requests.ts');
+    const { admitNewsPanel } = await import('../api/mcp/_panel-requests.ts');
     const news = makeProDeps(); const grant = await admitNewsPanel(context, budget, news.pipe.pipeline, {});
     const mapped = (await invoke(news.deps, { dataset: ['other'], limit: 1, panel_request: grant.token })).structuredContent;
     assert.equal(mapped.data.events.events[0].conePolygon[0].points.length, 1900);

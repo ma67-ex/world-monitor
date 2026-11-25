@@ -400,7 +400,7 @@ test('bootstrap fetches bcOpen511 and its Ontario sibling on demand, never on a 
 test('BC Open511 is live and health still watches its key', () => {
   // seed-bundle-canada is provisioned and bcOpen511 reads healthy. The probe
   // must still exist, or a future BC outage would have nothing watching it.
-  const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+  const health = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
   assert.match(health, /bcOpen511:\s*\{[\s\S]{0,120}?key:\s*'seed-meta:infra:bc-open511'/);
 });
 

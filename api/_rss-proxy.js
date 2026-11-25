@@ -120,7 +120,7 @@ function closeOpenElements(xml) {
  * keys on that stack, so unfingerprinted captures collapse into whatever
  * catch-all shares it — WORLDMONITOR-ZR absorbed a feed error next to six
  * events from an unrelated subsystem. Same remedy as
- * `api/mcp/error-fingerprint.ts`.
+ * `api/mcp/_error-fingerprint.ts`.
  *
  * Keyed on the error class, never the feed URL: the allowlist carries 428
  * hosts, and a URL-keyed fingerprint would mint 428 issues for one outage.
@@ -390,11 +390,11 @@ export default async function handler(req, ctx) {
           // caller never sees — the original non-ok direct response is returned
           // either way. Capturing it reported routine upstream latency at error
           // level (WORLDMONITOR-11G); #7438 made the same call for
-          // api/telegram-feed.js. Real relay failures still report.
+          // api/_telegram-feed.js. Real relay failures still report.
           //
           // Established-then-dropped connections (Network connection lost,
           // ECONNRESET, …) still capture, but at `warning` via
-          // relayFailureLevel — same boundary as api/telegram-feed.js
+          // relayFailureLevel — same boundary as api/_telegram-feed.js
           // (WORLDMONITOR-R1 / WORLDMONITOR-17M). Default `error` would page
           // on-call for Vercel edge transport churn the product cannot fix.
           if (relayError?.name !== 'AbortError') {

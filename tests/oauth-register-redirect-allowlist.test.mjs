@@ -20,12 +20,12 @@ const originalFetch = globalThis.fetch;
 const ENV_KEYS = ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'];
 const originalEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
-const { default: registerHandler } = await import('../api/oauth/register.js');
+const { default: registerHandler } = await import('../api/oauth/_register.js');
 const { isAllowedRedirectUri } = await import('../api/oauth/_redirect-uri.js');
 
 const HOSTED_CLIENT_CALLBACKS = {
-  'Claude (claude.ai)': 'https://claude.ai/api/mcp/auth_callback',
-  'Claude (claude.com)': 'https://claude.com/api/mcp/auth_callback',
+  'Claude (claude.ai)': 'https://claude.ai/api/mcp/_auth_callback',
+  'Claude (claude.com)': 'https://claude.com/api/mcp/_auth_callback',
   'Cursor Agents / web, Grok Bot': 'https://www.cursor.com/agents/mcp/oauth/callback',
   'Cursor legacy deeplink, Grok Bot': 'cursor://anysphere.cursor-mcp/oauth/callback',
   'ChatGPT (stable, RFC 9207)': 'https://chatgpt.com/connector_platform_oauth_redirect',
@@ -110,9 +110,9 @@ const REJECTED = {
   'Google callback lookalike host': 'https://oauth-redirect.googleusercontent.com.evil.example/r/abc',
   'Google callback prefix host': 'https://oauth-redirect-staging.googleusercontent.com/r/abc',
   'muse.ai (Muse never sends the redirect target)': 'https://muse.ai/api/hatch/oauth/callback',
-  'extra query': 'https://claude.ai/api/mcp/auth_callback?next=https://evil.example',
-  'fragment': 'https://claude.ai/api/mcp/auth_callback#x',
-  'sibling path under an allowed callback': 'https://claude.ai/api/mcp/auth_callback/../evil',
+  'extra query': 'https://claude.ai/api/mcp/_auth_callback?next=https://evil.example',
+  'fragment': 'https://claude.ai/api/mcp/_auth_callback#x',
+  'sibling path under an allowed callback': 'https://claude.ai/api/mcp/_auth_callback/../evil',
   'http downgrade of a hosted callback': 'http://chatgpt.com/connector_platform_oauth_redirect',
   'uppercase host variant': 'https://ChatGPT.com/connector_platform_oauth_redirect',
   'other cursor:// path': 'cursor://anysphere.cursor-mcp/evil',

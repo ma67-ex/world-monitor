@@ -11,7 +11,7 @@
 // Intentionally NOT wrapped in the seed-envelope `_seed` frame. A brief
 // is 1 producer -> 1 user -> 1 read (7-day TTL), not a global public
 // seed; reusing `_seed` here invites code that mis-applies seed
-// invariants (staleness gating, api/health.js SEED_META pairing, etc.)
+// invariants (staleness gating, api/_health.js SEED_META pairing, etc.)
 // to per-user keys. The version constant lives on the envelope root.
 //
 // Forbidden fields: importanceScore, primaryLink, pubDate, and any AI

@@ -7,7 +7,7 @@
  * endpoints point back at the request origin.
  *
  * Why dynamic (was a static file at public/.well-known/oauth-authorization-server):
- * the RFC 9728 protected-resource metadata (api/oauth-protected-resource.ts) is
+ * the RFC 9728 protected-resource metadata (api/_oauth-protected-resource.ts) is
  * already host-derived, so its `authorization_servers[*]` equals the request
  * origin. RFC 8414 requires `issuer` to equal the origin the document is served
  * from, and agent-readiness scanners (ora.ai/orank) cross-check that the PRM

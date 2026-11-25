@@ -1,7 +1,7 @@
 import { jmespathFieldNames, searchBoundedJmespath } from '../../server/_shared/bounded-jmespath';
-import { JMESPATH_MAX_EXPR_BYTES, JMESPATH_MAX_OUTPUT_BYTES } from './constants';
-import type { ApplyJmespathResult } from './types';
-import { utf8ByteLength } from './utils';
+import { JMESPATH_MAX_EXPR_BYTES, JMESPATH_MAX_OUTPUT_BYTES } from './_constants';
+import type { ApplyJmespathResult } from './_types';
+import { utf8ByteLength } from './_utils';
 import { stringifyWithinBudget } from '../../server/_shared/bounded-json';
 
 // ---------------------------------------------------------------------------

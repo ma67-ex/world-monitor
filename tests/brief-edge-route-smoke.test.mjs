@@ -246,7 +246,7 @@ describe('infrastructure-error vs miss (both routes must not collapse)', () => {
     const { __resetJwksForTests } = await import('../server/auth-session.ts');
     __resetJwksForTests();
     try {
-      const { default: handler } = await import('../api/latest-brief.ts');
+      const { default: handler } = await import('../api/_latest-brief.ts');
       const req = new Request('https://worldmonitor.app/api/latest-brief', {
         method: 'GET',
         headers: {

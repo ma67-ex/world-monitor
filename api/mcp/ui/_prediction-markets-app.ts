@@ -1,4 +1,4 @@
-import { buildAppHtml } from './shell';
+import { buildAppHtml } from './_shell';
 
 const STYLES = `
   .mgroup { margin-top: 14px; }

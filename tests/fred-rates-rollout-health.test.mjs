@@ -2,8 +2,8 @@ import { CII_RISK_SCORES_META_KEY, decodeHealthPipeline, healthyCiiInputs } from
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import handler, { handleHealth, __testing__ } from '../api/health.js';
-import { handleSeedHealth } from '../api/seed-health.js';
+import handler, { handleHealth, __testing__ } from '../api/_health.js';
+import { handleSeedHealth } from '../api/_seed-health.js';
 import { FRED_RATES_ACTIVATION_KEY } from '../scripts/seed-fred-rates.mjs';
 
 const {

@@ -22,7 +22,7 @@
  * `panel-gating.ts`.
  */
 
-/** Minimum entitlement tier that counts as Pro (mirrors api/latest-brief.ts). */
+/** Minimum entitlement tier that counts as Pro (mirrors api/_latest-brief.ts). */
 export const PRO_TIER = 1;
 
 export type PremiumDenialVerdict =
@@ -73,8 +73,8 @@ function normalizeCode(code: string): string {
  * Codes that are a genuine "this account is not on the required plan" verdict,
  * as opposed to a 403 raised before entitlement was ever consulted.
  *
- *   api/latest-brief.ts:201                 → pro_required
- *   api/chat-analyst.ts:126                 → Pro subscription required
+ *   api/_latest-brief.ts:201                 → pro_required
+ *   api/_chat-analyst.ts:126                 → Pro subscription required
  *   server/_shared/entitlement-check.ts:556 → Upgrade required
  *   api/internal/mcp-grant-*.ts             → INSUFFICIENT_TIER
  *

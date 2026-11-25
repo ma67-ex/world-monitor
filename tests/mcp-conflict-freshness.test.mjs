@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { __testing__ as health } from '../api/health.js';
-import { executeTool } from '../api/mcp/dispatch.ts';
-import { CACHE_TOOLS } from '../api/mcp/registry/cache-tools.ts';
+import { __testing__ as health } from '../api/_health.js';
+import { executeTool } from '../api/mcp/_dispatch.ts';
+import { CACHE_TOOLS } from '../api/mcp/registry/_cache-tools.ts';
 
 const NOW = Date.parse('2026-10-21T10:07:26.681Z');
 const MINUTE = 60_000;

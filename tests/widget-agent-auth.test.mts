@@ -26,7 +26,7 @@ describe('widget-agent unified tester key auth', () => {
     process.env.WORLDMONITOR_VALID_KEYS = 'browser-test-key';
 
     fetchMock = mock.method(globalThis, 'fetch', () => Promise.resolve(fakeRelayResponse()));
-    const mod = await import('../api/widget-agent.ts');
+    const mod = await import('../api/_widget-agent.ts');
     handler = mod.default;
     mod.__setWidgetAgentSpendDepsForTests({
       checkRateLimit: async () => null,

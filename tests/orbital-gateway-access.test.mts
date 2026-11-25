@@ -1,4 +1,4 @@
-// The two Pro orbital RPCs, called through the real edge entry (api/orbital/v1/[rpc].ts)
+// The two Pro orbital RPCs, called through the real edge entry (api/orbital/v1/_rpc.ts)
 // and gateway: an anonymous browser and a signed-in free account never reach a handler.
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -43,7 +43,7 @@ before(async () => {
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
   sessionToken = (await issueSessionToken()).token;
-  gateway = (await import('../api/orbital/v1/[rpc].ts')).default as typeof gateway;
+  gateway = (await import('../api/orbital/v1/_rpc.ts')).default as typeof gateway;
 });
 
 after(() => {

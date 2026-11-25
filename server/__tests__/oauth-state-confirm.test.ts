@@ -16,7 +16,7 @@ vi.mock('../../api/_rate-limit.js', () => ({
 const ROUTES = [
   {
     name: 'discord',
-    modulePath: '../../api/discord/oauth/start.ts',
+    modulePath: '../../api/discord/oauth/_start.ts',
     url: 'https://worldmonitor.app/api/discord/oauth/start',
     clientId: 'DISCORD_CLIENT_ID',
     redirect: 'DISCORD_REDIRECT_URI',
@@ -25,7 +25,7 @@ const ROUTES = [
   },
   {
     name: 'slack',
-    modulePath: '../../api/slack/oauth/start.ts',
+    modulePath: '../../api/slack/oauth/_start.ts',
     url: 'https://worldmonitor.app/api/slack/oauth/start',
     clientId: 'SLACK_CLIENT_ID',
     redirect: 'SLACK_REDIRECT_URI',

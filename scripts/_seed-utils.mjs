@@ -1273,7 +1273,7 @@ export function extraKeyPayloadBytes(key, data, envelopeMeta) {
  * Floor for every seed-meta TTL. A meta key must survive its data key's
  * disappearance so health can report STALE_SEED (present-but-stale) rather than
  * losing the heartbeat at the same moment as the payload — see the "seed-meta
- * outlives its data key" note in api/health.js's absence branch.
+ * outlives its data key" note in api/_health.js's absence branch.
  */
 export const SEED_META_MIN_TTL_SECONDS = 86400 * 7;
 
@@ -1327,7 +1327,7 @@ function buildSeedMeta(recordCount, coverage, extra, fetchedAt = Date.now()) {
   const meta = { fetchedAt, recordCount: recordCount ?? 0 };
   if (coverage) meta.coverage = coverage;
   // Optional producer diagnostics, copied verbatim onto the meta record.
-  // api/health.js decides which fields it trusts (see readSeedMeta), so callers
+  // api/_health.js decides which fields it trusts (see readSeedMeta), so callers
   // must keep `extra` safe for a public endpoint; the consumer-prices
   // `coverage` block is deliberately NOT merged here (health parses it with a
   // separate retailer schema — see fetchTradeFlows in seed-supply-chain-trade).

@@ -283,7 +283,7 @@ function parseMcpAppsInventory({
     throw new Error('docs-stats: could not parse UI_RESOURCE_REGISTRY');
   }
   const registryBody = [registryBlockMatch[1], ...[...uiRegistrySource.matchAll(/UI_RESOURCE_LIST_RESPONSE\.push\(\{([\s\S]*?)\}\);/g)].map(match => match[1])].join('\n');
-  const loaderSource = read('api/mcp/ui/news-dashboard-app.ts');
+  const loaderSource = read('api/mcp/ui/_news-dashboard-app.ts');
   for (const [, name, uri] of loaderSource.matchAll(/^export\s+const\s+(\w+_UI_URI)\s*=\s*'([^']+)';/gm)) {
     if (new RegExp(`\\b${name}\\b`).test(registryBody)) uiConstToUri.set(name, uri);
   }
@@ -305,8 +305,8 @@ function parseMcpAppsInventory({
 
   const toolLinks = [];
   const compiledToolSources = [];
-  if (uiConstToUri.has('NEWS_DASHBOARD_UI_URI')) compiledToolSources.push(read('api/mcp/registry/news-dashboard.ts'));
-  if (uiConstToUri.has('COUNTRY_VIEW_UI_URI')) compiledToolSources.push(read('api/mcp/registry/country-view.ts'));
+  if (uiConstToUri.has('NEWS_DASHBOARD_UI_URI')) compiledToolSources.push(read('api/mcp/registry/_news-dashboard.ts'));
+  if (uiConstToUri.has('COUNTRY_VIEW_UI_URI')) compiledToolSources.push(read('api/mcp/registry/_country-view.ts'));
   for (const source of [rpcToolsSource, cacheToolsSource, ...compiledToolSources]) {
     for (const block of (compiledToolSources.includes(source) ? source.split(/(?=^ {2}name:)/m) : findTopLevelObjectBlocks(source))) {
       const name = block.match(/^\s+name:\s*'([^']+)'/m)?.[1];
@@ -348,7 +348,7 @@ function parseMcpAppsInventory({
   };
 }
 
-// ---- /api/bootstrap cache contract (api/bootstrap.js) ----
+// ---- /api/bootstrap cache contract (api/_bootstrap.js) ----
 //
 // Four doc surfaces publish the concrete Cache-Control / CDN-Cache-Control
 // values `/api/bootstrap` emits per auth kind. During #5386/#5791 all four were
@@ -378,12 +378,12 @@ function parseObjectBlockBody(source, declaration, label) {
 }
 
 function parseCacheHeaderMap(source, name) {
-  const body = parseObjectBlockBody(source, `const ${name}`, `${name} in api/bootstrap.js`);
+  const body = parseObjectBlockBody(source, `const ${name}`, `${name} in api/_bootstrap.js`);
   const map = Object.fromEntries(
     [...body.matchAll(/^ {2}(\w+):\s*'([^']+)',$/gm)].map((m) => [m[1], m[2]]),
   );
   for (const tier of ['fast', 'slow']) {
-    if (!map[tier]) throw new Error(`docs-stats: ${name} in api/bootstrap.js is missing the ${tier} tier`);
+    if (!map[tier]) throw new Error(`docs-stats: ${name} in api/_bootstrap.js is missing the ${tier} tier`);
   }
   return map;
 }
@@ -402,7 +402,7 @@ function parseBootstrapCacheContract(source = read('api/_bootstrap.js')) {
   const tierCdnCache = parseCacheHeaderMap(source, 'TIER_CDN_CACHE');
 
   const profilesBody = parseObjectBlockBody(
-    source, 'const ON_DEMAND_CACHE_PROFILES', 'ON_DEMAND_CACHE_PROFILES in api/bootstrap.js',
+    source, 'const ON_DEMAND_CACHE_PROFILES', 'ON_DEMAND_CACHE_PROFILES in api/_bootstrap.js',
   );
   const onDemandProfiles = {};
   for (const [, key, body] of profilesBody.matchAll(/^ {2}(\w+):\s*\{([\s\S]*?)^ {2}\},$/gm)) {
@@ -423,12 +423,12 @@ function parseBootstrapCacheContract(source = read('api/_bootstrap.js')) {
   if (Object.keys(onDemandProfiles).length !== declaredProfiles) {
     throw new Error(
       `docs-stats: parsed ${Object.keys(onDemandProfiles).length} ON_DEMAND_CACHE_PROFILES entries but found `
-      + `${declaredProfiles} cdn declarations in api/bootstrap.js — the profile block layout changed`,
+      + `${declaredProfiles} cdn declarations in api/_bootstrap.js — the profile block layout changed`,
     );
   }
 
   const successBlock = source.match(/function successCacheHeaders\([\s\S]*?\n\}/)?.[0];
-  if (!successBlock) throw new Error('docs-stats: could not parse successCacheHeaders in api/bootstrap.js');
+  if (!successBlock) throw new Error('docs-stats: could not parse successCacheHeaders in api/_bootstrap.js');
 
   // `const tier = requestedTier ?? (authKind === 'public-on-demand' ? 'slow' : null)`
   // — the tier a marked single-key on-demand URL inherits when it declares no
@@ -439,7 +439,7 @@ function parseBootstrapCacheContract(source = read('api/_bootstrap.js')) {
     /const tier = requestedTier \?\? \(authKind === 'public-on-demand' \? '(\w+)' : null\);/,
   )?.[1];
   if (!onDemandDefaultTier || !tierCache[onDemandDefaultTier]) {
-    throw new Error('docs-stats: could not parse the public-on-demand default cache tier in api/bootstrap.js');
+    throw new Error('docs-stats: could not parse the public-on-demand default cache tier in api/_bootstrap.js');
   }
 
   // The tier-less fallbacks — what `?keys=weatherAlerts&public=1` gets, since a
@@ -453,7 +453,7 @@ function parseBootstrapCacheContract(source = read('api/_bootstrap.js')) {
   const defaultCacheControl = successBlock.match(/const cacheControl = [\s\S]*?\|\|\s*'([^']+)';/)?.[1];
   const defaultCdnTier = successBlock.match(/'CDN-Cache-Control':[\s\S]*?\|\|\s*TIER_CDN_CACHE\.(\w+),/)?.[1];
   if (!defaultCacheControl || !defaultCdnTier || !tierCdnCache[defaultCdnTier]) {
-    throw new Error('docs-stats: could not parse the tier-less public cache fallbacks in api/bootstrap.js');
+    throw new Error('docs-stats: could not parse the tier-less public cache fallbacks in api/_bootstrap.js');
   }
 
   // Pin the WIRING, not just the constants. Parsing the on-demand default proves
@@ -472,7 +472,7 @@ function parseBootstrapCacheContract(source = read('api/_bootstrap.js')) {
   // handler emits X" to a rename, which throws rather than passing quietly.
   if (!/successCacheHeaders\(\s*tier,\s*auth\.kind,\s*cors,\s*onDemandKey,?\s*\)/.test(source)) {
     throw new Error(
-      'docs-stats: api/bootstrap.js no longer calls successCacheHeaders(tier, auth.kind, cors, onDemandKey) '
+      'docs-stats: api/_bootstrap.js no longer calls successCacheHeaders(tier, auth.kind, cors, onDemandKey) '
       + '— the documented per-auth-kind cache contract may no longer be what it emits',
     );
   }
@@ -563,7 +563,7 @@ function parseBootstrapKeyTiers(source = read('shared/bootstrap-tier-keys.js')) 
   return tiers;
 }
 
-// ---- /api/health probed-key registry (api/health.js) ----
+// ---- /api/health probed-key registry (api/_health.js) ----
 //
 // Four published example responses quote `summary.total`, which is the single
 // number a reader uses to sanity-check whether their own response looks
@@ -615,7 +615,7 @@ const HEALTH_REGISTRY_MUTATION_RE = new RegExp(
 // Blanked in place (not deleted) so line and column offsets survive — the key
 // matcher below keys on an exact two-space indent.
 //
-// LINE comments must go FIRST. api/health.js:793 contains the line comment
+// LINE comments must go FIRST. api/_health.js:793 contains the line comment
 // `// list synchronized with consumer-prices-core/configs/retailers/*.yaml.`,
 // whose `/*` opens a block comment that the block matcher then runs 1098 lines
 // to the next `*/` to close — blanking the consumer-price loop, the iranEvents
@@ -630,7 +630,7 @@ const blankComments = (src) => src
   .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
 
 // Every mutation this function knows how to price, in `normalizeMutation` form
-// (trimmed, inner whitespace collapsed). Adding a mutation to api/health.js
+// (trimmed, inner whitespace collapsed). Adding a mutation to api/_health.js
 // means teaching this list what it does to the count — that is the point.
 const HEALTH_REGISTRY_ACCOUNTED_MUTATIONS = [
   // +1 per consumer-price market other than `ae` (which keeps its historical
@@ -653,18 +653,18 @@ const normalizeMutation = (line) => line.trim().replace(/\s+/g, ' ');
 // the original indentation, so a top-level key sits at exactly two spaces; a
 // nested object's keys would sit at four or more and are correctly excluded.
 function countRegistryEntries(source, name) {
-  const body = parseObjectBlockBody(source, `const ${name}`, `${name} in api/health.js`);
+  const body = parseObjectBlockBody(source, `const ${name}`, `${name} in api/_health.js`);
   // The literal's closing brace sits at column 0, so a correctly bounded body
   // ends on a blank line. Anything else means the brace counter stopped early
   // on a brace inside a string, and the short count that follows would look
   // perfectly plausible.
   if (!/\n[ \t]*$/.test(body)) {
-    throw new Error(`docs-stats: ${name} in api/health.js did not terminate at a top-level closing brace`);
+    throw new Error(`docs-stats: ${name} in api/_health.js did not terminate at a top-level closing brace`);
   }
   const keys = [...body.matchAll(/^ {2}([A-Za-z_$][\w$]*):/gm)].map((m) => m[1]);
-  if (keys.length === 0) throw new Error(`docs-stats: ${name} in api/health.js yielded no keys`);
+  if (keys.length === 0) throw new Error(`docs-stats: ${name} in api/_health.js yielded no keys`);
   const dupe = keys.find((k, i) => keys.indexOf(k) !== i);
-  if (dupe) throw new Error(`docs-stats: ${name} in api/health.js declares "${dupe}" twice`);
+  if (dupe) throw new Error(`docs-stats: ${name} in api/_health.js declares "${dupe}" twice`);
   // Whole-body conformance check. The matcher above reads exactly ONE shape —
   // a bare identifier key at a two-space indent, one per line — and silently
   // ignores every other legal shape: a quoted key, a computed `[CONST]` key, a
@@ -682,7 +682,7 @@ function countRegistryEntries(source, name) {
     .filter((line) => line.trim() !== '' && !/^ {2}[A-Za-z_$][\w$]*:\s*\S/.test(line));
   if (nonConforming.length) {
     throw new Error(
-      `docs-stats: ${name} in api/health.js has ${nonConforming.length} entr${nonConforming.length === 1 ? 'y' : 'ies'} `
+      `docs-stats: ${name} in api/_health.js has ${nonConforming.length} entr${nonConforming.length === 1 ? 'y' : 'ies'} `
       + `this counter cannot read (it reads one identifier key per line at a two-space indent): `
       + `${nonConforming.map((l) => l.trim()).join(' | ')}`,
     );
@@ -692,7 +692,7 @@ function countRegistryEntries(source, name) {
   const commas = (body.match(/,/g) || []).length;
   if (commas !== keys.length) {
     throw new Error(
-      `docs-stats: ${name} in api/health.js has ${commas} entry terminators but ${keys.length} readable keys `
+      `docs-stats: ${name} in api/_health.js has ${commas} entry terminators but ${keys.length} readable keys `
       + '— more than one entry on a line, or a value containing a comma.',
     );
   }
@@ -706,11 +706,11 @@ function countRegistryEntries(source, name) {
 // So read the array rather than assume it.
 function parseProbedRegistries(source) {
   const block = source.match(/const sources = \[([\s\S]*?)\n {2}\];/);
-  if (!block) throw new Error('docs-stats: could not parse the `sources` registry array in api/health.js');
+  if (!block) throw new Error('docs-stats: could not parse the `sources` registry array in api/_health.js');
   const listed = [...block[1].matchAll(/\[\s*([A-Za-z_$][\w$]*)\s*,/g)].map((m) => m[1]);
   if (!sameStringSet(listed, HEALTH_PROBED_REGISTRIES)) {
     throw new Error(
-      'docs-stats: api/health.js probes a different set of key registries than parseHealthProbedKeys prices '
+      'docs-stats: api/_health.js probes a different set of key registries than parseHealthProbedKeys prices '
       + `(${describeSetDelta(listed, HEALTH_PROBED_REGISTRIES)}) — summary.total cannot be derived.`,
     );
   }
@@ -727,7 +727,7 @@ function parseHealthProbedKeys(rawSource = read('api/_health.js')) {
   // and the unit test that pins it to `Object.keys(...).length` — stayed put.
   if (!/for \(const \[name, redisKey\] of Object\.entries\(registry\)\) \{\s*\n\s*totalChecks\+\+;/.test(source)) {
     throw new Error(
-      'docs-stats: api/health.js no longer counts every registry entry unconditionally, '
+      'docs-stats: api/_health.js no longer counts every registry entry unconditionally, '
       + 'so summary.total is no longer the registry size.',
     );
   }
@@ -736,7 +736,7 @@ function parseHealthProbedKeys(rawSource = read('api/_health.js')) {
   const unaccounted = found.filter((m) => !HEALTH_REGISTRY_ACCOUNTED_MUTATIONS.includes(m));
   if (unaccounted.length) {
     throw new Error(
-      'docs-stats: api/health.js mutates its key registries in a way parseHealthProbedKeys does not '
+      'docs-stats: api/_health.js mutates its key registries in a way parseHealthProbedKeys does not '
       + `account for, so summary.total cannot be derived: ${sorted(unaccounted).join(' | ')}. `
       + 'Teach HEALTH_REGISTRY_ACCOUNTED_MUTATIONS what it does to the count.',
     );
@@ -744,7 +744,7 @@ function parseHealthProbedKeys(rawSource = read('api/_health.js')) {
   for (const expected of HEALTH_REGISTRY_ACCOUNTED_MUTATIONS) {
     if (!found.includes(expected)) {
       throw new Error(
-        `docs-stats: api/health.js no longer contains the accounted-for mutation \`${expected}\` — `
+        `docs-stats: api/_health.js no longer contains the accounted-for mutation \`${expected}\` — `
         + 'summary.total would be derived from stale arithmetic.',
       );
     }
@@ -756,7 +756,7 @@ function parseHealthProbedKeys(rawSource = read('api/_health.js')) {
   // +N: the consumer-price loop registers every market except `ae`.
   const marketsBlock = source.match(/const CONSUMER_PRICE_HEALTH_MARKETS = Object\.freeze\(\[([^\]]*)\]\)/);
   if (!marketsBlock) {
-    throw new Error('docs-stats: could not parse CONSUMER_PRICE_HEALTH_MARKETS in api/health.js');
+    throw new Error('docs-stats: could not parse CONSUMER_PRICE_HEALTH_MARKETS in api/_health.js');
   }
   const markets = [...marketsBlock[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
   if (!markets.includes('ae')) {
@@ -1685,7 +1685,7 @@ function healthSummaryDocSources(pages = null) {
 // illustrate a WARNING fleet rather than only an all-OK one:
 //   - `total` equals the registry size. True of any response, whatever its status.
 //   - the buckets sum to `total`. `summary.warn` is already net of onDemandWarn
-//     (api/health.js computes `realWarnCount = counts.warn - counts.onDemandWarn`),
+//     (api/_health.js computes `realWarnCount = counts.warn - counts.onDemandWarn`),
 //     and rolloutPending is a documented SUBSET of warn, so the partition is
 //     exactly ok + warn + onDemandWarn + crit. staleContent is diagnostic: a
 //     graced entry counts in `ok`, so it is NOT a subset of warn — but every
@@ -1806,7 +1806,7 @@ function validateBootstrapCacheDocs(stats, docs = null, keyTiers = parseBootstra
       }
       slots.forEach(([slot, label], i) => {
         if (m[i + 1] !== expected[slot]) {
-          failures.push(`${file}: ${label} documented as \`${m[i + 1]}\`, api/bootstrap.js emits \`${expected[slot]}\``);
+          failures.push(`${file}: ${label} documented as \`${m[i + 1]}\`, api/_bootstrap.js emits \`${expected[slot]}\``);
         }
       });
     }
@@ -1826,13 +1826,13 @@ function validateBootstrapCacheDocs(stats, docs = null, keyTiers = parseBootstra
     );
     for (const key of documented.keys()) {
       if (!cache.onDemandProfiles[key]) {
-        failures.push(`${file}: the cache bullet publishes an own cache profile for \`${key}\`, but api/bootstrap.js declares none`);
+        failures.push(`${file}: the cache bullet publishes an own cache profile for \`${key}\`, but api/_bootstrap.js declares none`);
       }
     }
     for (const [key, profile] of Object.entries(cache.onDemandProfiles)) {
       const published = documented.get(key);
       if (!published) {
-        failures.push(`${file}: on-demand key \`${key}\` declares its own cache profile in api/bootstrap.js but the cache bullet does not publish it`);
+        failures.push(`${file}: on-demand key \`${key}\` declares its own cache profile in api/_bootstrap.js but the cache bullet does not publish it`);
         continue;
       }
       const wanted = [
@@ -1841,7 +1841,7 @@ function validateBootstrapCacheDocs(stats, docs = null, keyTiers = parseBootstra
       ];
       for (const [found, value, label] of wanted) {
         if (found !== value) {
-          failures.push(`${file}: \`${key}\` ${label} documented as \`${found}\`, api/bootstrap.js emits \`${value}\``);
+          failures.push(`${file}: \`${key}\` ${label} documented as \`${found}\`, api/_bootstrap.js emits \`${value}\``);
         }
       }
     }

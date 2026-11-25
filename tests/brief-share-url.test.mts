@@ -233,7 +233,7 @@ describe('preview share route reachability', () => {
     }) as typeof fetch;
 
     try {
-      const shareRoute = await import('../api/brief/share-url.ts') as Record<string, unknown>;
+      const shareRoute = await import('../api/brief/_share-url.ts') as Record<string, unknown>;
       assert.equal(
         typeof shareRoute.publicBaseUrl,
         'function',

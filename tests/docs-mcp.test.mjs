@@ -12,7 +12,7 @@ import handler, {
   liftProtocolErrorFromToolResult,
   compactDocsToolList,
   normalizeToolCallResponseBody,
-} from '../api/docs-mcp.ts';
+} from '../api/_docs-mcp.ts';
 import { __resetRateLimitForTest } from '../server/_shared/rate-limit.ts';
 import { CACHE_POLICY_HEADER_NAME, CDN_CACHE_HEADERS } from './helpers/shared-cache-policy.mjs';
 

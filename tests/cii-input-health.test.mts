@@ -26,7 +26,7 @@ delete process.env.ACLED_PASSWORD;
 
 const { getRiskScores, CII_HEALTH_INPUT_IDS } = await import('../server/worldmonitor/intelligence/v1/get-risk-scores');
 const { __clearLocalUnavailableBackoffForTests } = await import('../server/_shared/redis');
-const { __testing__ } = await import('../api/health.js');
+const { __testing__ } = await import('../api/_health.js');
 const { assessCiiInputs, CII_INPUT_POLICY } = await import('../api/_cii-input-health.js');
 
 const {
@@ -416,7 +416,7 @@ describe('/api/seed-health intelligence:risk-scores', () => {
         return { result: JSON.stringify({ fetchedAt: Date.now(), recordCount: 10_000 }) };
       }));
     }) as typeof fetch;
-    const { default: seedHealth } = await import('../api/seed-health.js');
+    const { default: seedHealth } = await import('../api/_seed-health.js');
     const res = await seedHealth(new Request('https://api.worldmonitor.app/api/seed-health', {
       headers: { 'X-WorldMonitor-Key': 'test-key' },
     }));

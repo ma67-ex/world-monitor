@@ -18,6 +18,6 @@ test('a dark orbital RPC answers an uncached 404', async () => {
 });
 
 test('the orbital edge entry checks the switch before routing', () => {
-  const entry = readFileSync(new URL('../api/orbital/v1/[rpc].ts', import.meta.url), 'utf8');
+  const entry = readFileSync(new URL('../api/orbital/v1/_rpc.ts', import.meta.url), 'utf8');
   assert.match(entry, /isOrbitalWatchEnabled\(\) \? gateway\(\.\.\.args\) : Promise\.resolve\(orbitalWatchDarkResponse\(\)\)/);
 });

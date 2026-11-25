@@ -32,8 +32,8 @@ import {
   makeProDeps,
   proReq,
 } from './helpers/mcp-pro-deps.mjs';
-import { buildUiResourceRead, isUiResourceUri, UI_RESOURCE_LIST_RESPONSE, UI_RESOURCE_REGISTRY } from '../api/mcp/ui/registry.ts';
-import { buildAppHtml } from '../api/mcp/ui/shell.ts';
+import { buildUiResourceRead, isUiResourceUri, UI_RESOURCE_LIST_RESPONSE, UI_RESOURCE_REGISTRY } from '../api/mcp/ui/_registry.ts';
+import { buildAppHtml } from '../api/mcp/ui/_shell.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const originalFetch = globalThis.fetch;

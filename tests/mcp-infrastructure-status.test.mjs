@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 
 import handler from '../api/mcp.ts';
-import { executeTool } from '../api/mcp/dispatch.ts';
-import { TOOL_REGISTRY, buildPublicTool, toolAccess, toolWeight } from '../api/mcp/registry/index.ts';
+import { executeTool } from '../api/mcp/_dispatch.ts';
+import { TOOL_REGISTRY, buildPublicTool, toolAccess, toolWeight } from '../api/mcp/registry/_index.ts';
 import { validateToolArgs } from '../api/mcp/_validate-args.ts';
 
 const originalFetch = globalThis.fetch;

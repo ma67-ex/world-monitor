@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import { readChinaDecisionSignalWireContract } from '../scripts/lib/openapi-codegen.mjs';
 import { validateChinaDecisionSignalSnapshot } from '../scripts/seed-china-decision-signals.mjs';
 import { CHINA_DECISION_SIGNAL_GROUP_MANIFEST } from '../shared/china-decision-signal-manifest.ts';
@@ -37,7 +37,7 @@ describe('China decision-signal static and staging audit (#5580)', () => {
       /maxStaleMin:\s*180/,
     );
     assert.match(
-      readFileSync(join(REPO_ROOT, 'api/seed-health.js'), 'utf8'),
+      readFileSync(join(REPO_ROOT, 'api/_seed-health.js'), 'utf8'),
       /'intelligence:china-decision-signals':\s*\{[^}]*intervalMin:\s*90/,
       'seed-health multiplies intervalMin by two, so 90 must match 180 minutes',
     );

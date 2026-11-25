@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import {
   fetchMergedEarthquakes, earthquakesAfterPublish, earthquakesContentMeta, fetchNrcanAtom, NRCAN_ATOM_URL,
 } from '../scripts/seismology/nrcan-atom.mjs';

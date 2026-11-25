@@ -4,7 +4,7 @@ interface EntitlementCoverage {
   verificationUnavailable?: boolean;
 }
 
-/** Where a paused subscriber updates their card. Same URL as api/customer-portal.ts's fallback. */
+/** Where a paused subscriber updates their card. Same URL as api/_customer-portal.ts's fallback. */
 export const BILLING_PORTAL_URL = 'https://www.worldmonitor.app/dashboard?billing=portal';
 
 /**

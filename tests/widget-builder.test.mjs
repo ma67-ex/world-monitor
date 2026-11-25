@@ -3377,7 +3377,7 @@ describe('widget-agent relay — error classifier', () => {
 // display:none visibility gate a few lines below). Fixed in
 // docs/tasks/abdullah/27: this fork has no billing stack behind either CTA
 // (task 08 neutered api/_widget-agent.ts and isCallerPremium, which
-// api/mcp-proxy.ts uses), so both blocks now render unconditionally with no
+// api/_mcp-proxy.ts uses), so both blocks now render unconditionally with no
 // auth/entitlement subscription at all.
 describe('panel-layout — Pro add-block CTAs render unconditionally (no paywall)', () => {
   const layout = src('src/app/panel-layout.ts');

@@ -546,7 +546,7 @@ export function buildByCountryMap(advisories) {
 
 // Pre-publish diagnostics carried on the fetched report. advisoryPublishTransform
 // strips them from both stored keys; advisoryAfterPublish copies them onto
-// seed-meta, where api/health.js reads sourceState and errorCode.
+// seed-meta, where api/_health.js reads sourceState and errorCode.
 export const ADVISORY_SOURCE_HEALTH_FIELD = '_sourceHealth';
 
 // A travel register (a feed with a levelParser) is missing when it contributed

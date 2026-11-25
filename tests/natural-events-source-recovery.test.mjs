@@ -5,7 +5,7 @@ import {
   naturalEventsAfterPublish,
   naturalEventsPublishTransform,
 } from '../scripts/seed-natural-events.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 
 const NOW = Date.parse('2026-09-17T06:00:00Z');
 const HOUR = 3_600_000;

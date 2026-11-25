@@ -1,9 +1,9 @@
 import { requireCountryCode } from '../_country-args';
-import { buildAuthHeaders } from '../auth';
-import { assertToolFetchOk, RpcValidationError } from '../billing-denial';
-import { fetchMcpDownstream } from '../downstream';
-import type { ToolDef } from '../types';
-import { utf8ByteLength } from '../utils';
+import { buildAuthHeaders } from '../_auth';
+import { assertToolFetchOk, RpcValidationError } from '../_billing-denial';
+import { fetchMcpDownstream } from '../_downstream';
+import type { ToolDef } from '../_types';
+import { utf8ByteLength } from '../_utils';
 
 const POINT_PASSES_PATH = '/api/orbital/v1/get-point-passes';
 export const COUNTRY_EVIDENCE_PATH = '/api/orbital/v1/get-country-imagery-evidence';

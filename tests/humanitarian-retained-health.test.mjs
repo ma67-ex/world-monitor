@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fetchAllHumanitarianSummaries, HAPI_REQUIRED_COUNTRIES } from '../scripts/seed-conflict-intel.mjs';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 
 const NOW = Date.parse('2026-09-17T13:40:00Z');
 const SUCCESS = NOW - 144 * 60_000;
@@ -264,7 +264,7 @@ test('HDX recovery during API cooldown publishes a genuinely new success', async
 });
 
 test('full health sweep reads served countries and cannot retain containment across persistence expiry', async () => {
-  const { handleHealth } = await import('../api/health.js');
+  const { handleHealth } = await import('../api/_health.js');
   const { meta } = await failedRefresh();
   const originalFetch = globalThis.fetch;
   const originalNow = Date.now;

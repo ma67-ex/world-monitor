@@ -670,9 +670,9 @@ describe('rate-limit fail-closed call-site policy (#3531)', () => {
   // so a future caller reverting to bare `checkRateLimit(req, cors)` is caught
   // in CI rather than during a Redis incident.
   const FAIL_CLOSED_REQUIRED = [
-    'api/chat-analyst.ts', // streaming LLM analyst, Pro-only
-    'api/widget-agent.ts', // frontier-model widget proxy
-    'api/create-checkout.ts', // paid Dodo checkout relay
+    'api/_chat-analyst.ts', // streaming LLM analyst, Pro-only
+    'api/_widget-agent.ts', // frontier-model widget proxy
+    'api/_create-checkout.ts', // paid Dodo checkout relay
   ];
 
   for (const path of FAIL_CLOSED_REQUIRED) {
@@ -704,7 +704,7 @@ describe('scoped rate-limit degraded call-site policy (#3531)', () => {
       reason: 'aircraft identifier lookups must fail closed before cache or provider work when the shared limiter is unavailable',
     },
     {
-      path: 'api/reverse-geocode.js',
+      path: 'api/_reverse-geocode.js',
       expected: /failClosed:\s*true/,
       reason: 'the provider-wide Nominatim bucket is shared across both routes and must fail closed before upstream work',
     },
@@ -749,27 +749,27 @@ describe('scoped rate-limit degraded call-site policy (#3531)', () => {
       reason: 'agent-skills import proxy fetches one public host behind a fixed allowlist and is called by the settings importer - degradation is logged and stays availability-first',
     },
     {
-      path: 'api/travel-risk-assessment.ts',
+      path: 'api/_travel-risk-assessment.ts',
       expected: /Redis-degraded scoped limits intentionally stay availability-first here/,
       reason: 'the travel risk export is plan-gated and spends no LLM budget, and its sources live in the same Redis, so a degraded limiter already means a 503 build - degradation is logged and stays availability-first',
     },
     {
-      path: 'api/user-prefs.ts',
+      path: 'api/_user-prefs.ts',
       expected: /Redis-degraded scoped limits intentionally fail open for prefs writes/,
       reason: 'cloud prefs writes are low-stakes, so Redis degradation should not block legitimate settings sync',
     },
     {
-      path: 'api/desktop-key/status.ts',
+      path: 'api/desktop-key/_status.ts',
       expected: /A degraded per-IP ceiling fails closed with 503/,
       reason: 'the per-IP ceiling in front of the Convex key lookup fails closed when degraded (rotating keys miss the negative cache); the owner and invalid-key buckets after the lookup stay availability-first, and a self-host sidecar keeps its last verdict through a 503',
     },
     {
-      path: 'api/notify.ts',
+      path: 'api/_notify.ts',
       expected: /limiter outage here should NOT fail open/,
       reason: 'notify publishes create relay-side delivery obligations on the shared event queue, so Redis degradation fails closed instead of allowing unbounded fan-out',
     },
     {
-      path: 'api/notification-channels.ts',
+      path: 'api/_notification-channels.ts',
       expected: /if\s*\(\s*scoped\.degraded\s*\)\s*\{/,
       reason: 'channel mutations write through the Convex relay and can trigger welcome mail, so Redis degradation fails closed instead of allowing unbounded writes',
     },

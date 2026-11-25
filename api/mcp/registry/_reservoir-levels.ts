@@ -6,7 +6,7 @@
 // include_series is set.
 
 import { normalizeReservoirLevelsSeed } from '../../../server/worldmonitor/climate/v1/list-reservoir-levels';
-import { matchesCode } from '../filters';
+import { matchesCode } from '../_filters';
 
 export const RESERVOIR_LEVELS_LABEL = 'reservoir-levels';
 

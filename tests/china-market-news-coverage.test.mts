@@ -11,7 +11,7 @@ import {
 import { buildBrowserCategoryFeeds } from '../shared/news-catalog.ts';
 import { __testing__ as digestTesting } from '../server/worldmonitor/news/v1/list-feed-digest.ts';
 import { SOURCE_PROPAGANDA_RISK } from '../shared/source-provenance.ts';
-import { parseMiitNews, renderMiitRss } from '../api/miit-news.js';
+import { parseMiitNews, renderMiitRss } from '../api/_miit-news.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readText = (path: string) => readFileSync(resolve(root, path), 'utf8');

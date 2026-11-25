@@ -14,7 +14,7 @@ async function importFreshCreateCheckout(options: { missingGatewaySecret?: boole
   process.env.CONVEX_SITE_URL = 'https://convex.test';
   if (options.missingGatewaySecret) delete process.env.CONVEX_TENANT_RELAY_SECRET;
   else process.env.CONVEX_TENANT_RELAY_SECRET = 'relay-secret';
-  return import(`../api/create-checkout.ts?test=${Date.now()}-${Math.random()}`);
+  return import(`../api/_create-checkout.ts?test=${Date.now()}-${Math.random()}`);
 }
 
 function makeCheckoutRequest(): Request {

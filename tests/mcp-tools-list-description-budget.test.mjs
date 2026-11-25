@@ -3,9 +3,9 @@ import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import Ajv2020 from 'ajv/dist/2020.js';
 
-import { SERVER_VERSION, TOOL_DESCRIPTION_MAX_BYTES, TOOL_DESCRIPTIONS_TOTAL_MAX_BYTES } from '../api/mcp/constants.ts';
-import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/index.ts';
-import { TOOL_CATEGORY_BY_NAME } from '../api/mcp/domains.ts';
+import { SERVER_VERSION, TOOL_DESCRIPTION_MAX_BYTES, TOOL_DESCRIPTIONS_TOTAL_MAX_BYTES } from '../api/mcp/_constants.ts';
+import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/_index.ts';
+import { TOOL_CATEGORY_BY_NAME } from '../api/mcp/_domains.ts';
 
 const originalEnv = { ...process.env };
 
@@ -688,7 +688,7 @@ describe('api/mcp.ts — tools/list description budget (v1.34.0)', () => {
 
       // tools[] must be a name+description projection of the live registry,
       // plus the same access marker and MCP Apps link tools/list emits and the
-      // card-only category from api/mcp/domains.ts, in the same order.
+      // card-only category from api/mcp/_domains.ts, in the same order.
       const expected = TOOL_REGISTRY.map((t) => ({
         name: t.name,
         description: t.description,

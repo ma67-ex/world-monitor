@@ -15,7 +15,7 @@ import {
 import { CANADA_ROAD_SOURCES } from '../src/services/canada-roads-core.ts';
 import { CII_RISK_SCORE_CACHE_KEYS } from '../api/_cii-risk-cache-keys.js';
 import { BOOTSTRAP_TIER_TIMEOUT_MS } from '../src/services/bootstrap.ts';
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');

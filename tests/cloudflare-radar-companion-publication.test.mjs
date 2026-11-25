@@ -24,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { resolveSeedMetaTtl, SEED_META_MIN_TTL_SECONDS } from '../scripts/_seed-utils.mjs';
 
 const OUTAGES_KEY = 'infra:outages:v1';

@@ -1,10 +1,10 @@
 import { torontoSafetySourceById } from '../../../shared/toronto-safety.js';
-import { spokenChokepointStatus, spokenForecastPredictions, spokenPredictionMarkets } from '../spoken-narrators';
+import { spokenChokepointStatus, spokenForecastPredictions, spokenPredictionMarkets } from '../_spoken-narrators';
 import { CROSS_BORDER_SOURCES, projectCrossBorderSnapshots } from '../../../server/worldmonitor/displacement/v1/cross-border-data';
 import { screenSanctions } from '../../../server/_shared/sanctions-screen';
 import { normalizeFlagRegistries, splitSanctionsAttribution } from '../../../shared/sanctions-attribution';
 import type { ListSanctionsPressureResponse } from '../../../src/generated/server/worldmonitor/sanctions/v1/service_server';
-import { COUNTRY_HISTORY_TOOL } from './country-history-tool';
+import { COUNTRY_HISTORY_TOOL } from './_country-history-tool';
 import { projectSupplyChainData } from './_shipping-freight';
 import { RESERVOIR_LEVELS_LABEL, RESERVOIR_LEVELS_OUTPUT_SCHEMA, RESERVOIR_STATUSES, projectReservoirLevels } from './_reservoir-levels';
 import { CAPITAL_FLOW_PAIR_LEG_SCHEMA, CAPITAL_FLOWS_MAX_COUNTRIES, CAPITAL_FLOWS_PAIRS_LABEL, CAPITAL_FLOWS_SORTS, projectCapitalFlows, type CapitalFlowsSort } from './_capital-flows';
@@ -74,15 +74,15 @@ import {
   pickNestedMap,
   selectDatasets,
   summarizeData,
-} from '../filters';
+} from '../_filters';
 import { COUNTRY_ARG_HINT, resolveCountryFilter } from '../_country-args';
 import { resolveCountryCode } from '../../../shared/country-code-resolve';
 import { compareOilWindows, expandCountry } from '../../../shared/oil-trade-windows.js';
-import { RpcValidationError } from '../billing-denial';
-import type { ConflictSourceObservation, FreshnessCheck, ToolDef } from '../types';
+import { RpcValidationError } from '../_billing-denial';
+import type { ConflictSourceObservation, FreshnessCheck, ToolDef } from '../_types';
 import { forecastCaseReadSchema, forecastPanelAdmissionSchema } from '../../../shared/panel-admission';
 
-import { utf8ByteLength } from '../utils';
+import { utf8ByteLength } from '../_utils';
 import {
   PHYSICAL_DIVERGENCE_OUTPUT_SCHEMA,
   PHYSICAL_PREMIUM_OUTPUT_SCHEMA,
@@ -174,7 +174,7 @@ function hoistDisplacementSeed(data: Record<string, unknown>): void {
 // conflict:iran-events:v1 key from the get_conflict_events cache set so the MCP
 // tool stops serving the stale snapshot that lingers for the key's 14-day TTL.
 // The output schema still documents an iran-events field (harmless when absent).
-// Set IRAN_EVENTS_ENABLED=true to restore. See api/health.js.
+// Set IRAN_EVENTS_ENABLED=true to restore. See api/_health.js.
 const IRAN_EVENTS_ENABLED = (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true';
 // Leave headroom for the cache envelope (`cached_at`, `stale`, and `data`) so
 // the dispatcher never replaces a useful conflict response with the generic
@@ -1532,7 +1532,7 @@ export const CACHE_TOOLS: ToolDef[] = [
       return data;
     },
     _cacheKeys: ['aviation:delays-bootstrap:v2'],
-    // The aggregate's own meta, as api/health.js flightDelays reads it (#6987).
+    // The aggregate's own meta, as api/_health.js flightDelays reads it (#6987).
     // seed-meta:aviation:faa counts the FAA side-car only.
     _freshnessChecks: [{ key: 'seed-meta:aviation:delays-bootstrap', maxStaleMin: 90 }],
     _apiPaths: [],
@@ -1731,10 +1731,10 @@ export const CACHE_TOOLS: ToolDef[] = [
     // Per-key budgets (#5864): the envelope used to gate on the insights meta
     // alone, so a stalled GDELT materializer left agents reading stale:false
     // for hours. Every bundled key now carries its own freshness budget,
-    // matching api/health.js.
+    // matching api/_health.js.
     _freshnessChecks: [
       { key: 'seed-meta:news:insights',                    maxStaleMin: 30 },  // 15min cron × 2
-      { key: 'seed-meta:intelligence:gdelt-intel',         maxStaleMin: 45, honorContentAge: true }, // 15min materializer; matches api/health.js
+      { key: 'seed-meta:intelligence:gdelt-intel',         maxStaleMin: 45, honorContentAge: true }, // 15min materializer; matches api/_health.js
       { key: 'seed-meta:intelligence:cross-source-signals', maxStaleMin: 60 }, // 30min cron × 2
     ],
     _apiPaths: [
@@ -2812,7 +2812,7 @@ export const CACHE_TOOLS: ToolDef[] = [
       return projected;
     },
     // Dynamic-year key resolved once at module evaluation — mirrors the
-    // STANDALONE_KEYS pattern in api/health.js:147. The UNHCR seeder publishes
+    // STANDALONE_KEYS pattern in api/_health.js:147. The UNHCR seeder publishes
     // a single current-year key; the prior year exists at the same prefix but
     // is intentionally excluded — the executeTool label-walk would strip the
     // year segment from both keys and collide on the same `summary` label,
@@ -2820,7 +2820,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     _cacheKeys: [`displacement:summary:v1:${new Date().getUTCFullYear()}`, 'displacement:idmc-idu:v1', 'displacement:dtm:v1', ...CROSS_BORDER_SOURCES.map(source => source.key)],
     _cacheLabels: { 'displacement:idmc-idu:v1': 'iduEvents', 'displacement:dtm:v1': 'dtmRegions', ...Object.fromEntries(CROSS_BORDER_SOURCES.map(source => [source.key, source.id])) },
     // The events and regions budgets match SEED_META.idmcIduDisplacement and
-    // SEED_META.dtmDisplacement in api/health.js; the DTM seed-meta also
+    // SEED_META.dtmDisplacement in api/_health.js; the DTM seed-meta also
     // carries the 90-day round-age budget.
     _freshnessChecks: [{ key: 'seed-meta:displacement:summary', maxStaleMin: 3600 }, { key: 'seed-meta:displacement:idmc-idu', maxStaleMin: 2880, minRecordCount: 500 }, { key: 'seed-meta:displacement:dtm', maxStaleMin: 2880, minRecordCount: 15, honorContentAge: true }, ...CROSS_BORDER_SOURCES.map(source => ({ key: `seed-meta:${source.key.replace(/:v1$/, '')}`, maxStaleMin: 2880, honorContentAge: true, ...(source.id === 'odp' ? {} : { contentFreshnessActivationKey: `seed-activated:displacement:border-${source.id}` }) }))],
     // Audit miss: handler uses cachedFetchJson with a year-suffixed key the
@@ -3085,7 +3085,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     // Broad 13-key energy bundle mirroring get_economic_data. Cadences span
     // hourly (electricity prices) to annual (World Bank renewable share); use
     // _freshnessChecks with per-key maxStaleMin pulled from
-    // api/health.js::SEED_META so a slow-cadence key doesn't drag the
+    // api/_health.js::SEED_META so a slow-cadence key doesn't drag the
     // aggregate stale flag unnecessarily.
     _cacheKeys: [
       'energy:eia-petroleum:v1',                  // STANDALONE_KEYS::eiaPetroleum
@@ -3341,7 +3341,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     }),
     _cacheKeys: ['climate:reservoir-levels:v1'], // STANDALONE_KEYS::reservoirLevels
     _freshnessChecks: [
-      // Seed run age and watchlist coverage, matching api/health.js SEED_META.reservoirLevels.
+      // Seed run age and watchlist coverage, matching api/_health.js SEED_META.reservoirLevels.
       // Pass age (latest.ageDays) is ICESat-2 publication latency and never makes this stale.
       { key: 'seed-meta:climate:reservoir-levels', maxStaleMin: 4320, minRecordCount: 50 },
     ],
@@ -3772,7 +3772,7 @@ export const CACHE_TOOLS: ToolDef[] = [
       return data;
     },
     // 3-key economic bundle, weekly (Big Mac) to monthly (FAO / national
-    // debt). Per-key _freshnessChecks pulled from api/health.js::SEED_META so
+    // debt). Per-key _freshnessChecks pulled from api/_health.js::SEED_META so
     // a slow monthly key doesn't drag the aggregate stale flag.
     _cacheKeys: [
       'economic:bigmac:v1',            // BOOTSTRAP_KEYS::bigmac
@@ -3919,7 +3919,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     _cacheKeys: ['economic:capital-flows:v1', 'economic:capital-flows:pairs:v1'], // STANDALONE_KEYS::capitalFlows
     _cacheLabels: { 'economic:capital-flows:pairs:v1': CAPITAL_FLOWS_PAIRS_LABEL },
     _freshnessChecks: [
-      // Weekly macro-bundle seed; 10d matches api/health.js SEED_META.capitalFlows.
+      // Weekly macro-bundle seed; 10d matches api/_health.js SEED_META.capitalFlows.
       // honorContentAge: a frozen IMF BOP feed (newest quarter > 12 months) flags stale.
       { key: 'seed-meta:economic:capital-flows', maxStaleMin: 14400, honorContentAge: true },
     ],
@@ -4090,7 +4090,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     // shipping-stress + customs + comtrade). Cadences span 10-minute relay
     // (transit-summaries, chokepoint_transits) to ~400-day static registries
     // (chokepoint-baselines), so per-key _freshnessChecks pulled from
-    // api/health.js::SEED_META — a fast transit outage isn't masked by the
+    // api/_health.js::SEED_META — a fast transit outage isn't masked by the
     // slow chokepoint-baselines budget, and the long-cadence portwatch keys
     // don't drag aggregate stale flagging.
     //
@@ -4115,7 +4115,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     //
     // EXCLUDED on purpose: supply_chain:corridorrisk:v1 is an intermediate
     // key whose data flows through supply_chain:transit-summaries:v1
-    // (api/health.js:461). U7 will add corridorrisk to EXCLUDED_FROM_MCP.
+    // (api/_health.js:461). U7 will add corridorrisk to EXCLUDED_FROM_MCP.
     // MCP Apps (`io.modelcontextprotocol/ui`): links the tool to its interactive
     // ui:// app shell. Single source of truth — registered in ../ui/registry.ts.
     _uiResourceUri: CHOKEPOINT_MONITOR_UI_URI,
@@ -4552,7 +4552,7 @@ export const CACHE_TOOLS: ToolDef[] = [
       return data;
     },
     _cacheKeys: ['intelligence:social:reddit:v1'],
-    // Mirrors api/health.js SEED_META.socialVelocity: the relay seeds every 3h.
+    // Mirrors api/_health.js SEED_META.socialVelocity: the relay seeds every 3h.
     _freshnessChecks: [{ key: 'seed-meta:intelligence:social-reddit', maxStaleMin: 540 }],
     _apiPaths: [
       "GET /api/intelligence/v1/get-social-velocity",

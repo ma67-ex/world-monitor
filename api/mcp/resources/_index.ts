@@ -46,18 +46,18 @@ import type {
   McpHandlerDeps,
   PublicResourceDef,
   TemplateResourceDef,
-} from '../types';
-import { TOOL_REGISTRY, toolAccess } from '../registry/index';
-import { dispatchToolsCall } from '../dispatch';
-import type { McpUsage } from '../usage';
-import { evaluateFreshness } from '../freshness';
-import type { McpBudget } from '../quota';
+} from '../_types';
+import { TOOL_REGISTRY, toolAccess } from '../registry/_index';
+import { dispatchToolsCall } from '../_dispatch';
+import type { McpUsage } from '../_usage';
+import { evaluateFreshness } from '../_freshness';
+import type { McpBudget } from '../_quota';
 import { readAccountAllowance } from '../_account-allowance';
-import { rpcError, rpcOk, withMcpNoStore } from '../rpc';
+import { rpcError, rpcOk, withMcpNoStore } from '../_rpc';
 import { readJsonFromUpstash } from '../../_upstash-json.js';
 import { isAppOwnedRedisKey } from '../../_redis-key-ownership.js';
-import { CHOKEPOINT_SLUGS } from './slugs';
-import { AGENT_GUIDE, AGENT_GUIDE_RESOURCE_URI, CHATGPT_AGENT_GUIDE } from '../constants';
+import { CHOKEPOINT_SLUGS } from './_slugs';
+import { AGENT_GUIDE, AGENT_GUIDE_RESOURCE_URI, CHATGPT_AGENT_GUIDE } from '../_constants';
 
 // ---------------------------------------------------------------------------
 // Public resource freshness reader

@@ -14,7 +14,7 @@ import {
   readClerkMigratedCount,
   type PasskeyOfferDeps,
   type PasskeyOfferFailureStep,
-} from '../api/user/passkey-offer.ts';
+} from '../api/user/_passkey-offer.ts';
 
 const originalFetch = globalThis.fetch;
 const originalClerkSecret = process.env.CLERK_SECRET_KEY;

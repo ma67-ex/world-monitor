@@ -309,7 +309,7 @@ describe('embed entitlement', () => {
   });
 
   it('strips cookies and ignores viewer bearers in the entitlement edge handler', () => {
-    const source = readFileSync(resolve(__dirname, '../api/embed/entitlement.ts'), 'utf-8');
+    const source = readFileSync(resolve(__dirname, '../api/embed/_entitlement.ts'), 'utf-8');
     assert.match(source, /headers\.delete\('cookie'\)/);
     assert.match(source, /checkEndpointRateLimit/);
     // Keyed to the embedding account's key header; resolution is covered in

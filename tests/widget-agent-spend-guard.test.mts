@@ -6,7 +6,7 @@ process.env.PRO_WIDGET_KEY = 'server-pro-key';
 process.env.WORLDMONITOR_VALID_KEYS = 'browser-test-key,second-enterprise-key';
 process.env.RELAY_SHARED_SECRET = 'server-only-relay-secret';
 
-const { default: handler, __setWidgetAgentSpendDepsForTests } = await import('../api/widget-agent.ts');
+const { default: handler, __setWidgetAgentSpendDepsForTests } = await import('../api/_widget-agent.ts');
 const { OPERATOR_KEY_DAILY_CEILINGS } = await import('../server/_shared/high-usage-alarm.ts');
 // Operator keys share one per-key direct-LLM ceiling with the gateway and chat-analyst.
 const OPERATOR_LIMIT = OPERATOR_KEY_DAILY_CEILINGS.directLlmCalls;

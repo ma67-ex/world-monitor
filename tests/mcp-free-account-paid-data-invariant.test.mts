@@ -9,9 +9,9 @@ import { readFileSync } from 'node:fs';
 
 import { getRequiredTier, TIER_GATED_PATHS } from '../server/_shared/entitlement-check.ts';
 import { PREMIUM_RPC_PATHS } from '../src/shared/premium-paths.ts';
-import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/index.ts';
-import { executeTool } from '../api/mcp/dispatch.ts';
-import type { CacheToolDef, McpToolExecutionContext, ToolDef } from '../api/mcp/types.ts';
+import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/_index.ts';
+import { executeTool } from '../api/mcp/_dispatch.ts';
+import type { CacheToolDef, McpToolExecutionContext, ToolDef } from '../api/mcp/_types.ts';
 import { HMAC_SECRET, makeProDeps, proReq } from './helpers/mcp-pro-deps.mjs';
 
 const PAID_PATHS: ReadonlySet<string> = new Set([...TIER_GATED_PATHS, ...PREMIUM_RPC_PATHS]);

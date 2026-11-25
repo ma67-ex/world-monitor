@@ -38,7 +38,7 @@ Accept both names wherever the signal can come from `AbortSignal.timeout` (PR #1
 // AbortSignal.timeout (fetchWithTimeout in _relay.js) rejects as TimeoutError.
 if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return 'warning';
 
-// api/telegram-feed.js, api/x-feed.js
+// api/telegram-feed.js, api/_x-feed.js
 const isTimeout = error?.name === 'AbortError' || error?.name === 'TimeoutError';
 ```
 

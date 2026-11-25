@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
-import { __testing__ } from '../api/health.js';
-import { handleSeedHealth } from '../api/seed-health.js';
+import { __testing__ } from '../api/_health.js';
+import { handleSeedHealth } from '../api/_seed-health.js';
 const savedEnv = { ...process.env };
 const savedFetch = globalThis.fetch;
 const now = Date.parse('2026-10-19T12:00:00Z');

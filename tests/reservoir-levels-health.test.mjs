@@ -3,7 +3,7 @@
 // strict once the seeder's durable activation marker exists or the deadline passes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { RESERVOIR_LEVELS_ACTIVATION_KEY, RESERVOIR_LEVELS_KEY } from '../scripts/seed-reservoir-levels.mjs';
 
 const { classifyKey, STANDALONE_KEYS, SEED_META, ACTIVATION_MARKERS, ON_DEMAND_KEYS, regionalEnergyRolloutCommands } = __testing__;

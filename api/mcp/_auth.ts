@@ -13,7 +13,7 @@ import { getClientRateLimitKey, hasCloudflareTransitProof } from '../_client-ip.
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../_sentry-edge.js';
 import { redisPipeline as rawRedisPipeline } from '../_upstash-json.js';
-import { resolveAccountMcpBudget, resolveMcpBudget, type McpBudget } from './quota';
+import { resolveAccountMcpBudget, resolveMcpBudget, type McpBudget } from './_quota';
 import { checkBurst } from '../../server/_shared/api-key-rate-limit';
 import {
   getBillingVerificationDenial,
@@ -21,8 +21,8 @@ import {
   isEntitlementBackendConfigured,
 } from '../../server/_shared/entitlement-check';
 import { checkProMcpAccess } from '../../server/_shared/pro-mcp-gate';
-import type { BillingVerificationCode } from './billing-denial';
-import { mcpErrorFingerprint } from './error-fingerprint';
+import type { BillingVerificationCode } from './_billing-denial';
+import { mcpErrorFingerprint } from './_error-fingerprint';
 import {
   buildInternalMcpHeaders,
   signInternalMcpRequest,
@@ -35,7 +35,7 @@ import {
   RATE_LIMIT_DEGRADED_HEADERS,
   reportRateLimitDegraded,
 } from '../../server/_shared/rate-limit';
-import { rpcError, withMcpNoStore } from './rpc';
+import { rpcError, withMcpNoStore } from './_rpc';
 import type {
   AuthResolution,
   AuthResolutionRejected,
@@ -43,9 +43,9 @@ import type {
   McpHandlerDeps,
   McpPreCheckOptions,
   McpPreCheckResult,
-} from './types';
-import { emitMcpRateLimitHit } from './telemetry';
-import { FREE_ACCOUNT_CALLS_PER_DAY } from './upgrade-constants';
+} from './_types';
+import { emitMcpRateLimitHit } from './_telemetry';
+import { FREE_ACCOUNT_CALLS_PER_DAY } from './_upgrade-constants';
 import {
   API_PLAN_REQUIRED_MESSAGE,
   HANDSHAKE_NO_ACCOUNT_NEXT_STEP,
@@ -53,9 +53,9 @@ import {
   SUBSCRIPTION_LAPSED_MESSAGE,
   buildMcpStructuredDenial,
   type McpStaticDenialReason,
-} from './upgrade';
-import { relayMcpCheckout } from './checkout';
-import { connectInstruction } from './host-policy';
+} from './_upgrade';
+import { relayMcpCheckout } from './_checkout';
+import { connectInstruction } from './_host-policy';
 
 // ---------------------------------------------------------------------------
 // Rate limiters
@@ -617,7 +617,7 @@ export async function validateProMcpAuthorization(
     // anonymous frames with every other `api/mcp` capture, so Sentry's default
     // stack grouping merges it into the WORLDMONITOR-T8 catch-all. `threw`
     // keeps the defect arm in its own group, separable from the fail-soft
-    // `transient` arm below — see api/mcp/error-fingerprint.ts.
+    // `transient` arm below — see api/mcp/_error-fingerprint.ts.
     captureSilentError(err, {
       tags: { route: 'api/mcp', step: 'pro-token-validate' },
       fingerprint: mcpErrorFingerprint('pro-token-validate', 'threw', err),
@@ -633,11 +633,11 @@ export async function validateProMcpAuthorization(
     // network error, timeout, or malformed body (see `ProMcpValidateUnion`).
     // The caller already gets a retryable 503 + `Retry-After`, so the request
     // is degraded, not defective, and the same union's other consumer
-    // (api/oauth/token.ts) treats it as routine enough to capture nothing at
+    // (api/oauth/_token.ts) treats it as routine enough to capture nothing at
     // all. Capture at `warning` so a sustained Convex outage still escalates by
     // volume without routine blips paging on-call at `error` (WORLDMONITOR-ZR:
     // 6 events / 5 releases / 17 days, all isolated). Mirrors the
-    // SERVICE_UNAVAILABLE precedent in api/user-prefs.ts and the identical call
+    // SERVICE_UNAVAILABLE precedent in api/_user-prefs.ts and the identical call
     // in api/_rate-limit.js.
     //
     // A missing CONVEX_SITE_URL / CONVEX_SERVER_SHARED_SECRET also lands here

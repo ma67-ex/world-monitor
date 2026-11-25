@@ -24,7 +24,7 @@ import ARABIC_NAMES from '../shared/country-names-ar.json' with { type: 'json' }
 import LOCALIZED_NAMES from '../shared/country-names-localized.json' with { type: 'json' };
 import { buildArabicCountryNames } from '../scripts/build-country-names-ar.mjs';
 import { mcpHandler } from '../api/mcp.ts';
-import { TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
+import { TOOL_REGISTRY } from '../api/mcp/registry/_index.ts';
 import { normalizeCountryDirectRead } from '../shared/country-brief-host.ts';
 import { buildArticlePrompts } from '../server/worldmonitor/news/v1/_shared.ts';
 import { HMAC_SECRET, callBody, makePipelineMock } from './helpers/mcp-pro-deps.mjs';

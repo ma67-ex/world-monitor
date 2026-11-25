@@ -18,7 +18,7 @@ const SEED_CACHE_KEY = 'economic:global-tenders:v1';
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
 // The seeder runs once a day; health marks the snapshot stale after three missed
-// runs (api/health.js globalTenders), and so does this reader.
+// runs (api/_health.js globalTenders), and so does this reader.
 export const STALE_AFTER_MS = 3 * 24 * 60 * 60_000;
 
 type SeedSnapshot = {

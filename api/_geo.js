@@ -14,10 +14,10 @@ export default function handler(req) {
   const cfCountry = req.headers.get('cf-ipcountry');
   const country = (cfCountry && cfCountry !== 'T1' ? cfCountry : null) || req.headers.get('x-vercel-ip-country') || 'XX';
   // no-store: the body IS the caller's IP-geo, so the answer depends entirely on
-  // the request -- the same rule api/bootstrap.js applies to its origin-dependent
+  // the request -- the same rule api/_bootstrap.js applies to its origin-dependent
   // responses. A `Vary` on the geo headers is not an option here: the Cloudflare
   // zone in front of api.worldmonitor.app ignores Vary (see TIER_CACHE in
-  // api/bootstrap.js), so a shared-cacheable response pins the FIRST visitor's
+  // api/_bootstrap.js), so a shared-cacheable response pins the FIRST visitor's
   // country onto every later caller at that PoP for the whole s-maxage window.
   // The client trusts any non-'XX' value (src/utils/user-location.ts) to
   // geo-filter the live-channel list, so the mismatch is silent. Losing the cache

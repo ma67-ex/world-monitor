@@ -2356,7 +2356,7 @@ export async function scoreFinancialSystemExposure(
   // (the canonical helper from _dimension-freshness.ts) so the preflight
   // matches what the seeder actually writes; inlining the regex would
   // re-introduce the same writer/reader drift this helper exists to prevent.
-  // The api/health.js + api/seed-health.js registries use the same
+  // The api/_health.js + api/_seed-health.js registries use the same
   // unversioned form (`seed-meta:economic:wb-external-debt`).
   const requiredSeedKeys = [
     RESILIENCE_WB_EXTERNAL_DEBT_KEY,

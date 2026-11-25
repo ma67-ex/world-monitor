@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 
 const sources = JSON.parse(readFileSync(new URL('../shared/food-price-sources.json', import.meta.url), 'utf8'));
 const healthName = id => `foodPrices${id[0].toUpperCase()}${id.slice(1)}`;

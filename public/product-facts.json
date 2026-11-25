@@ -171,15 +171,15 @@
     }
   ],
   "heroProofStats": {
-    "mapLayers": 60,
+    "mapLayers": 61,
     "feeds": 966,
-    "providers": 1358,
+    "providers": 1379,
     "alertOrigins": 5
   },
   "depthProofStats": {
-    "mapLayers": 60,
+    "mapLayers": 61,
     "feeds": 966,
-    "providers": 1358,
+    "providers": 1379,
     "alertOrigins": 5,
     "chokepoints": 13,
     "instabilityCountries": 31,
@@ -190,7 +190,7 @@
     "hotspots": 29,
     "stockExchanges": 29,
     "mcpTools": 100,
-    "commands": 626,
+    "commands": 629,
     "languages": 28
   },
   "resilienceCoverage": {
@@ -205,8 +205,8 @@
     "panelImplementations": 119,
     "feedDefinitions": 1351,
     "freshnessTrackedSourceGroups": 40,
-    "sourceAttributionHosts": 1389,
-    "sourceAttributionProviders": 1366,
+    "sourceAttributionHosts": 1402,
+    "sourceAttributionProviders": 1379,
     "localeCodes": [
       "ar",
       "bg",

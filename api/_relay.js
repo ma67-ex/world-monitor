@@ -120,8 +120,8 @@ export function createRelayHandler(cfg) {
       // No `details` in the body: the message can carry relay transport detail
       // (undici cause chains, the internal WS_RELAY_URL) and the client has no
       // use for it. Record it server-side instead — the same posture, and the
-      // same reasoning, as api/telegram-feed.js's relay catch. Without this the
-      // routes that pass no `cfg.fallback` (api/opensky.js, api/polymarket.js)
+      // same reasoning, as api/_telegram-feed.js's relay catch. Without this the
+      // routes that pass no `cfg.fallback` (api/_opensky.js, api/_polymarket.js)
       // answer a relay outage with a bare 502/504 and leave no trace anywhere.
       const route = cfg.relayPath || 'api/_relay';
       console.warn(`[relay] ${route} request failed:`, error?.message || String(error));

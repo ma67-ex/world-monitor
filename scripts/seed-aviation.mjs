@@ -63,7 +63,7 @@ const INTL_KEY         = 'aviation:delays:intl:v3';
 const FAA_KEY          = 'aviation:delays:faa:v1';
 const NOTAM_KEY        = 'aviation:notam:closures:v2';
 export const NEWS_KEY  = 'aviation:news:feeds:v2';
-// Page-load hydration aggregate. Health (api/health.js BOOTSTRAP_KEYS.flightDelays)
+// Page-load hydration aggregate. Health (api/_health.js BOOTSTRAP_KEYS.flightDelays)
 // reads STRLEN here, and its record count from BOOTSTRAP_META_KEY below — which
 // must be written from THIS payload, not from a contributing source's own count
 // (#6987). Historically only written as a 1800s RPC side-effect inside
@@ -83,7 +83,7 @@ export const BOOTSTRAP_META_KEY = 'seed-meta:aviation:delays-bootstrap';
 const INTL_TTL      = 10_800; // 3h — survives ~5 consecutive missed 30min cron ticks
 const FAA_TTL       = 7_200;  // 2h
 const NOTAM_TTL     = 7_200;  // 2h
-// Must equal api/health.js SEED_META.notamClosures.maxStaleMin: last-good
+// Must equal api/_health.js SEED_META.notamClosures.maxStaleMin: last-good
 // closures stop being retained once health would call them stale.
 const NOTAM_MAX_STALE_MIN = 240;
 export const NEWS_TTL = 2_400;  // 40min
@@ -112,7 +112,7 @@ function nonNegativeEnv(name, fallback, max = Number.POSITIVE_INFINITY) {
 const MAX_INTL_MIN_REFRESH_MIN = 60;
 const INTL_MIN_REFRESH_MIN = nonNegativeEnv('AVIATIONSTACK_MIN_REFRESH_MIN', 55, MAX_INTL_MIN_REFRESH_MIN);
 
-// health.js expects these exact meta keys (api/health.js:222,223,269)
+// health.js expects these exact meta keys (api/_health.js:222,223,269)
 const INTL_META_KEY  = 'seed-meta:aviation:intl';
 const FAA_META_KEY   = 'seed-meta:aviation:faa';
 const NOTAM_META_KEY = 'seed-meta:aviation:notam';
@@ -1406,7 +1406,7 @@ async function writeDelaysBootstrap(intlOverride) {
 // ─── Orchestration ───────────────────────────────────────────────────────────
 // runSeed's primary key = INTL (largest spend, most-consumed). FAA + NOTAM +
 // News are written as "extra keys" after the primary publish. Each has its own
-// seed-meta override that matches api/health.js expectations.
+// seed-meta override that matches api/_health.js expectations.
 
 // ─── Side-car seed runners ───────────────────────────────────────────────────
 // Each secondary data source (FAA, NOTAM, news) seeds INDEPENDENTLY of the
@@ -1458,7 +1458,7 @@ async function runFaaSideCar() {
 // Failure path for the NOTAM side-car. seed-meta:aviation:notam.fetchedAt is the
 // last HEALTHY fetch, never the last attempt: it is not rewritten here (and its
 // TTL is not touched, so it cannot be shortened into an early miss), so
-// api/health.js notamClosures ages into STALE_SEED once maxStaleMin passes. The
+// api/_health.js notamClosures ages into STALE_SEED once maxStaleMin passes. The
 // last-good closure list keeps serving only while it is inside that same budget;
 // past it, the data key is left to expire rather than presenting days-old
 // closures as current. Mirrors runSeed's graceful-failure contract.

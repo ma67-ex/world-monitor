@@ -1,6 +1,6 @@
 // Pure host-matching predicate over the RSS proxy allowlist. Source of truth
 // for the www-normalized comparison used by:
-//   - api/rss-proxy.js (Edge SSRF guard, initial host + per-redirect re-check)
+//   - api/_rss-proxy.js (Edge SSRF guard, initial host + per-redirect re-check)
 //   - scripts/validate-rss-feeds.mjs --ci (build-time / scheduled feed validator)
 //
 // Edge constraint: api/*.js cannot import from ../shared. Helpers and data
@@ -9,7 +9,7 @@
 // mirror so the predicate has its data in scope without bouncing through the
 // edge bundler.
 //
-// Match rule (mirrors what api/rss-proxy.js shipped before this extraction):
+// Match rule (mirrors what api/_rss-proxy.js shipped before this extraction):
 //   1. exact hostname match
 //   2. bare hostname (www. prefix stripped)
 //   3. www-prefixed hostname

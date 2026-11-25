@@ -15,12 +15,12 @@ const RETENTION_DAYS = 90;
 const META_GRACE_DAYS = 7;
 // A single provider-agnostic heartbeat, advanced by every successful archive
 // write whichever provider produced it. The per-bucket seed-meta keys rotate
-// daily and split by provider, so neither can be registered in api/health.js's
+// daily and split by provider, so neither can be registered in api/_health.js's
 // static SEED_META registry without false-alarming at UTC midnight or whenever
 // the BestTime fallback takes over. This key is stable, so it can.
 const HEARTBEAT_KEY = `seed-meta:${PREFIX}`;
 const HEARTBEAT_TTL_SECONDS = 86400 * META_GRACE_DAYS;
-// Durable proof the archive has published at least once. api/health.js softens the
+// Durable proof the archive has published at least once. api/_health.js softens the
 // heartbeat's EMPTY window until this exists, so the grace expires on real
 // evidence instead of lasting forever. Written with no TTL, per the marker
 // convention in scripts/seed-physical-premiums.mjs.

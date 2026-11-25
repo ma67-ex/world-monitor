@@ -68,7 +68,7 @@ type DashboardControlStatus = 'applied' | 'denied' | 'invalid' | 'skipped';
  * Turn a failed /api/chat-analyst response into user-facing copy.
  *
  * A 403 has several causes and only one of them is "you need to buy Pro":
- * the route 403s on a missing plan (api/chat-analyst.ts:126), and the shared
+ * the route 403s on a missing plan (api/_chat-analyst.ts:126), and the shared
  * gateway also 403s an unidentified caller and a failed entitlement lookup.
  * Telling a customer who paid minutes ago to buy a subscription — which is
  * what the old blanket `status === 403` branch did during the #5600 poison

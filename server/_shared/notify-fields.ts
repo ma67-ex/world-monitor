@@ -11,7 +11,7 @@
  * `Source: WorldMonitor Security` line, and an off-origin link verbatim.
  *
  * Two entry points consume this module:
- *   - `api/notify.ts` validates user-submitted payloads BEFORE queueing, so
+ *   - `api/_notify.ts` validates user-submitted payloads BEFORE queueing, so
  *     every downstream channel inherits the guarantee.
  *   - `scripts/notification-relay.cjs` `formatMessage` applies the same
  *     shaping as defence in depth, since the relay also emits events that
@@ -39,7 +39,7 @@
  *     mask the target. The web-push click target has no room for that inline
  *     disclosure, so caller-submitted events collapse to first-party there.
  *
- * Edge-safe: no Node imports, no JSON imports — `api/notify.ts` bundles with
+ * Edge-safe: no Node imports, no JSON imports — `api/_notify.ts` bundles with
  * esbuild for Vercel Edge (see scripts/check-edge-function-bundles.mjs).
  */
 
@@ -356,7 +356,7 @@ export function sanitizeNotificationLinkUrl(value: unknown): string {
  *
  * The link-suppression matchers remove exactly these tags before comparing
  * (scripts/shared/notification-link-suppression.cjs,
- * api/notification-suppressions.js, public/link-suppression-check.js), so a
+ * api/_notification-suppressions.js, public/link-suppression-check.js), so a
  * new channel here must be added to all three.
  *
  * The relay's renderers are the callers (scripts/shared/notify-fields.cjs);

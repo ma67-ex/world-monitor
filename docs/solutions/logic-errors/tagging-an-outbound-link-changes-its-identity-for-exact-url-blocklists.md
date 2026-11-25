@@ -57,7 +57,7 @@ return kept.length > 0 ? `?${kept.join('&')}` : '';
 
 - `scripts/shared/notification-link-suppression.cjs` derives the list from
   `NOTIFY_ALERT_CHANNELS` in `scripts/shared/notify-fields.cjs`.
-- `api/notification-suppressions.js` and `public/link-suppression-check.js`
+- `api/_notification-suppressions.js` and `public/link-suppression-check.js`
   are self-contained and keep literal copies.
 - The tagger appends with `&` whenever the query is non-empty, so removing the
   tag always gives back the original query string.

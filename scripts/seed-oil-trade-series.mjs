@@ -1058,7 +1058,7 @@ export async function fetchOilTradeSeries({ nowMs = Date.now(), fetchDeadlineAtM
   };
 }
 
-// Durable marker read by api/health.js: once set, an absent or stale series
+// Durable marker read by api/_health.js: once set, an absent or stale series
 // is a fault rather than a deploy-before-first-publish gap.
 async function markActivated() {
   try {

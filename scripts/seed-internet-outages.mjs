@@ -19,7 +19,7 @@ const DDOS_KEY = 'cf:radar:ddos:v1';
 const TRAFFIC_ANOMALIES_KEY = 'cf:radar:traffic-anomalies:v1';
 const CACHE_TTL = 10800; // 3h — 6x the 30 min cron interval (was 1x = key expired on any missed run)
 const DDOS_TTL = 10800;
-// Co-pinned with SEED_META.trafficAnomalies.maxStaleMin (60) in api/health.js:
+// Co-pinned with SEED_META.trafficAnomalies.maxStaleMin (60) in api/_health.js:
 // the data TTL must STRICTLY exceed that gate. #7876 moved trafficAnomalies into
 // MISSING_DATA_IS_FAILURE_KEYS, so an absent payload is now EMPTY (crit) rather
 // than OK — and at the old 3600s the key expired at exactly the 60-minute mark

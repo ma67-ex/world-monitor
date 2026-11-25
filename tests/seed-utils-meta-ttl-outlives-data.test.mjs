@@ -1,9 +1,9 @@
 // Regression test: a seed-meta key must never expire BEFORE the data key it
 // vouches for.
 //
-// api/health.js decides freshness from `seed-meta:<domain>:<resource>` and
+// api/_health.js decides freshness from `seed-meta:<domain>:<resource>` and
 // falls through to plain OK when that key is absent but the data key still has
-// bytes (classifyKey's `seedStale === true` arm at api/health.js:2336 is the
+// bytes (classifyKey's `seedStale === true` arm at api/_health.js:2336 is the
 // only STALE_SEED path, and a missing meta yields `seedStale: null`). So a meta
 // TTL shorter than the data TTL does not merely lose a heartbeat — it makes the
 // STALE_SEED alarm UNREACHABLE for the whole gap, and the first signal an
@@ -38,7 +38,7 @@ const originalRetryDelayMs = process.env.WM_SEED_RETRY_DELAY_MS;
 
 /** seed-economy.mjs CRUDE_INVENTORIES_TTL / NAT_GAS_TTL / SPR_TTL / REFINERY_INPUTS_TTL. */
 const EIA_WEEKLY_DATA_TTL = 1_814_400; // 21 days
-/** api/health.js SEED_META.crudeInventories.maxStaleMin, in seconds. */
+/** api/_health.js SEED_META.crudeInventories.maxStaleMin, in seconds. */
 const EIA_HEALTH_BUDGET_SECONDS = 20160 * 60; // 14 days
 
 let sets;
@@ -104,7 +104,7 @@ test('writeExtraKeyWithMeta: short data TTLs keep the 7-day meta floor', async (
   const metaSet = sets.find((c) => c[1] === 'seed-meta:market:gold-extended');
   assert.ok(metaSet, 'seed-meta key was written');
   // The floor is what lets health report STALE_SEED on a key whose data expired
-  // hours ago (api/health.js:2280) — a data-TTL-only meta would vanish with it.
+  // hours ago (api/_health.js:2280) — a data-TTL-only meta would vanish with it.
   assert.equal(ttlOf(metaSet), SEED_META_MIN_TTL_SECONDS);
 });
 
@@ -123,7 +123,7 @@ test('writeExtraKeyWithMeta: `extra` reaches the meta record, and overwrites it 
   // writeExtraKeyWithMeta caller, so the precedence needs to be a pinned
   // contract rather than an accident. It is copied over the record AFTER
   // fetchedAt/recordCount/coverage, which means a caller CAN clobber the
-  // heartbeat api/health.js reads. That is deliberate — an explicit override
+  // heartbeat api/_health.js reads. That is deliberate — an explicit override
   // beats a silent drop — but it is a footgun worth failing loudly on if the
   // order ever changes, and no test covered `extra` at all before this.
   await writeExtraKeyWithMeta(

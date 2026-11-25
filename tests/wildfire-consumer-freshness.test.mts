@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import ts from 'typescript';
-import bootstrap from '../api/bootstrap.js';
+import bootstrap from '../api/_bootstrap.js';
 import { assembleBootstrapTierPayload } from '../scripts/publish-bootstrap-tiers.mjs';
 import { compactWildfireDashboardPayload } from '../scripts/_wildfire-dashboard.mjs';
 import { mergeWildfireSourcesWithBc, wildfirePublishData } from '../scripts/wildfire/bc-fire-points.mjs';

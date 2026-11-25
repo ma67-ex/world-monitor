@@ -67,7 +67,7 @@ for (const m of R('src/shared/pro-fresh-rpc.ts').matchAll(/^\s*'(\/api\/[^']+)',
 for (const m of R('src/config/map-layer-definitions.ts').matchAll(/^\s*([a-zA-Z0-9_]+):\s*def\('([^']+)'[^\n]*?,\s*(?:_desktop \? )?'(locked|enhanced)'/gm))
   add('layer', m[2], m[3]);
 // 7. FREE_* caps
-for (const f of ['src/config/panels.ts','convex/constants.ts','src/services/gates/export-resolver.ts','src/services/followed-countries.ts','api/mcp/upgrade-constants.ts'])
+for (const f of ['src/config/panels.ts','convex/constants.ts','src/services/gates/export-resolver.ts','src/services/followed-countries.ts','api/mcp/_upgrade-constants.ts'])
   for (const m of R(f).matchAll(/^export const (FREE_[A-Z_]+)\s*=\s*([^;]+);/gm)) add('cap', m[1], `${m[2].trim()} (${f})`);
 
 
@@ -338,16 +338,16 @@ export function diffSiteCounts(actual, baseline = SITE_BASELINE) {
 // added or removed gate changes a count and must be re-baselined deliberately.
 const SITE_BASELINE = {
   "api/_user-api-key.js::desktopKeyAccess": 1,
-  "api/chat-analyst.ts::resolvePremiumCallerIdentity": 1,
-  "api/mcp-proxy.ts::resolvePremiumCallerIdentity": 1,
-  "api/mcp/auth.ts::apiAccess": 1,
-  "api/mcp/auth.ts::tier": 1,
-  "api/mcp/skill-extension/generated.ts::tier": 1,
-  "api/me/entitlement.ts::isCallerPremium": 1,
-  "api/notification-channels.ts::tier": 2,
+  "api/_chat-analyst.ts::resolvePremiumCallerIdentity": 1,
+  "api/_mcp-proxy.ts::resolvePremiumCallerIdentity": 1,
+  "api/mcp/_auth.ts::apiAccess": 1,
+  "api/mcp/_auth.ts::tier": 1,
+  "api/mcp/skill-extension/_generated.ts::tier": 1,
+  "api/me/_entitlement.ts::isCallerPremium": 1,
+  "api/_notification-channels.ts::tier": 2,
   "api/v2/shipping/webhooks/[subscriberId].ts::resolvePremiumCallerIdentity": 1,
   "api/v2/shipping/webhooks/[subscriberId]/[action].ts::resolvePremiumCallerIdentity": 1,
-  "api/widget-agent.ts::tier": 2,
+  "api/_widget-agent.ts::tier": 2,
   "convex/alertRules.ts::tier": 1,
   "convex/apiKeys.ts::apiAccess": 2,
   "convex/apiKeys.ts::desktopKeyAccess": 1,

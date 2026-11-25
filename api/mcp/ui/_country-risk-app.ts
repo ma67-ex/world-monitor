@@ -31,7 +31,7 @@
 // so the inline <script>/<style> deliberately avoid backticks and `${` to
 // keep the outer literal un-escaped and readable.
 
-import { PANEL_USAGE_BRIDGE } from './shell';
+import { PANEL_USAGE_BRIDGE } from './_shell';
 
 export const COUNTRY_RISK_UI_PROTOCOL_VERSION = '2026-01-26';
 

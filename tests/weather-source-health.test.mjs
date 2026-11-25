@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import * as weather from '../scripts/_weather-alert-select.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 
 const notifyPolicy = createRequire(import.meta.url)('../scripts/lib/notification-publish-policy.cjs');
 

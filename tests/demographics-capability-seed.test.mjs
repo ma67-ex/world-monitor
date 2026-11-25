@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import {
   DEMOGRAPHICS_CAPABILITY_KEY,
   DEMOGRAPHICS_CAPABILITY_TTL_SECONDS,
@@ -514,7 +514,7 @@ describe('demographics production registration', () => {
       minRecordCount: 150,
       cutover: { mode: 'expiring-ack', fromKey: null, issue: 6437, status: 'EMPTY' },
     });
-    assert.match(repoFile('api/seed-health.js'), /'demographics:capability':\s*\{ key: 'seed-meta:demographics:capability', intervalMin: 18000, minRecordCount: 150 \}/);
+    assert.match(repoFile('api/_seed-health.js'), /'demographics:capability':\s*\{ key: 'seed-meta:demographics:capability', intervalMin: 18000, minRecordCount: 150 \}/);
   });
 
   it('surfaces a retained source stage as COVERAGE_PARTIAL health', () => {

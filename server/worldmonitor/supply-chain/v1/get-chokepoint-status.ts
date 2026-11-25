@@ -572,7 +572,7 @@ export async function getChokepointStatus(
         const { chokepoints, sourceCoverageIncomplete, hasAnyPublishedSource } = await fetchChokepointData();
         if (!hasAnyPublishedSource) return null;
         // recordCount reflects the count of chokepoints with complete upstream data
-        // (not the canonical shape size — always 13). Lets api/health.js
+        // (not the canonical shape size — always 13). Lets api/_health.js
         // distinguish 13/13 healthy from a row-local transit shortfall or a
         // global navigation/AIS outage through the minRecordCount threshold.
         const coveredCount = chokepoints.filter((c) => (
@@ -601,7 +601,7 @@ export async function getChokepointStatus(
           fetchedAt: new Date().toISOString(),
           upstreamUnavailable: sourceCoverageIncomplete || partialCoverage,
         };
-        // Operator-facing only: api/health.js classifies this probe from
+        // Operator-facing only: api/_health.js classifies this probe from
         // minRecordCount and is deliberately left alone. Routing it through
         // projectFailedDatasets would have surfaced it in the payload but also
         // forced seedError, turning an upstream COVERAGE_PARTIAL into a

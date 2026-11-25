@@ -1,6 +1,6 @@
 /**
  * Intent detection for chat analyst action events.
- * Exported for unit testing; consumed by api/chat-analyst.ts.
+ * Exported for unit testing; consumed by api/_chat-analyst.ts.
  */
 
 import { parseAgentBusAction, type AgentBusAction } from '../../../../shared/agent-bus-actions';

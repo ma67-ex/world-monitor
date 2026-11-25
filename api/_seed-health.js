@@ -68,12 +68,12 @@ const SEED_DOMAINS = {
   'climate:ocean-ice':        { key: 'seed-meta:climate:ocean-ice',        intervalMin: 1440 }, // daily cron; health.js maxStaleMin:2880 (2x) tolerates one missed run
   'climate:news-intelligence': { key: 'seed-meta:climate:news-intelligence', intervalMin: 30 },
   // Daily bundle member; health.js maxStaleMin:4320 (3x). The activation marker keeps the row
-  // pending (not degraded) until the first publication; minRecordCount matches api/health.js.
+  // pending (not degraded) until the first publication; minRecordCount matches api/_health.js.
   'climate:reservoir-levels': { key: 'seed-meta:climate:reservoir-levels', intervalMin: 1440, minRecordCount: 50, activationKey: 'seed-activated:climate:reservoir-levels' },
   // Climate bundle member every 3h; health.js maxStaleMin:540. Pending until the first publication.
   'orbital:catalog': { key: 'seed-meta:orbital:catalog', intervalMin: 180, minRecordCount: 250, activationKey: 'seed-activated:orbital:catalog' },
   // Climate bundle member every 12h. intervalMin expresses health.js maxStaleMin:4320 as
-  // intervalMin * 2, and minRecordCount matches api/health.js (below one run's count, so a cold
+  // intervalMin * 2, and minRecordCount matches api/_health.js (below one run's count, so a cold
   // start's first run is not partial). Pending until the first publication.
   'orbital:sites': { key: 'seed-meta:orbital:sites', intervalMin: 2160, minRecordCount: 150, activationKey: 'seed-activated:orbital:sites' },
   // #4920 completeness measurement — both run in the daily feed-validation
@@ -102,7 +102,7 @@ const SEED_DOMAINS = {
   'market:china-stock-connect': { key: 'seed-meta:market:china-stock-connect', intervalMin: 90 },
   'market:gulf-quotes':       { key: 'seed-meta:market:gulf-quotes',       intervalMin: 15 },
   'market:stablecoins':       { key: 'seed-meta:market:stablecoins',       intervalMin: 30 },
-  'shared:fx-rates':          { key: 'seed-meta:shared:fx-rates',          intervalMin: 1800 }, // 60h staleness budget in api/health.js
+  'shared:fx-rates':          { key: 'seed-meta:shared:fx-rates',          intervalMin: 1800 }, // 60h staleness budget in api/_health.js
   // Phase 3 — Hybrid endpoints
   'natural:events':           { key: 'seed-meta:natural:events',           intervalMin: 270 },
   'weather:hko-warnings':     { key: 'seed-meta:weather:hko-warnings',     intervalMin: 270 },
@@ -113,13 +113,13 @@ const SEED_DOMAINS = {
   'displacement:border-panama': { key: 'seed-meta:displacement:border-panama', intervalMin: 1440, activationKey: 'seed-activated:displacement:border-panama' },
   'economic:energy-prices':   { key: 'seed-meta:economic:energy-prices',   intervalMin: 75 },
   // Independent hourly producer from scripts/seed-fred-rates.mjs. This
-  // operator-only endpoint stays strict; api/health.js owns the bounded
+  // operator-only endpoint stays strict; api/_health.js owns the bounded
   // deploy-before-provisioning window for public health.
   'economic:fred-rates':      { key: 'seed-meta:economic:fred-rates',      intervalMin: 60, minRecordCount: 24 },
   // Aligned with health.js SEED_META (intervalMin = maxStaleMin / 2)
   'market:stocks':            { key: 'seed-meta:market:stocks',            intervalMin: 15 },
   'market:commodities':       { key: 'seed-meta:market:commodities',       intervalMin: 15 },
-  // Daily SGE prints; intervalMin*2 matches api/health.js's 72h run budget.
+  // Daily SGE prints; intervalMin*2 matches api/_health.js's 72h run budget.
   'market:physical-premium':  {
     key: 'seed-meta:market:physical-premium',
     intervalMin: 2160,
@@ -143,8 +143,8 @@ const SEED_DOMAINS = {
   'news:insights':            { key: 'seed-meta:news:insights',            intervalMin: 15 },
   // #6263: the sibling of news:insights above, and registered on the same
   // terms. Hourly tail LLM stage in seed-forecasts; intervalMin*2 = 120min,
-  // the api/health.js marketImplications budget. Both keys also carry a
-  // `synthesisFailure` contract in api/health.js that escalates on consecutive
+  // the api/_health.js marketImplications budget. Both keys also carry a
+  // `synthesisFailure` contract in api/_health.js that escalates on consecutive
   // misses — this endpoint models neither key's streak, so within the 120min
   // window it reports `ok` where /api/health may already report SEED_ERROR.
   // That is the same coarse-vs-detailed split news:insights has always had,
@@ -153,10 +153,10 @@ const SEED_DOMAINS = {
   // on exactly the budget above.
   'intelligence:market-implications': { key: 'seed-meta:intelligence:market-implications', intervalMin: 60 },
   'positive-events:geo':      { key: 'seed-meta:positive-events:geo',      intervalMin: 30 },
-  'intelligence:risk-scores': { key: 'seed-meta:intelligence:risk-scores', intervalMin: 15, ciiInputs: true }, // CII warm-ping every 8min; intervalMin*2 = 30min, aligned with api/health.js riskScores. ciiInputs grades the per-input report with the same policy (api/_cii-input-health.js).
-  'conflict:iran-events':     { key: 'seed-meta:conflict:iran-events',     intervalMin: 22 }, // ais-relay Middle East strike loop every 10min; intervalMin*2 = 44min, aligned with api/health.js iranEvents (45).
-  'conflict:strike-pressure:v2': { key: 'seed-meta:conflict:strike-pressure:v2', intervalMin: 22, activationKey: 'seed-activated:conflict:strike-pressure:v2' }, // the relay's v2 shadow loop (CII v15 B3), same cadence; aligned with api/health.js strikePressureV2 (45).
-  'conflict:strike-pressure': { key: 'seed-meta:conflict:strike-pressure', intervalMin: 22, activationKey: 'seed-activated:conflict:strike-pressure' }, // same relay loop adds each healthy window to the 30-day CII strike tally; aligned with api/health.js strikePressure (45).
+  'intelligence:risk-scores': { key: 'seed-meta:intelligence:risk-scores', intervalMin: 15, ciiInputs: true }, // CII warm-ping every 8min; intervalMin*2 = 30min, aligned with api/_health.js riskScores. ciiInputs grades the per-input report with the same policy (api/_cii-input-health.js).
+  'conflict:iran-events':     { key: 'seed-meta:conflict:iran-events',     intervalMin: 22 }, // ais-relay Middle East strike loop every 10min; intervalMin*2 = 44min, aligned with api/_health.js iranEvents (45).
+  'conflict:strike-pressure:v2': { key: 'seed-meta:conflict:strike-pressure:v2', intervalMin: 22, activationKey: 'seed-activated:conflict:strike-pressure:v2' }, // the relay's v2 shadow loop (CII v15 B3), same cadence; aligned with api/_health.js strikePressureV2 (45).
+  'conflict:strike-pressure': { key: 'seed-meta:conflict:strike-pressure', intervalMin: 22, activationKey: 'seed-activated:conflict:strike-pressure' }, // same relay loop adds each healthy window to the 30-day CII strike tally; aligned with api/_health.js strikePressure (45).
   'conflict:ucdp-events':     { key: 'seed-meta:conflict:ucdp-events',     intervalMin: 210 },
   'conflict:acled-intel':     { key: 'seed-meta:conflict:acled-intel',     intervalMin: 19 },
   'weather:alerts':           { key: 'seed-meta:weather:alerts',           intervalMin: 15 },
@@ -164,7 +164,7 @@ const SEED_DOMAINS = {
   // Hyphen: runSeed('transit', 'ttc-alerts') writes seed-meta:transit:ttc-alerts.
   'transit:ttc:alerts':       { key: 'seed-meta:transit:ttc-alerts',       intervalMin: 15 },
   'economic:spending':        { key: 'seed-meta:economic:spending',        intervalMin: 60 },
-  'intelligence:gpsjam':      { key: 'seed-meta:intelligence:gpsjam',      intervalMin: 720 }, // 720 × 2 = 1440min (24h) staleness; matches api/health.js gpsjam.maxStaleMin. Widened from 360 (12h) on 2026-04-29 alongside Wingbits API quota incident — see PR #3494 + the seeder graceful-failure path at scripts/fetch-gpsjam.mjs:258-262.
+  'intelligence:gpsjam':      { key: 'seed-meta:intelligence:gpsjam',      intervalMin: 720 }, // 720 × 2 = 1440min (24h) staleness; matches api/_health.js gpsjam.maxStaleMin. Widened from 360 (12h) on 2026-04-29 alongside Wingbits API quota incident — see PR #3494 + the seeder graceful-failure path at scripts/fetch-gpsjam.mjs:258-262.
   'intelligence:satellites':  { key: 'seed-meta:intelligence:satellites',  intervalMin: 90 },
   'military:flights':         { key: 'seed-meta:military:flights',         intervalMin: 8 },
   // #6845 item 3: staleness was invisible — this endpoint had no entry for the
@@ -191,7 +191,7 @@ const SEED_DOMAINS = {
   'infra:service-statuses':   { key: 'seed-meta:infra:service-statuses',   intervalMin: 60 },
   'supply_chain:shipping':    { key: 'seed-meta:supply_chain:shipping',    intervalMin: 120 },
   'supply_chain:chokepoints': { key: 'seed-meta:supply_chain:chokepoints', intervalMin: 30 },
-  // 60d static-ref bundle (intervalMin*2 = 120d, matching api/health.js maxStaleMin).
+  // 60d static-ref bundle (intervalMin*2 = 120d, matching api/_health.js maxStaleMin).
   // minRecordCount tracks minStagedCommodities() in scripts/seed-mineral-production.mjs
   // (ceil(14 * 0.7)); api/ cannot import from scripts/, so bump both together when
   // scripts/shared/mineral-commodities.json gains or loses a commodity.
@@ -202,11 +202,11 @@ const SEED_DOMAINS = {
     key: 'seed-meta:prediction:markets',
     intervalMin: 8,
     minRecordCount: 20,
-    // Mirrors api/health.js (#5875). A one-market floor detects an empty pool
+    // Mirrors api/_health.js (#5875). A one-market floor detects an empty pool
     // without asserting that a naturally quiet category must sustain volume.
     minPoolCounts: PREDICTION_MARKET_MIN_POOL_COUNTS,
   },
-  'aviation:intl':            { key: 'seed-meta:aviation:intl',            intervalMin: 45 }, // intervalMin*2 = 90min staleness. seed-aviation's freshness gate (AVIATIONSTACK_MIN_REFRESH_MIN, default 55) lets fetchedAt age to ~55+cron between paid fetches; 90min matches the aviation:faa sibling + api/health.js intlDelays maxStaleMin:90. Was 15 (30min) and false-WARNed every cycle once the gate landed.
+  'aviation:intl':            { key: 'seed-meta:aviation:intl',            intervalMin: 45 }, // intervalMin*2 = 90min staleness. seed-aviation's freshness gate (AVIATIONSTACK_MIN_REFRESH_MIN, default 55) lets fetchedAt age to ~55+cron between paid fetches; 90min matches the aviation:faa sibling + api/_health.js intlDelays maxStaleMin:90. Was 15 (30min) and false-WARNed every cycle once the gate landed.
   'theater-posture':          { key: 'seed-meta:theater-posture',          intervalMin: 8 },
   'economic:worldbank-techreadiness': { key: 'seed-meta:economic:worldbank-techreadiness:v1', intervalMin: 5040 },
   'economic:worldbank-progress':      { key: 'seed-meta:economic:worldbank-progress:v1',     intervalMin: 5040 },
@@ -216,13 +216,13 @@ const SEED_DOMAINS = {
   'economic:china-release-calendar': { key: 'seed-meta:economic:china-release-calendar', intervalMin: 2160 },
   'china:policy-events':      { key: 'seed-meta:china:policy-events',      intervalMin: 360 },
   // The producer still runs every 15min. seed-health stales at intervalMin*2,
-  // so 90 mirrors the three-hour operational-coverage budget in api/health.js.
+  // so 90 mirrors the three-hour operational-coverage budget in api/_health.js.
   'intelligence:china-decision-signals': { key: 'seed-meta:intelligence:china-decision-signals', intervalMin: 90, minRecordCount: 6 },
   'economic:bis-dsr':                  { key: 'seed-meta:economic:bis-dsr',                  intervalMin: 720 }, // 12h cron; only written when DSR slice fetched fresh entries
   'economic:bis-property-residential': { key: 'seed-meta:economic:bis-property-residential', intervalMin: 720 }, // 12h cron; only written when SPP slice fetched fresh entries
   'economic:bis-property-commercial':  { key: 'seed-meta:economic:bis-property-commercial',  intervalMin: 720 }, // 12h cron; only written when CPP slice fetched fresh entries
-  'economic:cbr-rates':                { key: 'seed-meta:economic:cbr-rates',                intervalMin: 1440, minRecordCount: 31 }, // daily cron (seed-bundle-macro); api/health.js maxStaleMin 4320 = 3x. minRecordCount mirrors MIN_RATE_COUNT (30) + the key rate.
-  'economic:boc-valet':                { key: 'seed-meta:economic:boc-valet',                intervalMin: 1440, minRecordCount: 19 }, // daily cron (seed-bundle-macro); api/health.js maxStaleMin 4320 = 3x. minRecordCount = 15 FX + policy + 3 yields.
+  'economic:cbr-rates':                { key: 'seed-meta:economic:cbr-rates',                intervalMin: 1440, minRecordCount: 31 }, // daily cron (seed-bundle-macro); api/_health.js maxStaleMin 4320 = 3x. minRecordCount mirrors MIN_RATE_COUNT (30) + the key rate.
+  'economic:boc-valet':                { key: 'seed-meta:economic:boc-valet',                intervalMin: 1440, minRecordCount: 19 }, // daily cron (seed-bundle-macro); api/_health.js maxStaleMin 4320 = 3x. minRecordCount = 15 FX + policy + 3 yields.
   'economic:statcan-wds':              { key: 'seed-meta:economic:statcan-wds',              intervalMin: 1440, minRecordCount: 2 }, // daily cron; floor is CPI YoY + LFS unemployment. Empty change-list is valid quiet.
   'research:tech-events':    { key: 'seed-meta:research:tech-events',     intervalMin: 240 },
   // Seeder-owned meta for the research:tech-events:v1 mirror (scripts/
@@ -233,7 +233,7 @@ const SEED_DOMAINS = {
   // heartbeat instead of riding the relay's.
   'research:tech-events-seeder': { key: 'seed-meta:research:tech-events:seeder', intervalMin: 90 },
   'research:arxiv-hn-trending': { key: 'seed-meta:research:arxiv-hn-trending', intervalMin: 75 },
-  'intelligence:gdelt-intel': { key: 'seed-meta:intelligence:gdelt-intel', intervalMin: 23 }, // 15min materializer cron (#5863); intervalMin = maxStaleMin / 2 (45 / 2), matching api/health.js — was 210 against the retired 4h DOC cron.
+  'intelligence:gdelt-intel': { key: 'seed-meta:intelligence:gdelt-intel', intervalMin: 23 }, // 15min materializer cron (#5863); intervalMin = maxStaleMin / 2 (45 / 2), matching api/_health.js — was 210 against the retired 4h DOC cron.
   'gdelt:bulk:country-articles': { key: 'seed-meta:gdelt:bulk:country-articles', intervalMin: 23 }, // same materializer tick; standalone health key for the per-country index (#7748).
   'correlation:cards':        { key: 'seed-meta:correlation:cards',        intervalMin: 5 },
   'infra:grid-disruption-clock': {
@@ -243,20 +243,20 @@ const SEED_DOMAINS = {
   'correlation:market-alerts': { key: 'seed-meta:correlation:market-alerts', intervalMin: 5, activationKey: 'seed-activated:correlation:market-alerts' }, // #8867 ledger tick in seed-bundle-derived-signals; its scorecard shares the run and the marker
   'correlation:market-alerts-scorecard': { key: 'seed-meta:correlation:market-alerts-scorecard', intervalMin: 5, activationKey: 'seed-activated:correlation:market-alerts' },
   'intelligence:advisories':  { key: 'seed-meta:intelligence:advisories',  intervalMin: 60 },
-  // Corporate intelligence (#5695): intervalMin = maxStaleMin / 2 (api/health.js: 2880 / 120).
+  // Corporate intelligence (#5695): intervalMin = maxStaleMin / 2 (api/_health.js: 2880 / 120).
   'intelligence:sec-cik-map': { key: 'seed-meta:intelligence:sec-cik-map', intervalMin: 1440, minRecordCount: 5000 },
   'intelligence:sec-8k-stream': { key: 'seed-meta:intelligence:sec-8k-stream', intervalMin: 60, minRecordCount: 50 },
-  'intelligence:social-reddit': { key: 'seed-meta:intelligence:social-reddit', intervalMin: 270 }, // 180min relay loop (3h; dropped from 60min now that ScrapeCreators handles Reddit); intervalMin = maxStaleMin / 2 (540 / 2), matching api/health.js
-  'intelligence:wsb-tickers': { key: 'seed-meta:intelligence:wsb-tickers', intervalMin: 270 }, // 180min relay loop (3h); intervalMin = maxStaleMin / 2 (540 / 2), matching api/health.js
+  'intelligence:social-reddit': { key: 'seed-meta:intelligence:social-reddit', intervalMin: 270 }, // 180min relay loop (3h; dropped from 60min now that ScrapeCreators handles Reddit); intervalMin = maxStaleMin / 2 (540 / 2), matching api/_health.js
+  'intelligence:wsb-tickers': { key: 'seed-meta:intelligence:wsb-tickers', intervalMin: 270 }, // 180min relay loop (3h); intervalMin = maxStaleMin / 2 (540 / 2), matching api/_health.js
   'trade:customs-revenue':    { key: 'seed-meta:trade:customs-revenue',    intervalMin: 720 },
-  'trade:us-hts:catalog':     { key: 'seed-meta:trade:us-hts:catalog',     intervalMin: 720, minRecordCount: 100, activationKey: 'seed-activated:trade:us-hts' }, // intervalMin = maxStaleMin / 2, matching api/health.js
+  'trade:us-hts:catalog':     { key: 'seed-meta:trade:us-hts:catalog',     intervalMin: 720, minRecordCount: 100, activationKey: 'seed-activated:trade:us-hts' }, // intervalMin = maxStaleMin / 2, matching api/_health.js
   'comtrade:bilateral-hs4-ext': { key: 'seed-meta:comtrade:bilateral-hs4-ext', intervalMin: 25200, minRecordCount: 110 }, // monthly extended-headings seed on the 15th; same budget and floor as the core run
-  'comtrade:bilateral-hs4':   { key: 'seed-meta:comtrade:bilateral-hs4',   intervalMin: 25200, minRecordCount: 110 }, // intervalMin*2 = health.js 35d budget for the monthly Railway seed; minRecordCount matches api/health.js + MIN_COUNTRY_COVERAGE
+  'comtrade:bilateral-hs4':   { key: 'seed-meta:comtrade:bilateral-hs4',   intervalMin: 25200, minRecordCount: 110 }, // intervalMin*2 = health.js 35d budget for the monthly Railway seed; minRecordCount matches api/_health.js + MIN_COUNTRY_COVERAGE
   'supply-chain:vulnerability': {
     key: 'seed-meta:supply-chain:vulnerability',
     intervalMin: 1440,
     minRecordCount: 110,
-    minRankableRecordCount: SUPPLY_VULNERABILITY_MIN_RANKABLE_RECORD_COUNT, // matches api/health.js and the producer floor MIN_COUNTRY_COVERAGE * MIN_SCORED_COMMODITIES_PER_RANKABLE_COUNTRY
+    minRankableRecordCount: SUPPLY_VULNERABILITY_MIN_RANKABLE_RECORD_COUNT, // matches api/_health.js and the producer floor MIN_COUNTRY_COVERAGE * MIN_SCORED_COMMODITIES_PER_RANKABLE_COUNTRY
     requiredRedistributionPolicyVersion: 1,
     activationKey: 'seed-activated:supply-chain:vulnerability',
   },
@@ -289,7 +289,7 @@ const SEED_DOMAINS = {
   },
   'resilience:intervals':     {
     key: 'seed-meta:resilience:intervals',
-    intervalMin: 420, // Same 840min freshness budget as api/health.js, expressed as intervalMin * 2.
+    intervalMin: 420, // Same 840min freshness budget as api/_health.js, expressed as intervalMin * 2.
     minRecordCount: RESILIENCE_INTERVAL_MIN_RECORD_COUNT,
     dataProbe: {
       key: RESILIENCE_INTERVAL_PROBE_KEY,
@@ -314,7 +314,7 @@ const SEED_DOMAINS = {
   'economic:fatf-listing':     { key: 'seed-meta:economic:fatf-listing',     intervalMin: 30240 }, // FATF plenary 3×/year; intervalMin = health.js maxStaleMin / 2 (60480 / 2)
   'product-catalog':          { key: 'seed-meta:product-catalog',          intervalMin: 360 }, // relay loop every 6h; intervalMin = health.js maxStaleMin / 3 (1080 / 3)
   'portwatch:chokepoints-ref': { key: 'seed-meta:portwatch:chokepoints-ref', intervalMin: 10080 },
-  'portwatch:disruptions':    { key: 'seed-meta:portwatch:disruptions',    intervalMin: 75 }, // active disruptions seed; intervalMin*2 = 150min matches api/health.js
+  'portwatch:disruptions':    { key: 'seed-meta:portwatch:disruptions',    intervalMin: 75 }, // active disruptions seed; intervalMin*2 = 150min matches api/_health.js
   // #6060: mirror /api/health's decision-critical content contract. The
   // heartbeat and 174-country cardinality can both be green while CN/HK's
   // cached observations are older than the corridor adapter's 144h budget.
@@ -351,7 +351,7 @@ const SEED_DOMAINS = {
   // an un-provisioned relay as `not_configured` rather than an eternal warn.
   // activationKey: the record only exists after the collector's next Railway
   // tick, so absence before the first report is pending-activation, not a
-  // degraded 503. intervalMin*2 mirrors api/health.js maxStaleMin.
+  // degraded 503. intervalMin*2 mirrors api/_health.js maxStaleMin.
   'intel-history:conflict:acled-intel': {
     key: 'seed-meta:intel-history:conflict:acled-intel',
     intervalMin: 19,
@@ -406,7 +406,7 @@ const SEED_DOMAINS = {
   'transit:viarail-live': { key: 'seed-meta:transit:viarail-live', intervalMin: 15 }, // 15min cron; intervalMin*3 = health.js maxStaleMin 45
 };
 
-// Middle East strike feed (conflict:iran-events:v1); mirrors api/health.js.
+// Middle East strike feed (conflict:iran-events:v1); mirrors api/_health.js.
 // Default OFF: the relay loop does not run, so drop the key from staleness
 // classification. IRAN_EVENTS_ENABLED=true turns on producer and probe together.
 if ((process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() !== 'true') {
@@ -638,8 +638,8 @@ async function getSeedBatch(entries) {
   for (const slot of probeSlots) {
     probeMap.set(slot.domain, data[slot.index]?.result ?? null);
   }
-  // Both maps are THREE-valued (#6095, matching api/health.js and
-  // api/mcp/freshness.ts): `readExistsFlags` adds a domain only when the
+  // Both maps are THREE-valued (#6095, matching api/_health.js and
+  // api/mcp/_freshness.ts): `readExistsFlags` adds a domain only when the
   // EXISTS entry has an explicit result of 0 or 1. Per-command errors,
   // `{}`, null results, and missing slots remain unknown, so a malformed
   // pipeline body can never be interpreted as clean absence (#6115).
@@ -698,7 +698,7 @@ export async function handleSeedHealth(req, options = {}) {
   for (const [domain, cfg] of entries) {
     const meta = metaMap.get(cfg.key);
     const maxStalenessMs = cfg.intervalMin * 2 * 60 * 1000;
-    // #6095 review: mirrors api/health.js's `activationUnknown`. A verdict
+    // #6095 review: mirrors api/_health.js's `activationUnknown`. A verdict
     // reached from an UNREADABLE marker is otherwise byte-identical to one
     // reached from evidence, so an operator cannot tell "the EXISTS command
     // failed" from "the producer genuinely never published" — different
@@ -716,7 +716,7 @@ export async function handleSeedHealth(req, options = {}) {
         // (#4927 re-review P1).
         // #6095 audited this grace and kept it soft on an UNREADABLE marker,
         // unlike the content-freshness grace below, and mirrors the same call
-        // api/health.js makes for ON_DEMAND: the strict verdict here is
+        // api/_health.js makes for ON_DEMAND: the strict verdict here is
         // 'missing' (which drives `overall: degraded` and HTTP 503), so
         // resolving unknown to "activated" would turn a marker blip into a
         // hard-down page for a domain that may genuinely never have run.
@@ -783,7 +783,7 @@ export async function handleSeedHealth(req, options = {}) {
       || Object.values(bilateralGaps.countryCoverage).some(c => BILATERAL_FAILURE_STATES.has(c?.state))
       || (bilateralGaps.worldExports != null && bilateralGaps.worldExports.state !== 'observed')
       || (bilateralGaps.lngOrigin != null && bilateralGaps.lngOrigin.state !== 'observed'));
-    // Same policy as api/health.js riskScores, without the sibling staleness
+    // Same policy as api/_health.js riskScores, without the sibling staleness
     // checks this endpoint does not compute.
     const ciiInputs = cfg.ciiInputs ? assessCiiInputs(meta, evaluationNow) : null;
     const ciiInputsPartial = Boolean(ciiInputs && (
@@ -800,7 +800,7 @@ export async function handleSeedHealth(req, options = {}) {
     // reporting a current upstream failure through sourceState. Treat that as
     // an immediate operator error instead of waiting for the freshness window.
     // `unavailable` means an optional adapter was never configured, matching
-    // api/health.js's NOT_CONFIGURED treatment rather than a broken source.
+    // api/_health.js's NOT_CONFIGURED treatment rather than a broken source.
     const sourceUnavailable = meta.sourceState === 'unavailable';
     const sourceBlocked = domain === 'military:cross-strait-activity:japan-mod'
       && meta.sourceState === 'blocked'
@@ -829,7 +829,7 @@ export async function handleSeedHealth(req, options = {}) {
     );
     // Grace requires POSITIVE proof (#6095): the marker was READ and came back
     // absent. An unreadable marker is unknown state, not evidence of a producer
-    // that never ran — the same rule api/health.js and api/mcp/freshness.ts
+    // that never ran — the same rule api/_health.js and api/mcp/_freshness.ts
     // apply, so the three surfaces cannot answer differently for one input
     // class. The clean-absent arm is also bounded by the shared rollout window
     // (#6111), so marker eviction or an empty Redis restore cannot excuse the

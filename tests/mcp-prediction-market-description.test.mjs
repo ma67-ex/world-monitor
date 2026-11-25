@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { readToolsReference } from './helpers/mcp-tools-reference-docs.mjs';
 
-import { TOOL_DESCRIPTION_MAX_BYTES } from '../api/mcp/constants.ts';
+import { TOOL_DESCRIPTION_MAX_BYTES } from '../api/mcp/_constants.ts';
 import {
   TOOL_LIST_RESPONSE,
   TOOL_REGISTRY,

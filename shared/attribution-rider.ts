@@ -21,7 +21,7 @@ import jmespath from 'jmespath';
  * merged AFTER `jmespath.search` — no expression can name it, reach it, or
  * remove it.
  *
- * Both surfaces import this module: `api/mcp/dispatch.ts` (keyed on the tool's
+ * Both surfaces import this module: `api/mcp/_dispatch.ts` (keyed on the tool's
  * `_attribution`) and `server/gateway.ts` (keyed on the request pathname, via
  * `REST_ATTRIBUTION_EXPRESSIONS`).
  *

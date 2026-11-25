@@ -112,11 +112,11 @@ after(() => {
   }
 });
 
-const { default: authorizeHandler } = await import('../api/oauth/authorize.js');
-const { tokenHandler, __setOAuthTokenRatelimitForTest, __resetOAuthTokenRateLimitForTest } = await import('../api/oauth/token.ts');
-const { authorizeProHandler } = await import('../api/oauth/authorize-pro.ts');
-const { mintGrantHandler } = await import('../api/internal/mcp-grant-mint.ts');
-const { grantContextHandler } = await import('../api/internal/mcp-grant-context.ts');
+const { default: authorizeHandler } = await import('../api/oauth/_authorize.js');
+const { tokenHandler, __setOAuthTokenRatelimitForTest, __resetOAuthTokenRateLimitForTest } = await import('../api/oauth/_token.ts');
+const { authorizeProHandler } = await import('../api/oauth/_authorize-pro.ts');
+const { mintGrantHandler } = await import('../api/internal/_mcp-grant-mint.ts');
+const { grantContextHandler } = await import('../api/internal/_mcp-grant-context.ts');
 const { signGrant, verifyGrant } = await import('../api/_mcp-grant-hmac.ts');
 const {
   resolveOAuthClient,
@@ -269,9 +269,9 @@ describe('CIMD — each vendor document completes the API-key flow', () => {
 
   it('a refresh token bound to one client_id cannot be redeemed by another', async () => {
     const claude = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
-    const flow = await startFlow(claude, 'https://claude.ai/api/mcp/auth_callback');
+    const flow = await startFlow(claude, 'https://claude.ai/api/mcp/_auth_callback');
     const code = new URL((await submitConsent(flow.nonce, flow.cookie)).headers.get('Location')).searchParams.get('code');
-    const tokens = await (await exchangeCode(code, claude, 'https://claude.ai/api/mcp/auth_callback')).json();
+    const tokens = await (await exchangeCode(code, claude, 'https://claude.ai/api/mcp/_auth_callback')).json();
     const res = await refresh(tokens.refresh_token, 'https://chatgpt.com/oauth/client.json');
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error_description, 'client_id mismatch');
@@ -395,7 +395,7 @@ describe('CIMD — consent page', () => {
   });
 
   it('does not warn for a hosted client', async () => {
-    const flow = await startFlow('https://claude.ai/oauth/mcp-oauth-client-metadata', 'https://claude.ai/api/mcp/auth_callback');
+    const flow = await startFlow('https://claude.ai/oauth/mcp-oauth-client-metadata', 'https://claude.ai/api/mcp/_auth_callback');
     assert.doesNotMatch(flow.html, /class="client-warn"/);
   });
 
@@ -901,11 +901,11 @@ describe('client_id dispatch', () => {
     assert.equal(isClientMetadataDocumentId('https://claude.ai/oauth/mcp-oauth-client-metadata'), true);
     assert.equal(isClientMetadataDocumentId('http://x.example/'), true);
     const id = crypto.randomUUID();
-    store.set(`oauth:client:${id}`, JSON.stringify({ client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] }));
+    store.set(`oauth:client:${id}`, JSON.stringify({ client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/_auth_callback'] }));
     const resolved = await resolveOAuthClient(id, deps());
     assert.equal(resolved.ok, true);
     assert.equal(resolved.client.cimd, false);
-    assert.equal(clientAllowsRedirectUri(resolved.client, 'https://claude.ai/api/mcp/auth_callback'), true);
+    assert.equal(clientAllowsRedirectUri(resolved.client, 'https://claude.ai/api/mcp/_auth_callback'), true);
     assert.equal(vendorFetches.length, 0);
   });
 });

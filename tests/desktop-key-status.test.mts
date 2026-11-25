@@ -20,7 +20,7 @@ import handler, {
   DESKTOP_KEY_STATUS_IP_INVALID_LIMIT,
   DESKTOP_KEY_STATUS_OWNER_LIMIT,
   __setDesktopKeyStatusDepsForTests,
-} from '../api/desktop-key/status.ts';
+} from '../api/desktop-key/_status.ts';
 import { __resetEntitlementNegativeCacheForTests } from '../server/_shared/entitlement-check.ts';
 import {
   __clearLocalUnavailableBackoffForTests,
@@ -398,7 +398,7 @@ describe('desktop-key status: rate limits and metering', () => {
   });
 
   it('the route never imports the desktop-key meter', () => {
-    const src = readFileSync(new URL('../api/desktop-key/status.ts', import.meta.url), 'utf8');
+    const src = readFileSync(new URL('../api/desktop-key/_status.ts', import.meta.url), 'utf8');
     assert.doesNotMatch(src, /desktop-key-meter|reserveDesktopKeyBudget|_desktop-key-meter/);
   });
 });

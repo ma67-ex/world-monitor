@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { load } from 'js-yaml';
 
-import handler from '../api/md-twin.ts';
+import handler from '../api/_md-twin.ts';
 import {
   MAX_TWIN_BYTES,
   MD_TWIN_LOOP_HEADER,
@@ -145,7 +145,7 @@ describe('markdown URL-fallback helpers', () => {
   });
 });
 
-describe('api/md-twin.ts vary coverage (#7616 U4)', () => {
+describe('api/_md-twin.ts vary coverage (#7616 U4)', () => {
   it('declares the loop-guard header in Vary so cached twins never replay across variants', async () => {
     const plain = await buildMarkdownTwinResponse(
       new Request('https://www.worldmonitor.app/dashboard.md'),
@@ -165,7 +165,7 @@ describe('api/md-twin.ts vary coverage (#7616 U4)', () => {
   });
 });
 
-describe('api/md-twin.ts', () => {
+describe('api/_md-twin.ts', () => {
   // #7860: every content URL on this site 308s from `/x` to `/x/`, so with
   // `redirect: 'manual'` the twin answered EVERY path with a ~250-byte "this
   // resource redirects to" stub — a self-canonical, CDN-cached, indexable 200

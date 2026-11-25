@@ -13,14 +13,14 @@
 import { strict as assert } from 'node:assert';
 import { after, afterEach, before, describe, it } from 'node:test';
 
-import { grantContextHandler } from '../api/internal/mcp-grant-context.ts';
-import { mintGrantHandler } from '../api/internal/mcp-grant-mint.ts';
+import { grantContextHandler } from '../api/internal/_mcp-grant-context.ts';
+import { mintGrantHandler } from '../api/internal/_mcp-grant-mint.ts';
 import { signGrant } from '../api/_mcp-grant-hmac.ts';
 
 const REDIS_URL = 'https://redis.test';
 const ENTERPRISE_KEY = 'enterprise-test-key';
 const CLIENT_ID = 'client_claude';
-const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
+const REDIRECT_URI = 'https://claude.ai/api/mcp/_auth_callback';
 const CODE_CHALLENGE = 'a'.repeat(43);
 
 const originalFetch = globalThis.fetch;
@@ -71,7 +71,7 @@ after(() => {
   }
 });
 
-const { default: authorizeHandler } = await import('../api/oauth/authorize.js');
+const { default: authorizeHandler } = await import('../api/oauth/_authorize.js');
 
 async function startFlow({ host = 'api.worldmonitor.app', cookie } = {}) {
   store.set(`oauth:client:${CLIENT_ID}`, JSON.stringify({ client_name: 'Claude', redirect_uris: [REDIRECT_URI] }));

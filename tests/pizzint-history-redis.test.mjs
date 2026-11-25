@@ -71,14 +71,14 @@ test('real Redis preserves newest slots, fixed expiry, and all-or-nothing cap re
     }
     assert.deepEqual(JSON.parse(command('GET', multi.keys[1])), { fetchedAt: +captured + 4000, recordCount: 4 });
 
-    // The provider-agnostic heartbeat is what api/health.js can actually watch:
+    // The provider-agnostic heartbeat is what api/_health.js can actually watch:
     // one stable key, advanced by whichever provider wrote, on a rolling TTL.
     assert.equal(multi.keys[2], history.HEARTBEAT_KEY);
     assert.deepEqual(JSON.parse(command('GET', history.HEARTBEAT_KEY)), { fetchedAt: +captured + 4000, recordCount: 4 });
     const beatTtl = Number(command('TTL', history.HEARTBEAT_KEY));
     assert.ok(beatTtl > 0 && beatTtl <= history.HEARTBEAT_TTL_SECONDS, `heartbeat TTL ${beatTtl}`);
 
-    // The durable activation marker is what expires api/health.js's EMPTY grace.
+    // The durable activation marker is what expires api/_health.js's EMPTY grace.
     assert.equal(multi.keys[3], history.ACTIVATION_KEY);
     assert.equal(command('GET', history.ACTIVATION_KEY), '1');
     assert.equal(command('TTL', history.ACTIVATION_KEY), '-1', 'the marker must be durable');

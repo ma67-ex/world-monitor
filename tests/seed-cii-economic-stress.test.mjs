@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CII_COUNTRY_CODES } from '../shared/cii-weights.ts';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { buildEconomicStress, economicCountry, seedEconomicStress, ECONOMIC_COUNTRIES, ECONOMIC_KEY, ECONOMIC_META_KEY, ECONOMIC_ACTIVATION_KEY, INPUT_KEYS } from '../scripts/seed-cii-economic-stress.mjs';
 import { readFileSync } from 'node:fs';
 import { computeYoy, cleanDailyQuotes, hasTimeForOptionalFetch, withTimeCap, needsFallback, buildDailyOnlyRates, CURRENCY_COUNTRY, DAILY_ONLY_CURRENCY_COUNTRY, FX_MAX_NOISE_SHARE, FX_OPTIONAL_CAP_MS } from '../scripts/seed-fx-yoy.mjs';

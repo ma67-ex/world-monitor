@@ -22,7 +22,7 @@ import { EMBED_LAYER_IDS, EMBED_KEYED_REFRESH_MS, EMBED_FREE_REFRESH_MS } from '
 import {
   handleEmbedMapFrame,
   type EmbedMapFrameHandlerDeps,
-} from '../api/embed/map-frame';
+} from '../api/embed/_map-frame';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NOW = 1_700_000_000_000;
@@ -328,7 +328,7 @@ describe('embed map frame', () => {
   });
 
   describe('edge handler', () => {
-    const source = readFileSync(resolve(__dirname, '../api/embed/map-frame.ts'), 'utf-8');
+    const source = readFileSync(resolve(__dirname, '../api/embed/_map-frame.ts'), 'utf-8');
 
     it('classifies the shared shape from the URL before reading any credential', () => {
       // A CDN hit happens before the function sees a header, so the decision

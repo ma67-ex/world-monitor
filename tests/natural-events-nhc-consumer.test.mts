@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 
 import { listNaturalEvents } from '../server/worldmonitor/natural/v1/list-natural-events.ts';
 import { fetchNaturalEvents, naturalEventsAfterPublish, naturalEventsPublishTransform } from '../scripts/seed-natural-events.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 
 const NOW = Date.parse('2026-09-07T10:05:00.000Z');
 const originalFetch = globalThis.fetch;

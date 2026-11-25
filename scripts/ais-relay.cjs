@@ -3128,7 +3128,7 @@ async function orefPersistHistory() {
     // Companion seed-meta:* write — the OREF payload only carries `persistedAt`
     // (an ISO string not in extractTimestamp's recognised set), so without this
     // key the regional-snapshot freshness classifier would flag the input as
-    // STALE on every run (#3781). Tracked by api/health.js for staleness alerts.
+    // STALE on every run (#3781). Tracked by api/_health.js for staleness alerts.
     //
     // Gate on `ok`: if the envelope write failed (Upstash 5xx / network blip),
     // a successful meta write alone would tell the freshness classifier the
@@ -3591,7 +3591,7 @@ async function seedUcdpEvents() {
 
     const payload = { events: capped, fetchedAt: Date.now(), version, candidateVersion, candidateComplete, annualFailedPages: failedPages, totalRaw: allEvents.length, filteredCount: capped.length, countryDays: summary.countryDays, partyMonths: summary.partyMonths, dailyTotals: summary.dailyTotals, window };
     const ok = await envelopeWrite(UCDP_REDIS_KEY, payload, UCDP_TTL_SECONDS, { recordCount: capped.length, sourceVersion: 'ucdp' });
-    // Content-age trio: api/health.js treats the presence of maxContentAgeMin as
+    // Content-age trio: api/_health.js treats the presence of maxContentAgeMin as
     // the opt-in signal and reports STALE_CONTENT once the newest event outruns
     // the budget. Without it a silently dead candidate merge is invisible —
     // fetchedAt stays fresh and recordCount stays full while the data itself
@@ -5494,7 +5494,7 @@ const NEWS_THREAT_SUMMARY_KEY = 'news:threat:summary:v1';
 // the first write after a restart lands at least 27 minutes after the last
 // one; on 2026-10-21 three deploys in 40 minutes left a 48-minute gap, and the
 // old 20-minute TTL expired the key twice. Two hours outlasts that, and stays
-// above the 60-minute health budget (api/health.js SEED_META.newsThreatSummary)
+// above the 60-minute health budget (api/_health.js SEED_META.newsThreatSummary)
 // so health reads STALE_SEED before the payload can vanish.
 const NEWS_THREAT_SUMMARY_TTL = 2 * 60 * 60;
 
@@ -6481,7 +6481,7 @@ async function seedDigestWarm() {
     }
     if (!await upstashSet(DIGEST_WARM_HEARTBEAT_KEY, summary, DIGEST_WARM_HEARTBEAT_TTL_SECONDS)) return;
     // Durable, no TTL: health reads the probe as pending until the first
-    // healthy cycle and strict afterwards (api/health.js ACTIVATION_MARKERS).
+    // healthy cycle and strict afterwards (api/_health.js ACTIVATION_MARKERS).
     await upstashEval("return redis.call('SET', KEYS[1], ARGV[1])", [DIGEST_WARM_ACTIVATION_KEY], [String(summary.fetchedAt)]);
   } finally {
     digestWarmInFlight = false;
@@ -6501,12 +6501,12 @@ function startDigestWarmLoop() {
 // Middle East strike feed — Telegram + GDELT -> conflict:iran-events:v1
 // (logic and tests: scripts/lib/middle-east-strikes.cjs). Replaces the manual
 // LiveUAMap dump. Off unless IRAN_EVENTS_ENABLED=true, the same switch every
-// reader of the key honours (api/health.js, api/bootstrap.js, ...).
+// reader of the key honours (api/_health.js, api/_bootstrap.js, ...).
 // ─────────────────────────────────────────────────────────────
 const MIDDLE_EAST_STRIKES_ENABLED = (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true';
 const MIDDLE_EAST_STRIKES_INTERVAL_MS = 10 * 60 * 1000;
 // Canonical outlives the 72h window it carries; health's 45-minute seed-meta
-// budget (api/health.js SEED_META.iranEvents) is what alarms on a dead loop.
+// budget (api/_health.js SEED_META.iranEvents) is what alarms on a dead loop.
 const MIDDLE_EAST_STRIKES_CANONICAL_TTL_S = 72 * 3600;
 const MIDDLE_EAST_STRIKES_STORE_TTL_S = 4 * 24 * 3600;
 const MIDDLE_EAST_STRIKES_META_TTL_S = 7 * 24 * 3600;
@@ -6600,7 +6600,7 @@ async function seedMiddleEastStrikes() {
       writePressureMeta: async (meta) => {
         if (!await upstashSet(middleEastStrikes.PRESSURE_SEED_META_KEY, meta, MIDDLE_EAST_STRIKES_META_TTL_S)) return false;
         // Durable, no TTL: health reads the key as pending until the first
-        // healthy tally publish and strict afterwards (api/health.js ACTIVATION_MARKERS).
+        // healthy tally publish and strict afterwards (api/_health.js ACTIVATION_MARKERS).
         await upstashEval("return redis.call('SET', KEYS[1], ARGV[1])", [middleEastStrikes.PRESSURE_ACTIVATION_KEY], [String(t0)]);
         return true;
       },
@@ -6754,7 +6754,7 @@ async function seedMiddleEastStrikesV2() {
       writePressureMeta: async (meta) => {
         if (!await upstashSet(middleEastStrikesV2.PRESSURE_SEED_META_KEY, meta, MIDDLE_EAST_STRIKES_META_TTL_S)) return false;
         // Durable, no TTL: health reads the key as pending until the first
-        // healthy v2 tally publish and strict afterwards (api/health.js ACTIVATION_MARKERS).
+        // healthy v2 tally publish and strict afterwards (api/_health.js ACTIVATION_MARKERS).
         // A failed marker write reports the publish as failed; the next healthy tick rewrites it.
         return await upstashEval("return redis.call('SET', KEYS[1], ARGV[1])", [middleEastStrikesV2.PRESSURE_ACTIVATION_KEY], [String(t0)]) === 'OK';
       },
@@ -9398,7 +9398,7 @@ const SOCIAL_VELOCITY_SEED_META_KEY = 'seed-meta:intelligence:social-reddit';
 // ScrapeCreators (not Reddit directly) the IP-rate-limit driver is gone, so the
 // interval is set purely by freshness need: velocity decays over ~6h, so 3h is
 // ample. See SOCIAL_VELOCITY_INTERVAL_MS / _TTL below.
-const SOCIAL_VELOCITY_TTL = 43200; // 12h — STRICTLY > health maxStaleMin=540min (9h) so a dead relay surfaces STALE_SEED (warn) for the 9h–12h window while the key is still present, BEFORE it expires and escalates to EMPTY (crit). TTL==maxStaleMin would skip STALE_SEED entirely: classifyKey checks !hasData before seedStale (api/health.js). On failure cycles the relay re-extends this TTL (upstashExpire below), so a live-but-failing relay keeps last-good present.
+const SOCIAL_VELOCITY_TTL = 43200; // 12h — STRICTLY > health maxStaleMin=540min (9h) so a dead relay surfaces STALE_SEED (warn) for the 9h–12h window while the key is still present, BEFORE it expires and escalates to EMPTY (crit). TTL==maxStaleMin would skip STALE_SEED entirely: classifyKey checks !hasData before seedStale (api/_health.js). On failure cycles the relay re-extends this TTL (upstashExpire below), so a live-but-failing relay keeps last-good present.
 const SOCIAL_VELOCITY_INTERVAL_MS = 3 * 60 * 60 * 1000; // 3h — velocity decays over ~6h; hourly was a Reddit-rate-limit leftover, not a freshness need
 const REDDIT_SUBREDDITS = ['worldnews', 'geopolitics'];
 
@@ -10149,7 +10149,7 @@ function pizzintLastLiveAt(meta) {
 }
 
 // A clean poll with no usable live reading is quiet hours, not an outage: advance the
-// heartbeat. api/health.js lists pizzint in EMPTY_DATA_OK_KEYS, so a missing payload
+// heartbeat. api/_health.js lists pizzint in EMPTY_DATA_OK_KEYS, so a missing payload
 // then reads OK while this runs, and STALE_SEED once it stops (provider errors, a
 // dead loop, or 24h without a live reading).
 // Also used for a publication without a live signal. Returns false only when the
@@ -11209,7 +11209,7 @@ setInterval(() => {
 // slow loop, not on the per-snapshot build: detectDisruptions runs every
 // SNAPSHOT_INTERVAL_MS, which would be a Redis write per relay heartbeat.
 const AIS_GAPS_REDIS_KEY = 'maritime:ais-gaps:v1';
-// 60min — must STRICTLY exceed the 30min health maxStaleMin (api/health.js
+// 60min — must STRICTLY exceed the 30min health maxStaleMin (api/_health.js
 // aisGaps entry) so a dead relay reads warn STALE_SEED before the envelope
 // expires to crit EMPTY; 6x the seed interval.
 const AIS_GAPS_TTL = 3600;
@@ -12114,7 +12114,7 @@ async function seedTransitSummaries() {
 
   const ok = await envelopeWrite(TRANSIT_SUMMARY_REDIS_KEY, { summaries, fetchedAt: now }, TRANSIT_SUMMARY_TTL, { recordCount: pwCovered, sourceVersion: 'transit-summaries' });
   // seed-meta recordCount = pwCovered (actual upstream coverage), not the
-  // canonical-shape key count. Lets api/health.js detect a coverage shortfall
+  // canonical-shape key count. Lets api/_health.js detect a coverage shortfall
   // as a freshness anomaly rather than being masked by the always-13 shape.
   await upstashSet('seed-meta:supply_chain:transit-summaries', { fetchedAt: now, recordCount: pwCovered }, 604800);
   console.log(`[TransitSummary] Seeded ${pwCovered}/${CANONICAL_IDS.length} from portwatch + per-id history (redis: ${ok ? 'OK' : 'FAIL'})`);

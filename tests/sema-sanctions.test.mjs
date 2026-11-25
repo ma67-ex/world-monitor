@@ -45,8 +45,8 @@ const railwaySrc = readFileSync(
   new URL('../scripts/railway-services.json', import.meta.url),
   'utf8',
 );
-const healthSrc = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
-const seedHealthSrc = readFileSync(new URL('../api/seed-health.js', import.meta.url), 'utf8');
+const healthSrc = readFileSync(new URL('../api/_health.js', import.meta.url), 'utf8');
+const seedHealthSrc = readFileSync(new URL('../api/_seed-health.js', import.meta.url), 'utf8');
 const panelSrc = readFileSync(
   new URL('../src/components/SanctionsPressurePanel.ts', import.meta.url),
   'utf8',

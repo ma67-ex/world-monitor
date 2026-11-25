@@ -1,5 +1,5 @@
-import { argBool, argNum, argStrList, capNested, selectDatasets } from './filters';
-import { DEFAULT_LIST_LIMIT } from './constants';
+import { argBool, argNum, argStrList, capNested, selectDatasets } from './_filters';
+import { DEFAULT_LIST_LIMIT } from './_constants';
 import { compactNaturalEventsDashboardPayload, projectNaturalEventsRetention } from '../_natural-events-dashboard.js';
 import { attachGeoFilter, filterEventLists, locationPoint, locator, oldestDatedRows, pointAt, type EventList } from './_geo-filter';
 

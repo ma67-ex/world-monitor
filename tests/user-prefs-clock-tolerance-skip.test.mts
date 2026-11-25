@@ -11,12 +11,12 @@ delete process.env.NODE_TEST_CONTEXT;
 // setup: they must each emit exactly one envelope.
 process.env.VITE_SENTRY_DSN = 'https://testpublickey@sentry.test/12345';
 
-const { default: handler, __setUserPrefsDepsForTests } = await import('../api/user-prefs.ts');
+const { default: handler, __setUserPrefsDepsForTests } = await import('../api/_user-prefs.ts');
 
 /**
  * Regression coverage for #7140: `session.acceptedWithinClockTolerance` skips
  * the Sentry drift capture on both the GET and POST UNAUTHENTICATED paths in
- * api/user-prefs.ts (documented as an invariant in CONCEPTS.md by #7097).
+ * api/_user-prefs.ts (documented as an invariant in CONCEPTS.md by #7097).
  * Neither branch had a dedicated test, so deleting either `if` silently
  * breaks the documented "only a token past `exp` _and_ past that tolerance
  * is refused at the edge" boundary without failing any test.

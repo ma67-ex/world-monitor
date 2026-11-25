@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { listAirportDelays } from '../server/worldmonitor/aviation/v1/list-airport-delays.ts';
-import bootstrap from '../api/bootstrap.js';
+import bootstrap from '../api/_bootstrap.js';
 import { buildDelaysBootstrapPayload, BOOTSTRAP_KEY, BOOTSTRAP_META_KEY } from '../scripts/seed-aviation.mjs';
 import { MONITORED_AIRPORTS } from '../src/config/airports.ts';
 

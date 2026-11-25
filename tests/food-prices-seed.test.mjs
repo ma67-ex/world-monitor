@@ -5,7 +5,7 @@ import { mergeFoodSnapshot } from '../scripts/lib/food-prices-seed.mjs';
 
 const context = { countryCode: 'AFG', country: 'Afghanistan', referenceDate: '2026-09-15', fetchedAt: '2026-10-28T12:00:00Z' };
 test('food-price first-failure receipts report SEED_ERROR before activation', async () => {
-  const { __testing__: { classifyKey, STANDALONE_KEYS, SEED_META } } = await import('../api/health.js');
+  const { __testing__: { classifyKey, STANDALONE_KEYS, SEED_META } } = await import('../api/_health.js');
   const name = 'foodPricesTwmoa';
   const entry = classifyKey(name, STANDALONE_KEYS[name], { allowOnDemand: true }, {
     keyStrens: new Map(), keyErrors: new Map(), keyMetaErrors: new Map(),

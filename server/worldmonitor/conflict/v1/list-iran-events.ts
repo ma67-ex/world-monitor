@@ -10,7 +10,7 @@ const REDIS_KEY = 'conflict:iran-events:v1';
 
 // Iran-events domain sunset (war ended 2026-07). Default OFF: serve empty
 // immediately rather than the stale cached snapshot that lingers for the key's
-// 14-day TTL. Set IRAN_EVENTS_ENABLED=true to restore. See api/health.js.
+// 14-day TTL. Set IRAN_EVENTS_ENABLED=true to restore. See api/_health.js.
 const IRAN_EVENTS_ENABLED = (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true';
 
 export async function listIranEvents(

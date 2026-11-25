@@ -114,7 +114,7 @@ function extractEdgeFunctionRoutes() {
   // (no proto → no generated path). They can still register a rate-limit
   // policy that's enforced in-handler via `checkScopedRateLimit` — most
   // notably /api/mcp-proxy (PR #3821 / #3805 review). Convert each exception
-  // file path (e.g. "api/mcp-proxy.ts") to its URL path ("/api/mcp-proxy")
+  // file path (e.g. "api/_mcp-proxy.ts") to its URL path ("/api/mcp-proxy")
   // and accept it as a legitimate policy target.
   const routes = new Set();
   let doc;
@@ -131,7 +131,7 @@ function extractEdgeFunctionRoutes() {
   for (const entry of exceptions) {
     const filePath = typeof entry?.path === 'string' ? entry.path : null;
     if (!filePath?.startsWith('api/')) continue;
-    // api/mcp-proxy.ts → /api/mcp-proxy ; api/oauth/token.ts → /api/oauth/token
+    // api/_mcp-proxy.ts → /api/mcp-proxy ; api/oauth/_token.ts → /api/oauth/token
     const urlPath = `/${filePath.replace(/\.(ts|js|tsx|jsx|mjs|cjs)$/i, '')}`;
     routes.add(urlPath);
   }
@@ -208,9 +208,9 @@ export const ADMISSION_PRIMITIVES = new Set([
 // the limit otherwise.
 export const ADMISSION_DELEGATES = {
   createRelayHandler: 'api/_relay.js',
-  applyPerMinuteLimit: 'api/mcp/auth.ts',
-  applyAnonDiscoveryLimit: 'api/mcp/auth.ts',
-  applyFreeTierLimit: 'api/mcp/auth.ts',
+  applyPerMinuteLimit: 'api/mcp/_auth.ts',
+  applyAnonDiscoveryLimit: 'api/mcp/_auth.ts',
+  applyFreeTierLimit: 'api/mcp/_auth.ts',
 };
 
 function parseSource(file) {

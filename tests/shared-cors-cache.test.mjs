@@ -133,10 +133,10 @@ test('shared responses use public CORS and RSS is the private exception (#7216)'
 
   process.env.UPSTASH_REDIS_REST_URL = REDIS_URL;
   process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
-  const { default: gpsJam } = await import(moduleUrl('../api/gpsjam.js', suffix));
+  const { default: gpsJam } = await import(moduleUrl('../api/_gpsjam.js', suffix));
   const gpsJamResponse = await gpsJam(request('/api/gpsjam'));
 
-  const { default: reverseGeocode } = await import(moduleUrl('../api/reverse-geocode.js', suffix));
+  const { default: reverseGeocode } = await import(moduleUrl('../api/_reverse-geocode.js', suffix));
   const pendingWrites = [];
   const reverseGeocodeResponse = await reverseGeocode(
     request('/api/reverse-geocode?lat=37.7&lon=-122.4'),
@@ -146,7 +146,7 @@ test('shared responses use public CORS and RSS is the private exception (#7216)'
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.UPSTASH_REDIS_REST_TOKEN;
 
-  const { default: rssProxy } = await import(moduleUrl('../api/rss-proxy.js', suffix));
+  const { default: rssProxy } = await import(moduleUrl('../api/_rss-proxy.js', suffix));
   const rssProxyResponse = await rssProxy(request('/api/rss-proxy?url=https%3A%2F%2Ftechcrunch.com%2Ffeed', {
     headers: { 'X-WorldMonitor-Key': 'shared-cors-test-key' },
   }));
@@ -154,7 +154,7 @@ test('shared responses use public CORS and RSS is the private exception (#7216)'
     headers: { 'X-WorldMonitor-Key': 'shared-cors-test-key' },
   }));
 
-  const { default: productCatalog } = await import(moduleUrl('../api/product-catalog.js', suffix));
+  const { default: productCatalog } = await import(moduleUrl('../api/_product-catalog.js', suffix));
   const productCatalogResponse = await productCatalog(request('/api/product-catalog'));
   const rejectedProductCatalogResponse = await productCatalog(request('/api/product-catalog', {
     origin: 'https://untrusted.example',

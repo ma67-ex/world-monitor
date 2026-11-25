@@ -360,7 +360,7 @@ describe('HormuzPanel dates from a tracker payload stored before the ISO seeder 
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ result: JSON.stringify(stored) }), { status: 200 })));
     try {
       // @ts-expect-error api/ edge handlers are plain JS without declaration files.
-      const { default: handler } = await import('../../api/supply-chain/hormuz-tracker.js');
+      const { default: handler } = await import('../../api/supply-chain/_hormuz-tracker.js');
       const response: Response = await handler(new Request('https://www.worldmonitor.app/api/supply-chain/hormuz-tracker'));
       expect(response.status).toBe(200);
       return await response.json();

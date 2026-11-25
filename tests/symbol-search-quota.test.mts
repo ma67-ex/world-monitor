@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { after, beforeEach, it } from 'node:test';
-import handler from '../api/symbol-search.ts';
+import handler from '../api/_symbol-search.ts';
 import { issueSessionToken } from '../api/_session.js';
 import { __resetRateLimitForTest } from '../api/_rate-limit.js';
 

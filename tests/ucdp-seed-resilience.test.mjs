@@ -252,7 +252,7 @@ describe('UCDP version selection prefers the newest release', () => {
   it('the shared projection keys are the ones bootstrap and health read', async () => {
     const { UCDP_BOOTSTRAP_KEY, UCDP_BOOTSTRAP_META_KEY } = await import('../scripts/_ucdp-dashboard.mjs');
     const tierKeys = readFileSync('api/_bootstrap-tier-keys.js', 'utf8');
-    const health = readFileSync('api/health.js', 'utf8');
+    const health = readFileSync('api/_health.js', 'utf8');
     assert.ok(tierKeys.includes(`ucdpEvents: '${UCDP_BOOTSTRAP_KEY}'`));
     assert.ok(health.includes(`ucdpEventsBootstrap: { key: '${UCDP_BOOTSTRAP_META_KEY}'`));
   });

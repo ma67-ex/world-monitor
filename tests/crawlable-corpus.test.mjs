@@ -787,7 +787,7 @@ function isAbsoluteHttpUrl(value) {
 }
 
 // The daily chokepoint archive is the one Dataset whose downloads this build
-// does not write: vercel.json rewrites them to api/open-data-chokepoints.js.
+// does not write: vercel.json rewrites them to api/_open-data-chokepoints.js.
 // The rewrite alone is not proof, since it also matches names the handler
 // answers with 404. The exemption covers only the three undated files, which
 // tests/open-data-chokepoints-archive.test.mjs drives through the real handler.

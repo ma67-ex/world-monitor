@@ -456,7 +456,7 @@ describe('public product facts generation contract', () => {
       ['ARCHITECTURE.md', [hosts]],
       ['public/llms-full.txt', [`${providers} across ${hosts}`]],
       ['blog-site/src/content/blog/what-is-worldmonitor-real-time-global-intelligence.md', [`${providers} across ${hosts}`]],
-      ['api/oauth/authorize.js', [`Intelligence data from ${providers}`, 'Real-time news &amp; events</li>']],
+      ['api/oauth/_authorize.js', [`Intelligence data from ${providers}`, 'Real-time news &amp; events</li>']],
       ['mcp-grant.html', [`Intelligence data from ${providers}`, 'Real-time news &amp; events</li>']],
     ];
     for (const [path, phrases] of surfaces) {

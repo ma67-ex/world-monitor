@@ -1,10 +1,10 @@
-import { RpcValidationError } from './billing-denial';
-import { argBool } from './filters';
-import { JMESPATH_SCHEMA } from './jmespath';
-import { SUMMARY_SCHEMA } from './registry';
-import { RESPONSE_MODE_SCHEMA, SPOKEN_LANGUAGE_SCHEMA } from './spoken';
+import { RpcValidationError } from './_billing-denial';
+import { argBool } from './_filters';
+import { JMESPATH_SCHEMA } from './_jmespath';
+import { SUMMARY_SCHEMA } from './registry/_index';
+import { RESPONSE_MODE_SCHEMA, SPOKEN_LANGUAGE_SCHEMA } from './_spoken';
 import * as z from 'zod';
-import type { ToolDef } from './types';
+import type { ToolDef } from './_types';
 
 // Validation keywords used by the registry. Descriptions, defaults and non-UUID format
 // annotations do not change arguments or impose additional caller constraints.

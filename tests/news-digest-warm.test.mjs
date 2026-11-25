@@ -198,7 +198,7 @@ describe('heartbeat', () => {
   });
 
   it('is the key health probes, with the activation marker health softens on', () => {
-    const health = readFileSync(join(root, 'api/health.js'), 'utf8');
+    const health = readFileSync(join(root, 'api/_health.js'), 'utf8');
     assert.ok(health.includes(`newsDigestWarmRelayHeartbeat: '${DIGEST_WARM_HEARTBEAT_KEY}'`));
     assert.ok(health.includes(`activationKey: '${DIGEST_WARM_ACTIVATION_KEY}'`));
     assert.ok(health.includes('newsDigestWarmRelayHeartbeat: SEED_META.newsDigestWarmRelayHeartbeat.activationKey'));

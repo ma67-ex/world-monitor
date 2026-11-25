@@ -309,7 +309,7 @@ describe('embed grant exchange', () => {
   });
 
   it('keeps the edge handler POST-only, cookie-free and uncacheable', () => {
-    const source = readFileSync(resolve(__dirname, '../api/embed/session.ts'), 'utf-8');
+    const source = readFileSync(resolve(__dirname, '../api/embed/_session.ts'), 'utf-8');
     assert.match(source, /headers\.delete\('cookie'\)/);
     assert.match(source, /checkEndpointRateLimit/);
     assert.match(source, /'private, no-store'/);
@@ -351,7 +351,7 @@ describe('embed grant exchange', () => {
     });
 
     it('is the resolver both embed handlers use', () => {
-      for (const path of ['../api/embed/session.ts', '../api/embed/entitlement.ts']) {
+      for (const path of ['../api/embed/_session.ts', '../api/embed/_entitlement.ts']) {
         const source = readFileSync(resolve(__dirname, path), 'utf-8');
         assert.match(source, /embedCredentialFromHeaders\(stripped\.headers\)/, path);
         assert.equal(source.includes("headers.get('X-Api-Key')"), false, path);

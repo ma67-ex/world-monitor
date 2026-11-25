@@ -2,7 +2,7 @@
 title: "MCP discovery URLs returned a 302 when the handler's self-fetch of its own static files failed"
 date: 2026-11-19
 category: integration-issues
-module: api/mcp/handler.ts
+module: api/mcp/_handler.ts
 problem_type: integration_issue
 component: tooling
 severity: medium
@@ -35,8 +35,8 @@ tags: [mcp, edge-bundle, self-fetch, server-card, discovery, mcp-live-smoke]
 
 PR #11046:
 
-- `scripts/generate-mcp-discovery-documents.mjs` is a `npm run generate` step with `--check`. It writes `api/mcp/discovery-documents.generated.ts`, which contains the guide, the setup page, and the server card with `"tools": []`.
-- `api/mcp/server-card-tools.ts` projects `TOOL_REGISTRY` into the card's `tools` list. `scripts/generate-public-product-facts.mjs` uses it to write the published card, and the handler uses it to rebuild the served card once per instance.
+- `scripts/generate-mcp-discovery-documents.mjs` is a `npm run generate` step with `--check`. It writes `api/mcp/_discovery-documents.generated.ts`, which contains the guide, the setup page, and the server card with `"tools": []`.
+- `api/mcp/_server-card-tools.ts` projects `TOOL_REGISTRY` into the card's `tools` list. `scripts/generate-public-product-facts.mjs` uses it to write the published card, and the handler uses it to rebuild the served card once per instance.
 - The served card must equal `public/.well-known/mcp/server-card.json` byte for byte. That works because the product-facts generator emits canonical `JSON.stringify(card, null, 2)` and its domain-summary rewrite replaces one string value in place.
 - Result: `api/mcp.ts` grows from 1,010,185 to about 1,021,500 bytes gzip-9.
 

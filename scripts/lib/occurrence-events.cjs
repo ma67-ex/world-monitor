@@ -25,7 +25,7 @@ const API_FANOUT_LIST_KEY = 'wm:events:api:v1';
 const API_FANOUT_LIST_CAP = 2000;
 /** The list dies on its own if nothing drains it. */
 const API_FANOUT_LIST_TTL_SECONDS = 86_400;
-/** Queue event types that are teed. Browser-submitted copies enter the queue through api/notify.ts, not through the relay publisher, so they are never teed. */
+/** Queue event types that are teed. Browser-submitted copies enter the queue through api/_notify.ts, not through the relay publisher, so they are never teed. */
 const API_FANOUT_EVENT_TYPES = new Set(['rss_alert', 'market_alert']);
 /** Which registry event a teed queue message becomes. */
 const RELAY_EVENT_TO_OCCURRENCE = Object.freeze({

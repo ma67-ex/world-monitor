@@ -13,19 +13,19 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mcpHandler } from '../api/mcp/handler.ts';
-import { getMcpBillingVerificationDenial, mcpStructuredDenialResponse } from '../api/mcp/auth.ts';
+import { mcpHandler } from '../api/mcp/_handler.ts';
+import { getMcpBillingVerificationDenial, mcpStructuredDenialResponse } from '../api/mcp/_auth.ts';
 import {
   CHATGPT_MODERN_SERVER_INSTRUCTIONS,
   CHATGPT_SERVER_INSTRUCTIONS,
   MODERN_SERVER_INSTRUCTIONS,
   SERVER_INSTRUCTIONS,
-} from '../api/mcp/constants.ts';
-import { applyChatGptCommercePolicy, CHATGPT_HIDDEN_TOOLS, isChatGptHost } from '../api/mcp/host-policy.ts';
-import { CHATGPT_TOOL_LIST_RESPONSE, TOOL_LIST_RESPONSE, TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/index.ts';
-import { AGENT_GUIDE, AGENT_GUIDE_RESOURCE_URI } from '../api/mcp/constants.ts';
+} from '../api/mcp/_constants.ts';
+import { applyChatGptCommercePolicy, CHATGPT_HIDDEN_TOOLS, isChatGptHost } from '../api/mcp/_host-policy.ts';
+import { CHATGPT_TOOL_LIST_RESPONSE, TOOL_LIST_RESPONSE, TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/_index.ts';
+import { AGENT_GUIDE, AGENT_GUIDE_RESOURCE_URI } from '../api/mcp/_constants.ts';
 import { MCP_UPGRADE_URL } from '../shared/mcp-attribution.ts';
-import { stripBillingCopy } from '../api/mcp/chatgpt-copy.ts';
+import { stripBillingCopy } from '../api/mcp/_chatgpt-copy.ts';
 import { HMAC_SECRET, callBody, makeProDeps, proReq } from './helpers/mcp-pro-deps.mjs';
 
 const CHATGPT_UA = 'openai-mcp/1.0.0';

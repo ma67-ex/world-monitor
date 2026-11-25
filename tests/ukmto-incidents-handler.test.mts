@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readUkmtoSnapshot } from '../shared/ukmto-incidents.ts';
 import { normalizeIncidents } from '../scripts/seed-ukmto-incidents.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { listUkmtoIncidents } from '../server/worldmonitor/maritime/v1/list-ukmto-incidents';
 
 const now = Date.parse('2026-10-29T10:00:00Z');

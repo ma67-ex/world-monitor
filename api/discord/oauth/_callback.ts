@@ -124,7 +124,7 @@ export default async function handler(req: Request, ctx: { waitUntil: (p: Promis
   }
 
   // Anyone can call this with a made-up state, so bound the GETDELs a stranger
-  // can trigger per IP, like api/channel-oauth-bind.ts earlier in this flow.
+  // can trigger per IP, like api/_channel-oauth-bind.ts earlier in this flow.
   // Fail closed for the same reason it does.
   const admission = await checkFailClosedScopedIpRateLimit(req, 'discord-oauth-callback', 30, '60 s', {});
   if (admission) {

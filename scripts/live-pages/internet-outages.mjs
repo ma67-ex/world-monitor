@@ -9,7 +9,7 @@ import {
 } from './common.mjs';
 
 const LISTED_OUTAGES = 15;
-// The seed runs every 30 minutes and health flags it after 30 (api/health.js
+// The seed runs every 30 minutes and health flags it after 30 (api/_health.js
 // outages). Retention can keep a list alive after Radar fails; past this age
 // it is not current.
 const MAX_AGE_MS = 2 * 3_600_000;

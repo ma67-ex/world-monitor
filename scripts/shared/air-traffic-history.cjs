@@ -4,7 +4,7 @@ const { BIN_MS } = require('./air-traffic-aggregate.cjs');
 
 const PREFIX = 'aviation:traffic:history:v1';
 const RETENTION_DAYS = 35;
-// api/health.js watches this stable key. The day hashes rotate at UTC midnight,
+// api/_health.js watches this stable key. The day hashes rotate at UTC midnight,
 // and health reads data keys with STRLEN, which a hash fails.
 const HEARTBEAT_KEY = 'seed-meta:aviation:traffic-history';
 const HEARTBEAT_TTL_SECONDS = 7 * 86400;

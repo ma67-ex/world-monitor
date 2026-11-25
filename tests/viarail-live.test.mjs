@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import {
   CHROME_UA,
   VIA_RAIL_LIVE_ALLOWED_HOSTS,

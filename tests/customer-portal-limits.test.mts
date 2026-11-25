@@ -8,7 +8,7 @@ process.env.RELAY_SHARED_SECRET = 'synthetic-ingestion-secret';
 process.env.CONVEX_TENANT_RELAY_SECRET = 'synthetic-tenant-relay-secret';
 process.env.UPSTASH_REDIS_REST_URL = 'https://portal-redis.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'synthetic-redis-token';
-const { default: handler } = await import('../api/customer-portal.ts');
+const { default: handler } = await import('../api/_customer-portal.ts');
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
 

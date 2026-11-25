@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createConflictServiceRoutes } from '../src/generated/server/worldmonitor/conflict/v1/service_server.ts';
 import { conflictHandler } from '../server/worldmonitor/conflict/v1/handler.ts';
 import { ACLED_DEFAULT_WINDOW_MS } from '../server/worldmonitor/conflict/v1/list-acled-events.ts';
-import { handleEmbedMapFrame } from '../api/embed/map-frame.ts';
+import { handleEmbedMapFrame } from '../api/embed/_map-frame.ts';
 import { drainResponseHeaders } from '../server/_shared/response-headers.ts';
 import { __resetKeyPrefixCacheForTests } from '../server/_shared/redis.ts';
 import { installRedis } from './helpers/fake-upstash-redis.mts';

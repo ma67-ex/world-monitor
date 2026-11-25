@@ -25,7 +25,7 @@ const {
   POSITIVE_EVENTS_RPC_KEY,
   RUN_SEED_OPTS,
 } = await import('../scripts/seed-gdelt-bulk-materializer.mjs');
-const { __testing__: { classifyKey } } = await import('../api/health.js');
+const { __testing__: { classifyKey } } = await import('../api/_health.js');
 
 function gkgRow({
   id = 'gkg-1',
@@ -1107,10 +1107,10 @@ describe('gdelt materializer freshness constants stay in lockstep (#5864)', () =
     // No dashboard consumer reads the index, so it is a STANDALONE health key
     // (AGENTS.md) with its own seed-meta record; the gate must track the same
     // 15-minute tick as gdeltIntel, and the 2-day data TTL must outlive it.
-    const healthSrc = read('../api/health.js');
+    const healthSrc = read('../api/_health.js');
     assert.match(healthSrc, /gdeltCountryArticles:\s*'gdelt:bulk:country-articles:v1'/, 'STANDALONE_KEYS must carry the index');
     const gate = healthSrc.match(/gdeltCountryArticles:\s*\{\s*key:\s*'seed-meta:gdelt:bulk:country-articles',\s*maxStaleMin:\s*(\d+)/);
-    assert.ok(gate, 'api/health.js must gate the index on its seed-meta key');
+    assert.ok(gate, 'api/_health.js must gate the index on its seed-meta key');
     assert.equal(Number(gate[1]), RUN_SEED_OPTS.maxStaleMin);
     // Deploy-order softening: pending until the marker the seeder writes
     // exists, strict afterwards — the same one-way marker the health check
@@ -1118,8 +1118,8 @@ describe('gdelt materializer freshness constants stay in lockstep (#5864)', () =
     assert.equal(COUNTRY_ARTICLES_ACTIVATION_KEY, 'seed-activated:gdelt:bulk:country-articles');
     assert.match(healthSrc, /gdeltCountryArticles:\s*\{[^}]*activationKey:\s*'seed-activated:gdelt:bulk:country-articles'[^}]*cutover:\s*\{\s*mode:\s*'activation-marker'/);
     assert.match(healthSrc, /gdeltCountryArticles:\s*SEED_META\.gdeltCountryArticles\.activationKey/, 'ACTIVATION_MARKERS must list the probe');
-    const seedHealth = read('../api/seed-health.js').match(/'gdelt:bulk:country-articles':\s*\{ key: 'seed-meta:gdelt:bulk:country-articles',\s*intervalMin:\s*(\d+)/);
-    assert.ok(seedHealth, 'api/seed-health.js must track the index');
+    const seedHealth = read('../api/_seed-health.js').match(/'gdelt:bulk:country-articles':\s*\{ key: 'seed-meta:gdelt:bulk:country-articles',\s*intervalMin:\s*(\d+)/);
+    assert.ok(seedHealth, 'api/_seed-health.js must track the index');
     const intervalMin = Number(seedHealth[1]);
     assert.ok(intervalMin * 2 >= RUN_SEED_OPTS.maxStaleMin && intervalMin * 2 <= RUN_SEED_OPTS.maxStaleMin + 15);
     const ttlByKey = new Map(RUN_SEED_OPTS.preserveKeyTtls.map(({ key, ttlSeconds }) => [key, ttlSeconds]));

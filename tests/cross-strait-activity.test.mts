@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, it } from 'node:test';
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 
 import {
   DECISION_SIGNAL_PROVENANCE_FAMILY_REGISTRATIONS,

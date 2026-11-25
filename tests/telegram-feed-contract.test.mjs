@@ -70,7 +70,7 @@ describe('api/telegram-feed contract normalization', () => {
       });
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 200);
     // The payload is credential-gated now, so it must never be stored by a
@@ -112,7 +112,7 @@ describe('api/telegram-feed contract normalization', () => {
       ],
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 200);
     const data = await res.json();
@@ -136,7 +136,7 @@ describe('api/telegram-feed contract normalization', () => {
       headers: { 'Content-Type': 'application/json' },
     });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 200);
     const cacheControl = res.headers.get('cache-control') || '';
@@ -158,7 +158,7 @@ describe('api/telegram-feed contract normalization', () => {
       headers: { 'Content-Type': 'application/json' },
     });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 200);
     const cacheControl = res.headers.get('cache-control') || '';
@@ -191,7 +191,7 @@ describe('api/telegram-feed contract normalization', () => {
       headers: { 'Content-Type': 'application/json' },
     });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     const data = await res.json();
     assert.equal(data.count, 1);
@@ -213,7 +213,7 @@ describe('api/telegram-feed contract normalization', () => {
       headers: { 'Content-Type': 'application/json' },
     });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     const data = await res.json();
     assert.equal(data.items[0].ts, new Date(1_000_000_000_000).toISOString());
@@ -228,7 +228,7 @@ describe('api/telegram-feed contract normalization', () => {
       headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
     });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 429);
     assert.equal(res.headers.get('cache-control'), 'no-store');
@@ -247,7 +247,7 @@ describe('api/telegram-feed contract normalization', () => {
       headers: { 'Content-Type': 'text/plain' },
     });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     assert.equal(res.status, 503);
     assert.equal(res.headers.get('cache-control'), 'no-store');
@@ -271,7 +271,7 @@ describe('api/telegram-feed contract normalization', () => {
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest('/api/telegram-feed?mode=resolve&username=%40Ukraine_News'));
     const data = await res.json();
 
@@ -307,7 +307,7 @@ describe('api/telegram-feed contract normalization', () => {
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest('/api/telegram-feed?mode=channel&username=ukraine_news&limit=500'));
     const data = await res.json();
 
@@ -325,7 +325,7 @@ describe('api/telegram-feed contract normalization', () => {
       throw new Error('should not be called');
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest('/api/telegram-feed?mode=resolve&username=bad%20handle'));
 
     assert.equal(res.status, 400);
@@ -340,7 +340,7 @@ describe('api/telegram-feed contract normalization', () => {
       throw new Error('should not be called');
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest('/api/telegram-feed?mode=private&username=warintel'));
 
     assert.equal(res.status, 400);
@@ -355,7 +355,7 @@ describe('api/telegram-feed contract normalization', () => {
       title: 'Untrusted shape',
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest('/api/telegram-feed?mode=resolve&username=warintel'));
 
     assert.equal(res.status, 502);
@@ -375,7 +375,7 @@ describe('api/telegram-feed contract normalization', () => {
       throw err;
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     const body = await res.json();
 
@@ -389,7 +389,7 @@ describe('api/telegram-feed contract normalization', () => {
       throw new Error('relay ECONNREFUSED');
     };
 
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(await makeRequest());
     const body = await res.json();
 
@@ -430,7 +430,7 @@ describe('api/telegram-feed first-party boundary', () => {
   });
 
   async function get(headers) {
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     return handler(new Request('https://worldmonitor.app/api/telegram-feed?limit=200', {
       method: 'GET',
       headers,
@@ -466,7 +466,7 @@ describe('api/telegram-feed first-party boundary', () => {
   });
 
   it('applies the same credential boundary to custom-channel reads', async () => {
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(new Request(
       'https://worldmonitor.app/api/telegram-feed?mode=channel&username=warintel',
       { headers: { origin: 'https://worldmonitor.app' } },
@@ -495,7 +495,7 @@ describe('api/telegram-feed first-party boundary', () => {
   it('still answers the CORS preflight without a credential', async () => {
     // The gate sits after the OPTIONS branch on purpose: a browser cannot
     // attach credentials to a preflight, so gating it would break the panel.
-    const handler = (await import(`../api/telegram-feed.js?t=${Date.now()}`)).default;
+    const handler = (await import(`../api/_telegram-feed.js?t=${Date.now()}`)).default;
     const res = await handler(new Request('https://worldmonitor.app/api/telegram-feed', {
       method: 'OPTIONS',
       headers: { origin: 'https://worldmonitor.app' },

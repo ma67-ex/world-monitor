@@ -263,7 +263,7 @@ describe('isAppOwnedRedisKey (#7674)', () => {
 
 describe('mcp get_keyword_spikes reads and writes the preview namespace (#7674)', () => {
   it('accumulator, story rows, and the spike cache all carry the deployment prefix', async () => {
-    const { NLP_TOOLS } = await import('../api/mcp/registry/nlp-tools.ts');
+    const { NLP_TOOLS } = await import('../api/mcp/registry/_nlp-tools.ts');
     const tool = NLP_TOOLS.find((t) => t.name === 'get_keyword_spikes');
     assert.ok(tool, 'get_keyword_spikes must stay registered');
 
@@ -345,7 +345,7 @@ describe('mcp get_keyword_spikes reads and writes the preview namespace (#7674)'
 
 describe('health sweep classifies the temporal producer keys into the preview namespace (#7674)', () => {
   it('temporal data + stamp are prefixed; every seeder key and marker stays raw', async () => {
-    const { handleHealth, __testing__ } = await import('../api/health.js');
+    const { handleHealth, __testing__ } = await import('../api/_health.js');
     process.env.WORLDMONITOR_VALID_KEYS = 'prefix-health-test-key';
 
     globalThis.fetch = (async (input, init = {}) => {
@@ -431,7 +431,7 @@ describe('health sweep classifies the temporal producer keys into the preview na
 
 describe('seed-health classifies mixed producer keys for preview (#7674)', () => {
   it('prefixes route-owned metadata while seeder probes and activation markers stay raw', async () => {
-    const { handleSeedHealth } = await import('../api/seed-health.js');
+    const { handleSeedHealth } = await import('../api/_seed-health.js');
     process.env.WORLDMONITOR_VALID_KEYS = 'prefix-seed-health-test-key';
 
     globalThis.fetch = (async (input, init = {}) => {
@@ -494,8 +494,8 @@ describe('getRiskScores reads the app-owned temporal snapshot prefixed (#7674)',
 
 describe('PRODUCTION_DEPS.redisPipeline sends pre-prefixed quota keys verbatim (#7674)', () => {
   it('raw=true default keeps the envPrefix()-built counters single-prefixed', async () => {
-    const { PRODUCTION_DEPS } = await import('../api/mcp/auth.ts');
-    const { freeAccountCallsKey } = await import('../api/mcp/free-account-allowance.ts');
+    const { PRODUCTION_DEPS } = await import('../api/mcp/_auth.ts');
+    const { freeAccountCallsKey } = await import('../api/mcp/_free-account-allowance.ts');
     const sent: string[][] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init = {}) => {

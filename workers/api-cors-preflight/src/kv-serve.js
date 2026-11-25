@@ -93,7 +93,7 @@ function serveFromKv(env, ctx, { tier, body, cf, started, corsHeaders }) {
   recordServe(env, ctx, { tier, outcome: 'served', reason: null, durationMs: Date.now() - started, cf });
   // Mirror the headers the origin sets for this route (the Worker is the CORS source of truth, so
   // corsHeaders is spread first). corsHeaders is the caller's PUBLIC bootstrap shape — ACAO:*, no
-  // Allow-Credentials, no Vary: Origin — matching what api/bootstrap.js returns for a `?public=1`
+  // Allow-Credentials, no Vary: Origin — matching what api/_bootstrap.js returns for a `?public=1`
   // tier URL; the credentialed bag here was #7308. x-vercel-* / age are intentionally absent; the
   // source marker makes a KV-served response identifiable in curl/devtools.
   //
@@ -114,7 +114,7 @@ function serveFromKv(env, ctx, { tier, body, cf, started, corsHeaders }) {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
       'X-WorldMonitor-Bootstrap-Source': 'kv',
-      // This response bypasses api/bootstrap.js, whose public responses set TAO for bootstrap
+      // This response bypasses api/_bootstrap.js, whose public responses set TAO for bootstrap
       // transfer RUM. It is safe here because KV serving is limited to explicit public tiers.
       'Timing-Allow-Origin': '*',
     },

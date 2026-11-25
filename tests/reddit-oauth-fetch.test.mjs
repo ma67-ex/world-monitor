@@ -113,10 +113,10 @@ test('data-key TTL strictly exceeds health maxStaleMin, so a dead relay reads ST
     assert.ok(m, `${name} not found in relay source`);
     return Number(new Function(`return (${m[1]})`)());
   };
-  const health = readFileSync(resolve(here, '../api/health.js'), 'utf8');
+  const health = readFileSync(resolve(here, '../api/_health.js'), 'utf8');
   const maxStaleMin = (name) => {
     const m = health.match(new RegExp(`${name}:[^}]*maxStaleMin:\\s*(\\d+)`));
-    assert.ok(m, `${name}.maxStaleMin not found in api/health.js`);
+    assert.ok(m, `${name}.maxStaleMin not found in api/_health.js`);
     return Number(m[1]);
   };
 

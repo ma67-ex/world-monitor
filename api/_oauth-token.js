@@ -48,7 +48,7 @@ async function fetchOAuthValue(key) {
 
   // Deliberately cross-deployment namespace (#7674): oauth:token/tokenfam/
   // famrev state is per-principal credential material, and BOTH sides of it
-  // bypass the shared helpers — api/oauth/token.ts writes through its own
+  // bypass the shared helpers — api/oauth/_token.ts writes through its own
   // raw fetchers, this file reads through a raw GET. Keeping both bare (like
   // entitlements:* in server/_shared/entitlement-check.ts, P2-3) preserves
   // production-issued bearer resolution on preview deployments without

@@ -10,14 +10,14 @@ import { BOOTSTRAP_CACHE_KEYS, BOOTSTRAP_TIERS } from '../../../_shared/cache-ke
 import { sanitizeBootstrapValue } from '../../../../api/_bootstrap-public-payload.js';
 // @ts-expect-error — Edge-safe JS helper
 import { extraCanadaAlertsCutoverReadKeys, canadaAlertsCutoverFallbackValue } from '../../../../api/_canada-alerts-cutover.js';
-// @ts-expect-error — Edge-safe JS helper, shared with api/bootstrap.js
+// @ts-expect-error — Edge-safe JS helper, shared with api/_bootstrap.js
 import { validateImfDataset } from '../../../../api/_imf-dataset.js';
 import { getCachedJsonBatch } from '../../../_shared/redis';
 
 // Iran-events domain sunset (war ended 2026-07). Default OFF: this RPC bootstrap
-// surface must also stop shipping iranEvents, mirroring api/bootstrap.js. It
+// surface must also stop shipping iranEvents, mirroring api/_bootstrap.js. It
 // reads the SHARED BOOTSTRAP_CACHE_KEYS, so the gate lives here. Set
-// IRAN_EVENTS_ENABLED=true to restore. See api/health.js.
+// IRAN_EVENTS_ENABLED=true to restore. See api/_health.js.
 const IRAN_EVENTS_ENABLED = (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true';
 
 const isRegisteredKey = (key: string) => Object.prototype.hasOwnProperty.call(BOOTSTRAP_CACHE_KEYS, key);
@@ -76,7 +76,7 @@ export const getBootstrapData: InfrastructureServiceHandler['getBootstrapData'] 
       const raw = keyName === 'canadaAlerts' && !cached.has(cacheKey)
         ? canadaAlertsCutoverFallbackValue(cached)
         : cached.get(cacheKey);
-      // Same gate as api/bootstrap.js: a malformed IMF dataset is `missing`,
+      // Same gate as api/_bootstrap.js: a malformed IMF dataset is `missing`,
       // malformed country rows are dropped. Non-IMF keys pass through.
       const value = raw === undefined ? undefined : validateImfDataset(keyName, raw);
       if (value === undefined) {

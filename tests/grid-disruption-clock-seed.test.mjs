@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import bootstrap from '../api/bootstrap.js';
+import bootstrap from '../api/_bootstrap.js';
 import { buildEnvelope } from '../scripts/_seed-envelope-source.mjs';
 import {
   afterGridClockPublish, buildGridClockSnapshot, gridClockHealth, GRID_CLOCK_ACTIVATION_KEY, loadGridClockRun,
 } from '../scripts/seed-grid-disruption-clock.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { deriveGridClock, isGridClockSnapshot, GRID_CLOCK_REGIONS } from '../shared/grid-disruption-clock.js';
 import { BOOTSTRAP_CACHE_KEYS, bootstrapTierKeyNames } from '../shared/bootstrap-tier-keys.js';
 import { assertPublicBootstrapCorsHeaders, assertPublicBootstrapSharedCacheHeaders } from './helpers/public-bootstrap-contract.mjs';

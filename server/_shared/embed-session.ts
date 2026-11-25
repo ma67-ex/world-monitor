@@ -1,6 +1,6 @@
 /**
  * The `wme_` key → `wmg_` grant exchange, as a decision over injected
- * dependencies. Transport lives in `api/embed/session.ts`.
+ * dependencies. Transport lives in `api/embed/_session.ts`.
  *
  * Split the same way `embed-entitlement.ts` is: the interesting part is which
  * entitlement states may mint, and that is worth testing without a Response,

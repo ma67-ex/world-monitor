@@ -6,7 +6,7 @@ process.env.CONVEX_TENANT_RELAY_SECRET = 'synthetic-tenant-relay-secret';
 process.env.UPSTASH_REDIS_REST_URL = 'https://checkout-redis.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'synthetic-redis-token';
 
-const { default: handler, __setCreateCheckoutDepsForTests } = await import('../api/create-checkout.ts');
+const { default: handler, __setCreateCheckoutDepsForTests } = await import('../api/_create-checkout.ts');
 const { ENDPOINT_RATE_POLICIES } = await import('../server/_shared/rate-limit.ts');
 const originalFetch = globalThis.fetch;
 after(() => {

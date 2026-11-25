@@ -53,7 +53,7 @@ export function evaluateFreshness(
     oldestFetchedAt = Math.min(oldestFetchedAt, fetchedAt);
     stale ||= (now - fetchedAt) / 60_000 > check.maxStaleMin;
     // A failed refresh stamps a fresh fetchedAt while the last good payload
-    // stays served. api/health.js readSeedMeta reads status 'error' as
+    // stays served. api/_health.js readSeedMeta reads status 'error' as
     // seedStale and classifyKey reports it as SEED_ERROR; MCP follows so the
     // two cannot disagree.
     const { status, sourceState } = meta as { status?: unknown; sourceState?: unknown };
@@ -68,7 +68,7 @@ export function evaluateFreshness(
 
     if (check.honorContentAge) {
       // House-standard content-age contract (#3845 / #7141). Same shared
-      // assessor api/health.js classifyKey uses, so the two surfaces cannot
+      // assessor api/_health.js classifyKey uses, so the two surfaces cannot
       // drift on parsing, on the future-dated rule, or on re-aging: a fresh
       // fetchedAt with stale observations is stale on both. Without this MCP
       // answers stale:false for the exact key health calls STALE_CONTENT —
@@ -82,7 +82,7 @@ export function evaluateFreshness(
     }
 
     if (check.requireContentFreshness) {
-      // Same assessor api/health.js uses, so the two surfaces cannot drift on
+      // Same assessor api/_health.js uses, so the two surfaces cannot drift on
       // parsing, on the fail-closed rules, or on re-aging: the producer's
       // counts are a measurement taken at seeder-run time, and this recomputes
       // the critical observation's age against `now`.

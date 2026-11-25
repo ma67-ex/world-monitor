@@ -37,7 +37,7 @@ export interface TravelRiskFeed {
   name: string;
 }
 
-// Freshness budgets match api/health.js SEED_META for the same keys.
+// Freshness budgets match api/_health.js SEED_META for the same keys.
 export const TRAVEL_RISK_FEEDS: readonly TravelRiskFeed[] = [
   { id: 'advisories', key: 'intelligence:advisories:v1', metaKey: 'seed-meta:intelligence:advisories', maxStaleMin: 120, name: 'Government travel advisories (US State Dept, UK FCDO, Australia DFAT Smartraveller, CDC travel notices, US embassy alerts)' },
   { id: 'ucdp', key: 'conflict:ucdp-events:v1', metaKey: 'seed-meta:conflict:ucdp-events', maxStaleMin: 420, honorContentAge: true, name: 'UCDP Georeferenced Event Dataset, candidate events' },

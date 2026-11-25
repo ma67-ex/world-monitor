@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { __testing__ as healthTesting } from '../api/health.js';
+import { __testing__ as healthTesting } from '../api/_health.js';
 import { NO2_ACTIVITY_KEY, NO2_REGIONS } from '../scripts/shared/no2-activity.mjs';
 import {
   NO2_ACTIVITY_MAX_STALE_MINUTES,

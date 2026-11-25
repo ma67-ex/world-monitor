@@ -1,9 +1,9 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/index.ts';
-import { TOOL_DESCRIPTION_MAX_BYTES } from '../api/mcp/constants.ts';
-import { RpcValidationError } from '../api/mcp/billing-denial.ts';
+import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/_index.ts';
+import { TOOL_DESCRIPTION_MAX_BYTES } from '../api/mcp/_constants.ts';
+import { RpcValidationError } from '../api/mcp/_billing-denial.ts';
 import { ORBITAL_TOOLS } from '../api/mcp/registry/_orbital.ts';
 
 const tool = (name) => ORBITAL_TOOLS.find((t) => t.name === name);

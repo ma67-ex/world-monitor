@@ -28,11 +28,11 @@
 //     Server-side delta audited against its changelog: tool names (SEP-986),
 //     2020-12 schemas, the Origin 403, Client ID Metadata Documents and single
 //     `mcp` scope were already compliant; input validation failures are now
-//     `isError` tool results on 2025-11-25+ (SEP-1303, api/mcp/dispatch.ts).
+//     `isError` tool results on 2025-11-25+ (SEP-1303, api/mcp/_dispatch.ts).
 //     Everything else in it (icons, tasks, URL elicitation, sampling tools) is
 //     optional. `MCP_PROTOCOL_2025_11_25=off` drops it again.
 //   - 2026-07-28 is the handshake-free "modern" era, served per request
-//     (api/mcp/modern.ts) only while `MCP_PROTOCOL_2026_07_28=on`. It never
+//     (api/mcp/_modern.ts) only while `MCP_PROTOCOL_2026_07_28=on`. It never
 //     joins the initialize-negotiated set below. With the flag off (the
 //     default) the server must never answer with its -32022
 //     UnsupportedProtocolVersionError: that error marks a server as modern and
@@ -45,7 +45,7 @@
 // (api/mcp.ts) re-declares the snapshot constants locally so its own
 // `mod.MCP_SUPPORTED_PROTOCOL_VERSIONS` / `mod.MCP_PROTOCOL_VERSION`
 // exports also reflect the per-import env state.
-import { MCP_UPGRADE_URL } from './upgrade';
+import { MCP_UPGRADE_URL } from './_upgrade';
 
 export function supportedProtocolVersions(): readonly string[] {
   if (process.env.MCP_PROTOCOL_FLOOR_2025_06_18 === 'off') return ['2025-03-26'];
@@ -159,7 +159,7 @@ export const JMESPATH_MAX_OUTPUT_BYTES = 256 * 1024;
 // lives in `./body-limits` so Edge facades can import the cap without the
 // MCP upgrade/attribution module graph. Imported (not just re-exported) because
 // a bare `export ... from` creates no local binding for SERVER_INSTRUCTIONS.
-import { MAX_JSON_RPC_BODY_BYTES } from './body-limits';
+import { MAX_JSON_RPC_BODY_BYTES } from './_body-limits';
 export { MAX_JSON_RPC_BODY_BYTES };
 
 // Per-tool budget for the `description` tools/list ships (UTF-8 bytes).

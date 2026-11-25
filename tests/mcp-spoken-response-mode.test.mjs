@@ -20,7 +20,7 @@ import {
   spokenPredictionMarkets,
   spokenResilienceIndicators,
   spokenWorldBrief,
-} from '../api/mcp/spoken-narrators.ts';
+} from '../api/mcp/_spoken-narrators.ts';
 import {
   SPOKEN_MAX_CHARS,
   arabicCount,
@@ -30,7 +30,7 @@ import {
   recordStaleFreshnessKeys,
   spokenAgo,
   spokenPoints,
-} from '../api/mcp/spoken.ts';
+} from '../api/mcp/_spoken.ts';
 import { CHOKEPOINT_REGISTRY } from '../server/_shared/chokepoint-registry.ts';
 
 const originalFetch = globalThis.fetch;

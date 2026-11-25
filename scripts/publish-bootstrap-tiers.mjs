@@ -32,7 +32,7 @@ const PUBLISHER_LARGEST_KEY_LIMIT = 5;
 // R4 (#6654) fields that must never appear in a bootstrap-tier payload.
 // `text` is the X post body (first-party only, via /api/x-feed); `pollState` is
 // seed-internal cursor state.
-// Kept in sync with stripXFeedRestrictedFields in api/bootstrap.js.
+// Kept in sync with stripXFeedRestrictedFields in api/_bootstrap.js.
 export { stripXFeedRestrictedFields } from './_bootstrap-public-payload.mjs';
 
 function assertTier(tier) {

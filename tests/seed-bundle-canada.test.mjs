@@ -126,7 +126,7 @@ test('seed-meta keys follow runSeed(domain, resource), not the canonical key', (
     'SaskAlert': ['seed-meta:alerts:saskalert', 'alerts:canada:saskalert:v1'],
     'VIA-Rail-Live': ['seed-meta:transit:viarail-live', 'transit:viarail:live'],
     // The canonical key is transit:ttc:alerts:v1 but the resource is
-    // 'ttc-alerts', so the meta key takes a HYPHEN. api/health.js watched
+    // 'ttc-alerts', so the meta key takes a HYPHEN. api/_health.js watched
     // seed-meta:transit:ttc:alerts and would never have seen a publish.
     'TTC-Alerts': ['seed-meta:transit:ttc-alerts', 'transit:ttc:alerts:v1'],
     'Toronto-TFS': ['seed-meta:safety:toronto-tfs', 'safety:toronto-tfs:v1'],
@@ -327,7 +327,7 @@ function resolveTtlSeconds(script) {
 }
 
 test('every member’s TTL and health staleness budget cover its bundle interval', () => {
-  const health = readFileSync(join(root, 'api/health.js'), 'utf8');
+  const health = readFileSync(join(root, 'api/_health.js'), 'utf8');
   let checked = 0;
 
   for (const s of sections) {
@@ -356,7 +356,7 @@ test('every member’s TTL and health staleness budget cover its bundle interval
     const probe = new RegExp(
       `key:\\s*'${seedMetaKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}',\\s*\\n?\\s*maxStaleMin:\\s*(\\d+)`,
     ).exec(health);
-    assert.ok(probe, `${s.label}: no api/health.js probe found for ${seedMetaKey}`);
+    assert.ok(probe, `${s.label}: no api/_health.js probe found for ${seedMetaKey}`);
     const maxStaleMin = Number(probe[1]);
     assert.ok(
       maxStaleMin * 60_000 >= intervalMs,

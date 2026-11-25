@@ -7,7 +7,7 @@ import { installRedis } from './helpers/fake-upstash-redis.mts';
 import { getMarketBreadthHistory } from '../server/worldmonitor/market/v1/get-market-breadth-history';
 import { readPublishedPctAbove200d } from '../scripts/_sp500-breadth.mjs';
 import { stripSeedEnvelope } from '../scripts/_seed-envelope-source.mjs';
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const KEY = 'market:breadth-history:v1';

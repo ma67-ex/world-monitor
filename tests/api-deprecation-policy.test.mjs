@@ -9,7 +9,7 @@ import {
   DEPRECATION_POLICY_LINK,
   DEPRECATION_POLICY_URL,
 } from '../server/_shared/deprecation-policy.ts';
-import handler from '../api/not-found.ts';
+import handler from '../api/_not-found.ts';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const DEPRECATION_TEST_KEY = 'deprecation-policy-test-operator-key';

@@ -1,7 +1,7 @@
 /**
  * GET /api/internal/mcp-grant-context?nonce=<n>
  *
- * Read-only companion to `api/internal/mcp-grant-mint.ts` (U3). The apex
+ * Read-only companion to `api/internal/_mcp-grant-mint.ts` (U3). The apex
  * `/mcp-grant` SPA calls this on mount to render the REAL `client_name`
  * + `redirect_host` extracted from the registered OAuth client metadata,
  * so the user can spot consent-phishing attempts (a malicious client
@@ -231,7 +231,7 @@ export async function grantContextHandler(req: Request, deps: ContextDeps): Prom
 export default async function handler(req: Request): Promise<Response> {
   return grantContextHandler(req, {
     resolveUserId: resolveVerifiedSessionUserId,
-    // Fail closed like api/internal/mcp-grant-mint.ts, the next step of the same consent page.
+    // Fail closed like api/internal/_mcp-grant-mint.ts, the next step of the same consent page.
     rateLimit: (request, userId) => checkRateLimit(request, NO_STORE_JSON, {
       scope: 'mcp-grant-context', identifier: `user:${userId}`, limit: 60, window: '10 m', failClosed: true,
     }),

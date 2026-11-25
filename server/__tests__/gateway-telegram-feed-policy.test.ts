@@ -20,7 +20,7 @@ import { createDomainGateway } from '../gateway';
 import { __resetRateLimitForTest, ENDPOINT_RATE_POLICIES, FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED } from '../_shared/rate-limit';
 import { listTelegramFeed } from '../worldmonitor/intelligence/v1/list-telegram-feed';
 import { createIntelligenceServiceRoutes, type IntelligenceServiceHandler } from '../../src/generated/server/worldmonitor/intelligence/v1/service_server';
-import restHandler from '../../api/telegram-feed.js';
+import restHandler from '../../api/_telegram-feed.js';
 import { issueSessionToken } from '../../api/_session.js';
 import { __resetRateLimitForTest as resetRestLimiter } from '../../api/_rate-limit.js';
 

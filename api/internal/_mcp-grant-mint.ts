@@ -7,7 +7,7 @@
  *
  * Flow:
  *   1. Caller is the Clerk-authenticated apex page; sends Bearer JWT +
- *      JSON `{nonce}` (nonce minted by `api/oauth/authorize.js` and
+ *      JSON `{nonce}` (nonce minted by `api/oauth/_authorize.js` and
  *      stored at `oauth:nonce:<n>`).
  *   2. Resolve userId via Clerk JWKS verify (local), apply the per-user
  *      rate limit on that identity, then confirm the token's session is
@@ -125,7 +125,7 @@ interface ClientData {
 
 // ---------------------------------------------------------------------------
 // Redis helpers — read raw `oauth:*` keys via Upstash REST. These keys are
-// written by api/oauth/authorize.js and api/oauth/register.js with NO
+// written by api/oauth/_authorize.js and api/oauth/_register.js with NO
 // deployment prefix, so we MUST match their on-the-wire format.
 // ---------------------------------------------------------------------------
 

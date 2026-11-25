@@ -75,7 +75,7 @@ export const reverseGeocode: InfrastructureServiceHandler['reverseGeocode'] = as
     if (normalized) return normalized;
   }
 
-  // Shared with api/reverse-geocode.js as the exact Redis bucket
+  // Shared with api/_reverse-geocode.js as the exact Redis bucket
   // `rl:scope:reverse-geocode:global`. Cache hits bypass this provider budget;
   // Redis degradation fails closed so it cannot expose Nominatim to unbounded
   // aggregate traffic from the two routes.

@@ -5,9 +5,9 @@ import { fetchAllFirmsRegions } from '../scripts/wildfire/firms-area.mjs';
 import { hasCompleteWorldwideWildfireCoverage, mergeWildfireSourcesWithBc } from '../scripts/wildfire/bc-fire-points.mjs';
 import { compactWildfireDashboardPayload, WILDFIRE_CANONICAL_DETECTION_LIMIT } from '../scripts/_wildfire-dashboard.mjs';
 
-import { __testing__ } from '../api/health.js';
-import { evaluateFreshness } from '../api/mcp/freshness.ts';
-import { CACHE_TOOLS } from '../api/mcp/registry/cache-tools.ts';
+import { __testing__ } from '../api/_health.js';
+import { evaluateFreshness } from '../api/mcp/_freshness.ts';
+import { CACHE_TOOLS } from '../api/mcp/registry/_cache-tools.ts';
 import {
   COUNT_SOURCE_KEYS,
   TEMPORAL_ANOMALIES_TTL,
@@ -315,7 +315,7 @@ describe('temporal anomalies cache freshness', () => {
     assert.ok(TEMPORAL_ANOMALIES_TTL * 1000 > TEMPORAL_ANOMALIES_REBUILD_AFTER_MS);
 
     // The data key must also outlive the STALE alarm, so health reaches STALE_SEED
-    // before the key goes EMPTY (the ordering api/health.js:789 depends on). The
+    // before the key goes EMPTY (the ordering api/_health.js:789 depends on). The
     // bound above is weaker and would pass at any TTL over 20 minutes; dropping TTL
     // to 30min for a cost tune would silently invert this ordering.
     assert.ok(
@@ -344,7 +344,7 @@ describe('temporal anomalies cache freshness', () => {
     // Doubles as the positive control for the round-trip guard above (proving the
     // stub observes writes at all) AND as the guard for the single behaviour this
     // whole change hinges on: seed-meta:temporal:anomalies is now written ONLY here.
-    // Three consumers alarm on it at maxStaleMin 45 (api/health.js,
+    // Three consumers alarm on it at maxStaleMin 45 (api/_health.js,
     // mcp/registry/analysis-tools.ts, mcp/registry/cache-tools.ts), so a regression
     // that drops or mis-gates this one write takes all three to STALE_SEED 45
     // minutes after deploy. Asserting `writes.length > 0` did NOT catch that -- the

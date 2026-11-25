@@ -1,4 +1,4 @@
-import { RpcValidationError } from '../billing-denial';
+import { RpcValidationError } from '../_billing-denial';
 import { requireCountryCode } from '../_country-args';
 import { isAssignedCountryCode } from '../../../shared/country-code-resolve';
 import { CII_RISK_SCORE_CACHE_KEYS } from '../../_cii-risk-cache-keys.js';
@@ -63,12 +63,12 @@ import { estimatePointExposure } from '../../../shared/population-density-countr
 import { INTEL_HOTSPOTS } from '../../../shared/geo-data';
 import { applyRedisKeyPrefix, readJsonBatchFromUpstashWithStatus } from '../../_upstash-json.js';
 import { isAppOwnedRedisKey } from '../../_redis-key-ownership.js';
-import { evaluateFreshness } from '../freshness';
-import { McpSourceUnavailableError } from '../source-unavailable';
-import type { FreshnessCheck, ToolDef } from '../types';
+import { evaluateFreshness } from '../_freshness';
+import { McpSourceUnavailableError } from '../_source-unavailable';
+import type { FreshnessCheck, ToolDef } from '../_types';
 
 // Full CII realtime signal-density coverage (conflict + news families since CII v14),
-// matching api/health.js riskScores minRecordCount.
+// matching api/_health.js riskScores minRecordCount.
 const CII_REALTIME_COVERAGE_MIN = 2;
 
 const MAX_EXPOSURE_COUNTRIES = 10;

@@ -110,6 +110,8 @@ const SOURCE_DOMAIN_MATCHERS = [
 // Keep ambiguous structured providers explicit so a new unmatched provider
 // fails the build instead of silently becoming "geopolitics".
 const SOURCE_DOMAIN_OVERRIDES = new Map([
+  ['www.ransomware.live', 'technology'],
+  ['api.groq.com', 'technology'],
   ['fawazahmed0 currency-api', 'finance'],
   ['ammancity.gov.jo', 'finance'],
   ['data.1212.mn', 'finance'],

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 
-import handler from '../api/bootstrap.js';
+import handler from '../api/_bootstrap.js';
 
 const PRIMARY_KEY = 'alerts:canada:v1';
 const SIBLING_KEY = 'alerts:canada:alberta-aea:v1';

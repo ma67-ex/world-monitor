@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, afterEach, it, mock } from 'node:test';
 import { reserveDailyMeter } from '../server/_shared/api-key-rate-limit.ts';
 import { redisPipeline } from '../api/_upstash-json.js';
-import handler from '../api/telegram-feed.js';
+import handler from '../api/_telegram-feed.js';
 import { issueSessionToken } from '../api/_session.js';
 import { __resetRateLimitForTest } from '../api/_rate-limit.js';
 const originalEnv = { ...process.env };

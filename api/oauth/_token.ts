@@ -211,7 +211,7 @@ async function validateSecret(secret: string | null | undefined): Promise<boolea
 
 // ---------------------------------------------------------------------------
 // Production Redis helpers (raw `oauth:*` keys, no env-prefix). Mirror the
-// shape used by `api/oauth/authorize.js` so both sides agree on key bytes.
+// shape used by `api/oauth/_authorize.js` so both sides agree on key bytes.
 // ---------------------------------------------------------------------------
 
 async function rawRedisPipeline(commands: PipelineCommand[]): Promise<PipelineResult[] | null> {

@@ -4,7 +4,7 @@ import test, { type TestContext } from 'node:test';
 import { load as loadYaml } from 'js-yaml';
 import { createRedisFetch } from './helpers/fake-upstash-redis.mts';
 import rpc from '../api/infrastructure/v1/[rpc].ts';
-import bootstrap from '../api/bootstrap.js';
+import bootstrap from '../api/_bootstrap.js';
 import { issueSessionToken } from '../api/_session.js';
 import { BOOTSTRAP_CACHE_KEYS } from '../shared/bootstrap-tier-keys.js';
 import { assembleBootstrapTierPayload } from '../scripts/publish-bootstrap-tiers.mjs';
@@ -116,7 +116,7 @@ test('RPC, public bootstrap and publisher apply the same transforms and cutover 
 
 
 // ── IMF WEO datasets: validated on the RPC path too (#8514 follow-up) ──────
-// api/bootstrap.js validates imfMacro/imfGrowth/imfLabor/imfExternal before
+// api/_bootstrap.js validates imfMacro/imfGrowth/imfLabor/imfExternal before
 // serving them; this RPC reads the same seeds and must not hand a malformed
 // snapshot to MCP/session callers. The RPC is gateway no-store, so a
 // malformed dataset is reported `missing`, exactly as bootstrap does.

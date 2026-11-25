@@ -168,7 +168,7 @@ async function sendOnce(
  * session that changed while we waited.
  *
  * Note this does NOT help the day-0 poisoned-marker cohort — that state is a
- * 403 by design (see api/notification-channels.ts), and no amount of retrying
+ * 403 by design (see api/_notification-channels.ts), and no amount of retrying
  * should turn a clean upsell into a retry loop.
  *
  * `init.body` must be a re-sendable value (every caller here passes a string).

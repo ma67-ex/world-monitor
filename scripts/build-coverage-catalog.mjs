@@ -243,7 +243,7 @@ export async function loadCoverageCatalog({ importModule, readJson }) {
   const [panels, layers, mcp, serverFeeds] = await Promise.all([
     importModule('src/config/panels.ts'),
     importModule('src/config/map-layer-definitions.ts'),
-    importModule('api/mcp/registry/index.ts'),
+    importModule('api/mcp/registry/_index.ts'),
     importModule(SERVER_FEEDS_PATH),
   ]);
   const locale = readJson('src/locales/en.json');

@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { utf8ByteLength } from '../api/mcp.ts';
 import { validateToolArgs } from '../api/mcp/_validate-args.ts';
-import { RpcValidationError } from '../api/mcp/billing-denial.ts';
-import { executeTool } from '../api/mcp/dispatch.ts';
-import { evaluateFreshness } from '../api/mcp/freshness.ts';
-import { CACHE_TOOLS } from '../api/mcp/registry/cache-tools.ts';
+import { RpcValidationError } from '../api/mcp/_billing-denial.ts';
+import { executeTool } from '../api/mcp/_dispatch.ts';
+import { evaluateFreshness } from '../api/mcp/_freshness.ts';
+import { CACHE_TOOLS } from '../api/mcp/registry/_cache-tools.ts';
 import { RESERVOIR_STATUSES } from '../api/mcp/registry/_reservoir-levels.ts';
 import { classifyStatus } from '../scripts/_reservoir-levels.mjs';
 import { buildSummary } from '../scripts/seed-reservoir-levels.mjs';

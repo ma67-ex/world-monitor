@@ -39,7 +39,7 @@ async function loadHandler() {
     }));
   }) as typeof fetch;
 
-  const mod = await import(`../api/notification-channels.ts?test=${Date.now()}-${Math.random()}`);
+  const mod = await import(`../api/_notification-channels.ts?test=${Date.now()}-${Math.random()}`);
   const relayedEndpoints: string[] = [];
   mod.__setNotificationChannelsDepsForTests({
     checkScopedRateLimit: async () => ({ allowed: true, limit: 30, reset: 0, degraded: false }),

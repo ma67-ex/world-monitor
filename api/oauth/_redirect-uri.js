@@ -8,14 +8,14 @@
 // docs/mcp-overview.mdx#redirect-uri-allowlist.
 const ALLOWED_REDIRECT_URIS = new Set([
   // Claude
-  'https://claude.ai/api/mcp/auth_callback',
-  'https://claude.com/api/mcp/auth_callback',
+  'https://claude.ai/api/mcp/_auth_callback',
+  'https://claude.com/api/mcp/_auth_callback',
   // Cursor Agents, Cursor Bot, and web; Grok Bot registers the Cursor entries.
   // https://cursor.com/oauth/mcp-client.json lists both https callbacks.
   'https://www.cursor.com/agents/mcp/oauth/callback',
   'https://www.cursor.com/bot/mcp/oauth/callback',
   'cursor://anysphere.cursor-mcp/oauth/callback',
-  // ChatGPT: the stable callback requires RFC 9207 `iss` (api/oauth/authorize.js)
+  // ChatGPT: the stable callback requires RFC 9207 `iss` (api/oauth/_authorize.js)
   'https://chatgpt.com/connector_platform_oauth_redirect',
   // Grok
   'https://grok.com/connectors-oauth-exchange-code/',
@@ -102,9 +102,9 @@ function isGoogleConnectedAppsRedirect(uri) {
     && GOOGLE_CONNECTED_APPS_PATH.test(u.pathname);
 }
 
-// Enforced at registration (api/oauth/register.js) and re-checked for
-// registered clients before any code is issued (api/oauth/authorize.js,
-// api/oauth/authorize-pro.ts, api/internal/mcp-grant-mint.ts), so tightening
+// Enforced at registration (api/oauth/_register.js) and re-checked for
+// registered clients before any code is issued (api/oauth/_authorize.js,
+// api/oauth/_authorize-pro.ts, api/internal/_mcp-grant-mint.ts), so tightening
 // the list also fails closed for clients registered under the old one.
 export function isAllowedRedirectUri(uri) {
   if (ALLOWED_REDIRECT_URIS.has(uri)) return true;
@@ -118,7 +118,7 @@ export function isAllowedRedirectUri(uri) {
 }
 
 // Where the authorization code goes, as shown on the consent screens
-// (api/oauth/authorize.js, api/internal/mcp-grant-context.ts). A custom-scheme
+// (api/oauth/_authorize.js, api/internal/_mcp-grant-context.ts). A custom-scheme
 // callback keeps its scheme: `anysphere.cursor-mcp` alone reads like a web host.
 export function redirectDisplayHost(uri) {
   const u = new URL(uri);

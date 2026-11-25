@@ -24,12 +24,12 @@ const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 
 const ROUTE_EXPECTATIONS = [
   {
-    path: 'api/miit-news.js',
+    path: 'api/_miit-news.js',
     reasonTerms: ['miit', 'rss/xml', 'application/rss+xml'],
     sourceTerms: ['miit.gov.cn', 'rss', 'application/rss+xml'],
   },
   {
-    path: 'api/youtube/embed.js',
+    path: 'api/youtube/_embed.js',
     reasonTerms: ['youtube', 'iframe', 'html', 'text/html'],
     sourceTerms: ['youtube.com', 'iframe', 'text/html'],
   },
@@ -65,8 +65,8 @@ describe('api-route-exceptions manifest', () => {
   }
 
   it('rejects category and rationale regressions for route-specific exceptions', () => {
-    const miitNews = manifest.exceptions.find(({ path }) => path === 'api/miit-news.js');
-    const youtubeEmbed = manifest.exceptions.find(({ path }) => path === 'api/youtube/embed.js');
+    const miitNews = manifest.exceptions.find(({ path }) => path === 'api/_miit-news.js');
+    const youtubeEmbed = manifest.exceptions.find(({ path }) => path === 'api/youtube/_embed.js');
 
     assert.ok(miitNews);
     assert.ok(youtubeEmbed);

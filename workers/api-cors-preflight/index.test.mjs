@@ -38,7 +38,7 @@ const KNOWN_GOOD = 'https://www.worldmonitor.app';
 const ACAH_EXPECTED = 'Content-Type, Authorization, X-WorldMonitor-Key, X-Api-Key, X-Widget-Key, X-Pro-Key, Idempotency-Key, Mcp-Session-Id, MCP-Protocol-Version, Mcp-Method, Mcp-Name, Last-Event-ID';
 const ACEH_EXPECTED = 'Allow, Mcp-Session-Id, WWW-Authenticate, Retry-After, Idempotency-Key, Idempotent-Replayed, Location, X-Billing-Verification, RateLimit, RateLimit-Policy, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, X-RateLimit-Mode, X-Wm-Upstream-Timeout, X-WorldMonitor-Bbox, X-WorldMonitor-Bbox-Missing, X-WorldMonitor-Bbox-Invalid, X-Military-Bbox, Link, Deprecation, Sunset';
 // Must be a superset of every method any api/* route advertises. Notably
-// includes DELETE for api/product-catalog.js — pinning this prevents the
+// includes DELETE for api/_product-catalog.js — pinning this prevents the
 // regression that PR review caught (Worker omitted DELETE → product-catalog
 // purge preflights silently fail in prod).
 const ACAM_EXPECTED = 'GET, POST, DELETE, HEAD, OPTIONS';
@@ -525,7 +525,7 @@ test('502 fallback when origin throws still includes CORS headers', async () => 
 //
 // `/api/bootstrap?tier=<fast|slow>&public=1` is the one Worker-owned route
 // whose Vercel handler deliberately answers with the PUBLIC shape
-// (api/bootstrap.js#getPublicBootstrapHeaders: ACAO:*, no Allow-Credentials,
+// (api/_bootstrap.js#getPublicBootstrapHeaders: ACAO:*, no Allow-Credentials,
 // no Vary: Origin) so a single entry can answer every caller. Stamping the
 // Worker's credentialed bag over it re-keyed the response by Origin and put
 // Allow-Credentials: true on an unauthenticated payload that also carries
@@ -535,7 +535,7 @@ const PUBLIC_TIER_URL = 'https://api.worldmonitor.app/api/bootstrap?tier=fast&pu
 
 // The origin's real public-tier response shape, so these tests prove what the
 // Worker does to it rather than what a thin mock happened to omit. `Allow-
-// Credentials: true` is NOT something api/bootstrap.js sends on this URL — it is
+// Credentials: true` is NOT something api/_bootstrap.js sends on this URL — it is
 // here to exercise the Worker's delete branch, which must clear a credentials
 // header even if the origin ever supplied one, since ACAO `*` alongside it is
 // the pairing browsers reject outright.
@@ -607,7 +607,7 @@ test('a 502 on the public tier URL still carries the public shape', async () => 
 });
 
 test('a disallowed Origin on the public tier URL keeps the credentialed fallback echo', async () => {
-  // api/bootstrap.js rejects a disallowed Origin with 403 before it reads any
+  // api/_bootstrap.js rejects a disallowed Origin with 403 before it reads any
   // payload. Handing that caller ACAO:* would make the seed bundle readable by
   // a page the origin refuses, so the Worker must not widen it here.
   const original = globalThis.fetch;

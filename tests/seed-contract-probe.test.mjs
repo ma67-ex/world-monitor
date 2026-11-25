@@ -66,7 +66,7 @@ test('boundary refuses a redirected response instead of following it', async () 
 });
 
 test('handler ignores the request host and authenticates before making requests', async () => {
-  const { default: handler } = await import('../api/seed-contract-probe.ts');
+  const { default: handler } = await import('../api/_seed-contract-probe.ts');
   const originalBase = process.env.WORLDMONITOR_PUBLIC_BASE_URL;
   delete process.env.WORLDMONITOR_PUBLIC_BASE_URL;
   const urls = [];

@@ -3587,7 +3587,7 @@ describe('embeddable map route guardrails', () => {
 
   it('no vercel.json rule re-enables shared caching of /api/geo', () => {
     // /api/geo's body IS the caller's IP-geo, so it ships `Cache-Control: no-store`
-    // (api/geo.js) and tests/geo-per-visitor-cache.test.mts pins that. But a
+    // (api/_geo.js) and tests/geo-per-visitor-cache.test.mts pins that. But a
     // vercel.json header rule is ADDITIVE and outranks the handler at the CDN --
     // Vercel reads Vercel-CDN-Cache-Control > CDN-Cache-Control > Cache-Control --
     // so adding a cache directive to the existing `/api/(.*)` block would make the
@@ -4250,14 +4250,14 @@ describe('agent readiness: MCP/OAuth origin alignment', () => {
   it('api/mcp.ts resource_metadata is host-derived, not hardcoded', () => {
     // After the structural split (refactor PR), the host-derivation
     // (`requestHost = req.headers.get('host') ?? ...`) lives in
-    // api/mcp/handler.ts and the template-literal that emits
+    // api/mcp/_handler.ts and the template-literal that emits
     // `resource_metadata="${url}"` lives in api/_www-authenticate.ts (the
-    // `wwwAuthHeader` helper, re-exported by api/mcp/auth.ts since #4840 so
+    // `wwwAuthHeader` helper, re-exported by api/mcp/_auth.ts since #4840 so
     // the gateway's API-key challenge lives alongside it). Concatenate all three so the sub-greps
     // below still see the same byte surface they did pre-split.
     const source = readFileSync(resolve(__dirname, '../api/mcp/_handler.ts'), 'utf-8')
       + '\n'
-      + readFileSync(resolve(__dirname, '../api/mcp/auth.ts'), 'utf-8')
+      + readFileSync(resolve(__dirname, '../api/mcp/_auth.ts'), 'utf-8')
       + '\n'
       + readFileSync(resolve(__dirname, '../api/_www-authenticate.ts'), 'utf-8');
     // Must NOT contain a hardcoded apex or api URL for resource_metadata —

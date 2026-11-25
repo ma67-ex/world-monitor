@@ -6,7 +6,7 @@
 //
 // The canonical `bls:series:v1` envelope is the only key this seeder publishes:
 // server/worldmonitor/economic/v1/get-bls-series.ts selects a series from it and
-// api/health.js watches it. The per-series `bls:series:<id>` extra keys were
+// api/_health.js watches it. The per-series `bls:series:<id>` extra keys were
 // dropped in #8424 — their seed-meta override was the data key itself, so every
 // run erased the series it had just written, unwatched by health.
 

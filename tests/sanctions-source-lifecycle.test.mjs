@@ -9,7 +9,7 @@ import { mergeSanctionEntries, semaTargetCountry, SEMA_SOURCE, SEMA_TIMEOUT_MS, 
 import { CSL_ROW_ID, CSL_SOURCES, CSL_TIMEOUT_MS } from '../scripts/_csl-sanctions.mjs';
 import { URP_ROW_ID, URP_SOURCES } from '../scripts/_us-restricted-sanctions.mjs';
 import { projectCountrySanctions } from '../shared/country-sanctions-signals.mjs';
-import { __testing__ as health } from '../api/health.js';
+import { __testing__ as health } from '../api/_health.js';
 import { readSeedSnapshot, verifySeedKey, runSeed, writeExtraKeyWithMeta } from '../scripts/_seed-utils.mjs';
 import { buildEnvelope } from '../scripts/_seed-envelope-source.mjs';
 import { withSeedLockFence } from './helpers/seed-lock-fence.mjs';

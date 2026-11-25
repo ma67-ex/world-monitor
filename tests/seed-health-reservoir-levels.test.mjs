@@ -15,7 +15,7 @@ process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'token';
 process.env.WORLDMONITOR_VALID_KEYS = 'test-key';
 
-const { handleSeedHealth } = await import('../api/seed-health.js');
+const { handleSeedHealth } = await import('../api/_seed-health.js');
 const { RESERVOIR_LEVELS_ACTIVATION_KEY } = await import('../scripts/seed-reservoir-levels.mjs');
 
 const NOW = Date.parse('2026-11-12T00:00:00.000Z');

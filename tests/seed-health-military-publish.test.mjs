@@ -14,8 +14,8 @@ process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example.test';
 process.env.UPSTASH_REDIS_REST_TOKEN = 'token';
 process.env.WORLDMONITOR_VALID_KEYS = 'test-key';
 
-const { default: handler } = await import('../api/seed-health.js');
-const { __testing__: healthTesting } = await import('../api/health.js');
+const { default: handler } = await import('../api/_seed-health.js');
+const { __testing__: healthTesting } = await import('../api/_health.js');
 
 const STALE_META_KEYS = new Set([
   'seed-meta:military-forecast-inputs',
@@ -23,8 +23,8 @@ const STALE_META_KEYS = new Set([
 ]);
 const MISSING_META_KEYS = new Set();
 const RESILIENCE_INTERVAL_PROBE_KEY = 'resilience:intervals:v12:US';
-const seedHealthSource = readFileSync(resolve(import.meta.dirname, '../api/seed-health.js'), 'utf8');
-const healthSource = readFileSync(resolve(import.meta.dirname, '../api/health.js'), 'utf8');
+const seedHealthSource = readFileSync(resolve(import.meta.dirname, '../api/_seed-health.js'), 'utf8');
+const healthSource = readFileSync(resolve(import.meta.dirname, '../api/_health.js'), 'utf8');
 
 before(() => {
   process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example.test';

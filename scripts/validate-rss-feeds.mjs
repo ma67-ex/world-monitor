@@ -102,7 +102,7 @@ function assertCiAllowed(rawUrl) {
 export async function fetchFeed(url, { ci = CI_MODE } = {}) {
   if (ci) {
     // Manual per-hop redirect handling: every hop must satisfy the same
-    // https + allowlist gates. Mirrors api/rss-proxy.js redirect re-check.
+    // https + allowlist gates. Mirrors api/_rss-proxy.js redirect re-check.
     // Per-hop timer (NOT a shared budget across hops) — each hop gets the
     // full FETCH_TIMEOUT so "Timeout (15s)" in the report means a real
     // 15s on a single network call, not 17s+ aggregated across a chain.

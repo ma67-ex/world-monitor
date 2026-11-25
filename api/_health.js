@@ -99,7 +99,7 @@ function assessResilienceCacheState(meta) {
   };
 }
 
-// Kept literal, mirroring api/seed-health.js: this Edge function imports only
+// Kept literal, mirroring api/_seed-health.js: this Edge function imports only
 // from api/_*.js, so it cannot reach shared/china-decision-signal-manifest.ts.
 // Registry parity across the three literal copies is enforced by
 // scripts/audit-china-decision-parity.mjs.
@@ -427,7 +427,7 @@ const STANDALONE_KEYS = {
   orbitalWaterExtent: 'orbital:water-extent:v1',
   // Public chokepoint status open dataset index (/data/v1/chokepoints/), published
   // daily by .github/workflows/open-data-chokepoints.yml. Read only by
-  // api/open-data-chokepoints.js, never by the dashboard.
+  // api/_open-data-chokepoints.js, never by the dashboard.
   openDataChokepoints: 'open-data:chokepoints:v1:index',
   sanctionsChanges: 'sanctions:changes:v1',
   // NVD CVE reference store for the CISA KEV subset (#6229). Seeded daily by
@@ -2828,7 +2828,7 @@ const SEED_META = {
   // while the collector's own seed-meta stays fresh. Budgets mirror each
   // collector's canonical maxStaleMin above — the hook runs once per successful
   // publish, so a tighter budget would alarm on the parent's cadence, not on
-  // history. Keep in step with api/seed-health.js (intervalMin = maxStaleMin/2).
+  // history. Keep in step with api/_seed-health.js (intervalMin = maxStaleMin/2).
   intelHistoryIngestConflictAcled:       { key: 'seed-meta:intel-history:conflict:acled-intel',            maxStaleMin: 38 },  // mirrors acledIntel
   intelHistoryIngestMilitaryCrossStrait: { key: 'seed-meta:intel-history:military:cross-strait-activity',  maxStaleMin: 720 }, // mirrors crossStraitActivity
   intelHistoryIngestEnergyIntelligence:  { key: 'seed-meta:intel-history:energy:intelligence',             maxStaleMin: 720 }, // mirrors energyIntelligence
@@ -4565,8 +4565,8 @@ function classifyKey(name, redisKey, opts, ctx) {
   //
   // Grace requires POSITIVE proof (#6095): the marker was READ and came back
   // absent. An unreadable marker is unknown state, not evidence of a producer
-  // that never ran, and earns nothing — the same rule api/mcp/freshness.ts and
-  // api/seed-health.js apply, so the three surfaces cannot answer differently
+  // that never ran, and earns nothing — the same rule api/mcp/_freshness.ts and
+  // api/_seed-health.js apply, so the three surfaces cannot answer differently
   // for one input class. The opposite policy from the ON_DEMAND grace above,
   // and for a reason: this one suppresses an alarm on a key that HAS data and
   // IS running, and its strict verdict is COVERAGE_DEGRADED — "cannot prove
@@ -4799,7 +4799,7 @@ function classifyKey(name, redisKey, opts, ctx) {
   // anything by itself — it only says which evidence the verdict rests on.
   if (activationUnknown) entry.activationUnknown = true;
   // Publish the deadline with the state so the softening is auditable from the
-  // payload alone — an operator can see exactly when this key stops being excused without reading api/health.js.
+  // payload alone — an operator can see exactly when this key stops being excused without reading api/_health.js.
   if (status === 'ROLLOUT_PENDING') entry.rolloutPendingUntil = new Date(rolloutPendingUntil).toISOString();
   if (contentFreshnessActivationWindow) {
     entry.contentFreshnessPendingUntil = new Date(contentFreshnessActivationWindow.untilMs).toISOString();
@@ -5680,8 +5680,8 @@ const RELAY_GATEWAY_GATE_TIMEOUT_MS = 4_000;
 const RELAY_GATEWAY_GATE_USER_AGENT = 'worldmonitor-health-relay-gate/1.0';
 const RELAY_GATEWAY_GATE_ENV = ['CONVEX_SITE_URL', 'CONVEX_TENANT_RELAY_SECRET'];
 
-// The same resolution the gateways use (api/create-checkout.ts,
-// api/customer-portal.ts, api/notification-channels.ts): CONVEX_SITE_URL, or
+// The same resolution the gateways use (api/_create-checkout.ts,
+// api/_customer-portal.ts, api/_notification-channels.ts): CONVEX_SITE_URL, or
 // the `.convex.site` twin of CONVEX_URL. A deployment configured through
 // CONVEX_URL alone is a supported shape and must not read as misconfigured.
 function resolveRelayGatewaySiteUrl() {
@@ -6033,7 +6033,7 @@ async function probeRelayGatewayGate({
   // TLS: a malformed or `http:` CONVEX_SITE_URL is a misconfiguration, not a
   // transport failure, and is reported without a request being made.
   // The target is built exactly as the gateways build theirs — the configured
-  // string with the route appended (api/create-checkout.ts:172) — so a value
+  // string with the route appended (api/_create-checkout.ts:172) — so a value
   // carrying a path or a trailing slash is probed at the same endpoint the
   // paying path would hit, not at a normalised origin that may be healthy
   // while the real one is not. Parsing is for the https check only.

@@ -13,13 +13,13 @@ process.env.WM_SESSION_SECRET ||= 'test-secret-must-be-at-least-32-chars-long-xx
 process.env.UPSTASH_REDIS_REST_URL ||= 'https://example.upstash.io';
 process.env.UPSTASH_REDIS_REST_TOKEN ||= 'test-token';
 
-const { default: oauthRegister } = await import('../api/oauth/register.js');
-const { default: wmSession } = await import('../api/wm-session.js');
-const { default: analyticsHealth } = await import('../api/analytics-health.js');
+const { default: oauthRegister } = await import('../api/oauth/_register.js');
+const { default: wmSession } = await import('../api/_wm-session.js');
+const { default: analyticsHealth } = await import('../api/_analytics-health.js');
 const { createRelayHandler } = await import('../api/_relay.js');
-const { default: userPrefs } = await import('../api/user-prefs.ts');
-const { default: notificationSuppressions } = await import('../api/notification-suppressions.js');
-const { default: rssProxy } = await import('../api/rss-proxy.js');
+const { default: userPrefs } = await import('../api/_user-prefs.ts');
+const { default: notificationSuppressions } = await import('../api/_notification-suppressions.js');
+const { default: rssProxy } = await import('../api/_rss-proxy.js');
 
 const ORIGIN = 'https://worldmonitor.app';
 

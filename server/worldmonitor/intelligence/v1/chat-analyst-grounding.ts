@@ -126,7 +126,7 @@ export function formatPriceCaveat(unsupported: string[]): string {
  * the client already renders those as failures.
  *
  * Pull-based rather than a TransformStream so that a client cancel reaches
- * the source synchronously, the way api/chat-analyst.ts's quota wrapper
+ * the source synchronously, the way api/_chat-analyst.ts's quota wrapper
  * already propagates it. This sits outermost, after that wrapper: the quota
  * decision keeps reading the raw provider stream, and only the bytes headed
  * to the client are inspected here.

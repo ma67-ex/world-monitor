@@ -1,5 +1,5 @@
 import { COUNTRY_ARG_HINT, echoCountryInput, requireCountryCode, resolveCountryArg } from '../_country-args';
-import { spokenCountryRisk, spokenResilienceIndicators, spokenWorldBrief } from '../spoken-narrators';
+import { spokenCountryRisk, spokenResilienceIndicators, spokenWorldBrief } from '../_spoken-narrators';
 import COUNTRY_BBOXES from '../../../shared/country-bboxes.js';
 import { countryBox, splitCountryBox } from '../../../shared/country-bbox';
 import type { ListMilitaryFlightsResponse } from '../../../src/generated/server/worldmonitor/military/v1/service_server';
@@ -17,22 +17,22 @@ import {
 // @ts-expect-error — generated JS module, no declaration file
 import MINING_SITES_RAW from '../../../shared/mining-sites.js';
 import { readJsonFromUpstash } from '../../_upstash-json.js';
-import { argNum, argStr, argStrList } from '../filters';
-import { buildAuthHeaders } from '../auth';
-import { assertToolFetchOk, BillingDenialError, parseSafeRpcViolations, RpcValidationError, throwIfBillingDenial, UpstreamHttpError } from '../billing-denial';
-import { SUPPORTED_CONSUMER_PRICES_COUNTRIES } from '../constants';
+import { argNum, argStr, argStrList } from '../_filters';
+import { buildAuthHeaders } from '../_auth';
+import { assertToolFetchOk, BillingDenialError, parseSafeRpcViolations, RpcValidationError, throwIfBillingDenial, UpstreamHttpError } from '../_billing-denial';
+import { SUPPORTED_CONSUMER_PRICES_COUNTRIES } from '../_constants';
 import {
   assertMcpToolFetchOk,
   BothSourcesFailedError,
   fetchMcpDownstream,
-} from '../downstream';
-import { evaluateFreshness } from '../freshness';
-import { McpSourceUnavailableError } from '../source-unavailable';
+} from '../_downstream';
+import { evaluateFreshness } from '../_freshness';
+import { McpSourceUnavailableError } from '../_source-unavailable';
 import { FORECAST_THEATER_STATUSES, forecastTheaterReadSchema, parseForecastTheaterResult, unavailableForecastTheaters } from '../../../shared/forecast-theaters';
-import { readBoundedResponseBody, ResponseBodyTooLargeError } from '../bounded-body';
-import { utf8ByteLength } from '../utils';
-import { MCP_CHECKOUT_PLANS, START_UPGRADE_TOOL } from '../checkout';
-import { describedPanelReceipt } from './news-dashboard';
+import { readBoundedResponseBody, ResponseBodyTooLargeError } from '../_bounded-body';
+import { utf8ByteLength } from '../_utils';
+import { MCP_CHECKOUT_PLANS, START_UPGRADE_TOOL } from '../_checkout';
+import { describedPanelReceipt } from './_news-dashboard';
 import { orbitalMcpTools, ORBITAL_TOOLS } from './_orbital';
 import { panelAdmissionSchema } from '../../../shared/country-brief-host';
 import { worldBriefPanelAdmissionSchema } from '../../../shared/panel-admission';
@@ -60,15 +60,15 @@ import {
   insightsSnapshotRejection,
   normalizeInsightSource,
 } from '../../../shared/insights-snapshot.js';
-import type { FreshnessCheck, ToolDef } from '../types';
-import { COUNTRY_BRIEF_UI_URI, COUNTRY_RISK_UI_URI, WORLD_BRIEF_UI_URI } from '../ui/registry';
+import type { FreshnessCheck, ToolDef } from '../_types';
+import { COUNTRY_BRIEF_UI_URI, COUNTRY_RISK_UI_URI, WORLD_BRIEF_UI_URI } from '../ui/_registry';
 import { CII_HISTORY_OUTPUT_SCHEMA, ciiHistoryDays, readCountryCiiHistory } from '../_cii-history';
 import { CII_FORMULA_VERSION } from '../../../server/worldmonitor/intelligence/v1/_risk-config';
-import { ANALYSIS_TOOLS } from './analysis-tools';
-import { buildPublicTool, informOnlyPublicTool, TOOL_ALIASES, TOOL_REGISTRY } from './index';
-import { COMPANY_INTEL_TOOL } from './company-intel-tools';
+import { ANALYSIS_TOOLS } from './_analysis-tools';
+import { buildPublicTool, informOnlyPublicTool, TOOL_ALIASES, TOOL_REGISTRY } from './_index';
+import { COMPANY_INTEL_TOOL } from './_company-intel-tools';
 import { NO2_ACTIVITY_TOOL } from './_no2-activity';
-import { tradeCountryCode } from './tariff-tools';
+import { tradeCountryCode } from './_tariff-tools';
 
 type McpBriefSource = {
   title: string;
@@ -818,7 +818,7 @@ function addIntelHistoryNumber(query: URLSearchParams, name: string, value: unkn
  *  hand the model only the tool's compressed `description` and `inputSchema`,
  *  dropping `outputSchema` entirely, so an agent can read every field here and
  *  never see a word of it. SERVER_INSTRUCTIONS carries the content-safety rule
- *  for agents (api/mcp/constants.ts); what these descriptions serve is the
+ *  for agents (api/mcp/_constants.ts); what these descriptions serve is the
  *  surfaces that DO read the schema — `describe_tool`, the generated OpenAPI,
  *  and REST clients. Keep all of them in step. */
 const INTEL_HISTORY_RECORD_SCHEMA = {
@@ -2665,7 +2665,7 @@ export const RPC_TOOLS: ToolDef[] = [
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     // Hybrid _execute (not a pure cache tool) because the cache keys are
-    // parameterised by country. Mirrors api/health.js::BOOTSTRAP_KEYS:55-59
+    // parameterised by country. Mirrors api/_health.js::BOOTSTRAP_KEYS:55-59
     // exactly so the U7 Tier-3 parity test treats every key as covered.
     _coverageKeys: [
       'consumer-prices:overview:ae',

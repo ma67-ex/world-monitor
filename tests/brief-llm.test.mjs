@@ -1999,7 +1999,7 @@ describe('generateStoryDescription — sanitisation + prefix bump (U5)', () => {
 
 // ── generateWhyMatters — v11 endpoint-cache cross-read (#4914) ─────────────
 //
-// The analyst endpoint (api/internal/brief-why-matters.ts) caches its
+// The analyst endpoint (api/internal/_brief-why-matters.ts) caches its
 // envelope at brief:llm:whymatters:v11:{hashBriefStory} — the SAME story
 // identity as the cron's legacy v6 namespace. When the endpoint CALL fails
 // transiently, the envelope may still be sitting in Redis; the fallback
@@ -2010,7 +2010,7 @@ describe('generateWhyMatters — v11 endpoint-cache cross-read (#4914)', () => {
 
   it('pins the endpoint cache to v11 and its shadow cohort to v7', async () => {
     const { readFile } = await import('node:fs/promises');
-    const src = await readFile(new URL('../api/internal/brief-why-matters.ts', import.meta.url), 'utf8');
+    const src = await readFile(new URL('../api/internal/_brief-why-matters.ts', import.meta.url), 'utf8');
     assert.match(src, /const cacheKey = `brief:llm:whymatters:v11:\$\{hash\}`;/);
     assert.match(src, /const shadowKey = `brief:llm:whymatters:shadow:v7:\$\{hash\}`;/);
     assert.doesNotMatch(src, /const cacheKey = `brief:llm:whymatters:v9:/);

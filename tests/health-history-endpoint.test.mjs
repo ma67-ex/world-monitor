@@ -16,7 +16,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { __testing__ } = await import('../api/health.js?failure-history-plan');
+const { __testing__ } = await import('../api/_health.js?failure-history-plan');
 
 const NOW = Date.parse('2026-09-09T08:00:00.000Z');
 

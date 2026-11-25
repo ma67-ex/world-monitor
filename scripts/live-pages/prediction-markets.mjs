@@ -9,7 +9,7 @@ import {
   UnpublishableReading,
 } from './common.mjs';
 
-// The seed refreshes often; health flags it after 90 minutes (api/health.js).
+// The seed refreshes often; health flags it after 90 minutes (api/_health.js).
 const MAX_AGE_MS = 6 * 3_600_000;
 const LISTED_MARKETS = 15;
 

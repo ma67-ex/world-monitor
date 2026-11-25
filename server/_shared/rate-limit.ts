@@ -12,7 +12,7 @@ import { durationToSeconds, limitWithFallback, resetRateLimitFallbackForTest } f
 // seeder-reachable modules (usage.ts) can use it without pulling this file's
 // @upstash imports into Railway containers. Re-exported here because this was
 // the helpers' original home and existing callers import them from this
-// module (getClientIp: api/ask.ts, api/a2a.ts, api/mcp-proxy.ts;
+// module (getClientIp: api/_ask.ts, api/_a2a.ts, api/_mcp-proxy.ts;
 // UNKNOWN_CLIENT_IP: turnstile.ts; plus the rate-limit test suites).
 export { getClientIp, getClientRateLimitKey, hasCloudflareTransitProof, hasUnprovenCloudflareClientIp, rateLimitKeyForIp, UNKNOWN_CLIENT_IP } from './client-ip.js';
 
@@ -122,7 +122,7 @@ function getRatelimit(): Ratelimit | null {
 // so the user is unaffected. Capture those at `warning` so a sustained Redis
 // outage still escalates by volume without a transient script-timeout drowning
 // genuine error-level signal in the dashboard (WORLDMONITOR-RX; mirrors the
-// SERVICE_UNAVAILABLE `level: 'warning'` precedent in api/user-prefs.ts). A
+// SERVICE_UNAVAILABLE `level: 'warning'` precedent in api/_user-prefs.ts). A
 // `missing-config` stage is a real deploy misconfiguration and any novel error
 // is unclassified — both stay at `error` so on-call still sees them.
 //
@@ -214,7 +214,7 @@ function logScopedRateLimitMissingConfig(scope: string): void {
 
 // One-per-isolate latch for edge-proof rejections. Spoofed cf-connecting-ip
 // headers are caller-controlled on a direct origin hit; reporting every 403
-// would create an amplification path (mirrors api/mcp/auth.ts). (#8402)
+// would create an amplification path (mirrors api/mcp/_auth.ts). (#8402)
 const EDGE_PROOF_RATE_LIMIT_LATCH = Symbol.for('worldmonitor.rate-limit.edge-proof-reported.v1');
 
 function reportEdgeProofRequiredOnce(stage: string, err: Error): void {
@@ -877,7 +877,7 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // cold per-country cache miss. Match the MCP minute ceiling and fail closed.
   '/api/resilience/v1/get-resilience-indicators': { limit: 60, window: '60 s' },
   // #3805 / PR #3821: MCP proxy is a top-level Vercel Edge Function in
-  // `api/mcp-proxy.ts` (registered as `external-protocol` in
+  // `api/_mcp-proxy.ts` (registered as `external-protocol` in
   // api/api-route-exceptions.json — JSON-RPC shape dictated by the MCP spec),
   // so it does NOT flow through the gateway and `checkEndpointRateLimit`
   // never fires for it. The handler reads this policy and enforces it
@@ -887,7 +887,7 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // resolves edge-function paths via api/api-route-exceptions.json instead
   // of the OpenAPI specs.
   '/api/mcp-proxy': { limit: 30, window: '60 s' },
-  // Docs MCP facade (`api/docs-mcp.ts`, external-protocol exception — serves
+  // Docs MCP facade (`api/_docs-mcp.ts`, external-protocol exception — serves
   // /docs/mcp, proxying the Mintlify docs MCP server and lifting its
   // protocol-level tool-call failures into proper JSON-RPC error objects).
   // Anonymous by design (upstream is fully public), so the per-IP minute
@@ -895,18 +895,18 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // posture. Enforced in-handler via `checkScopedRateLimit`, same pattern as
   // /api/mcp-proxy.
   '/api/docs-mcp': { limit: 60, window: '60 s' },
-  // A2A concierge endpoint (`api/a2a.ts`, external-protocol exception —
+  // A2A concierge endpoint (`api/_a2a.ts`, external-protocol exception —
   // JSON-RPC shape dictated by the A2A spec, served at /a2a). Anonymous and
   // quota-free by design (routes over the public tool catalog + public
   // freshness envelope only), so the per-IP minute limit is the whole abuse
   // defence; 60/min mirrors the MCP public-method posture. Enforced
   // in-handler via `checkScopedRateLimit`, same pattern as /api/mcp-proxy.
   '/api/a2a': { limit: 60, window: '60 s' },
-  // NLWeb /ask endpoint (`api/ask.ts`, external-protocol exception — request/
+  // NLWeb /ask endpoint (`api/_ask.ts`, external-protocol exception — request/
   // response shape dictated by the NLWeb spec, served at /ask). Same anonymous
   // cheap-catalog posture as /api/a2a, same in-handler enforcement.
   '/api/ask': { limit: 60, window: '60 s' },
-  // Agent-skills import proxy (`api/skills/fetch-agentskills.ts`, registered
+  // Agent-skills import proxy (`api/skills/_fetch-agentskills.ts`, registered
   // as `migration-pending` in api/api-route-exceptions.json). Fetches one
   // skill definition from a fixed three-host allowlist on agentskills.io.
   // Anonymous by design (the settings importer calls it same-origin before
@@ -916,8 +916,8 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // edge. Enforced in-handler via `checkScopedRateLimit`, same pattern as
   // /api/docs-mcp. (#6234)
   '/api/skills/fetch-agentskills': { limit: 30, window: '60 s' },
-  // Legacy `api/*.js` provider proxies (`api/youtube/live.js`,
-  // `api/reverse-geocode.js`), both registered in
+  // Legacy `api/*.js` provider proxies (`api/youtube/_live.js`,
+  // `api/_reverse-geocode.js`), both registered in
   // api/api-route-exceptions.json. Neither flows through the gateway, and
   // AGENTS.md forbids `api/*.js` from importing `../server/`, so unlike
   // /api/mcp-proxy they cannot read this registry at runtime: each handler
@@ -935,7 +935,7 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // per-caller floor against scripted coordinate sweeps rather than a throttle
   // on real map use. Nominatim's usage policy is the strictest in our stack and
   // is enforced by egress-IP ban, and there are two callers sharing one egress:
-  // the legacy `api/reverse-geocode.js` edge function (which carries these
+  // the legacy `api/_reverse-geocode.js` edge function (which carries these
   // same numbers as literal constants and enforces them in-handler via
   // checkRateLimit — api/*.js cannot import ../server/) and the gateway RPC
   // below. Both use the shared `geocode:` cache namespace (604800 s TTL), so
@@ -965,13 +965,13 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // its account owner so every display for one partner shares the same budget.
   // The CDN absorbs most canonical public requests before this policy runs.
   '/api/embed/map-frame': { limit: 120, window: '60 s' },
-  // Widget agent is a top-level edge proxy (api/widget-agent.ts) that spends a
+  // Widget agent is a top-level edge proxy (api/_widget-agent.ts) that spends a
   // frontier-model call on every POST. It does not flow through the gateway, so
   // the handler enforces this budget in-process, keyed on the validated
   // user/key identity rather than the edge egress IP. 20/hour matches the
   // relay's pro bucket; basic callers are still capped tighter on the relay.
   '/api/widget-agent': { limit: 20, window: '1 h' },
-  // Checkout session creation (api/create-checkout.ts) relays to Dodo. Same
+  // Checkout session creation (api/_create-checkout.ts) relays to Dodo. Same
   // per-user 5/min fail-closed budget as the customer portal, enforced
   // in-handler after JWT validation. A Redis outage must not lift it.
   '/api/create-checkout': { limit: 5, window: '60 s' },
@@ -1219,27 +1219,27 @@ interface StandaloneAdmissionDecision {
 // Standalone api/ routes that run no caller limiter. scripts/enforce-rate-limit-policies.mjs
 // fails on any other route whose own code does not call one.
 export const STANDALONE_ROUTES_WITHOUT_CALLER_ADMISSION: Record<string, StandaloneAdmissionDecision> = {
-  'api/agent-auth.ts': { reason: 'Returns a fixed auth challenge built from request host metadata; no backend call.' },
-  'api/geo.js': { reason: 'Returns the country from request headers; no backend call.' },
-  'api/http-message-signatures-directory.ts': { reason: 'Returns a hardcoded public key directory; no backend call.' },
-  'api/oauth-authorization-server.ts': { reason: 'OAuth discovery document built from constants; no backend call.' },
-  'api/oauth-protected-resource.ts': { reason: 'OAuth resource metadata built from constants; no backend call.' },
+  'api/_agent-auth.ts': { reason: 'Returns a fixed auth challenge built from request host metadata; no backend call.' },
+  'api/_geo.js': { reason: 'Returns the country from request headers; no backend call.' },
+  'api/_http-message-signatures-directory.ts': { reason: 'Returns a hardcoded public key directory; no backend call.' },
+  'api/_oauth-authorization-server.ts': { reason: 'OAuth discovery document built from constants; no backend call.' },
+  'api/_oauth-protected-resource.ts': { reason: 'OAuth resource metadata built from constants; no backend call.' },
   'api/og-story.js': { reason: 'Renders an SVG from query values and constants; no backend call.' },
   'api/story.js': { reason: 'Returns a redirect or locally rendered share HTML; no backend call.' },
-  'api/youtube/embed.js': { reason: 'Returns a local HTML template; the YouTube script loads in the browser.' },
-  'api/cache-purge.js': { reason: 'Requires the RELAY_SHARED_SECRET bearer before any Redis work.' },
-  'api/internal/brief-why-matters.ts': { reason: 'Requires the RELAY_SHARED_SECRET bearer before cache or LLM work.' },
-  'api/seed-contract-probe.ts': { reason: 'Requires x-probe-secret to match RELAY_SHARED_SECRET before any probe runs.' },
-  'api/seed-health.js': { reason: 'Requires an enterprise operator key, checked locally, before any Redis read.' },
-  'api/opensky.js': { reason: 'Requires an enterprise operator key, or the local sidecar key on its loopback hop, before the relay call.' },
-  'api/download.js': { reason: 'CDN-cached release redirect; a cache bypass costs one Redis GET on a fixed key, and GitHub is called only when that key is empty.' },
-  'api/version.js': { reason: 'CDN-cached release version; a cache bypass costs one Redis GET on a fixed key, and GitHub is called only when that key is empty.' },
-  'api/gpsjam.js': { reason: 'CDN-cached seeded data; a cache bypass costs one Redis GET on a fixed key.' },
-  'api/open-data-chokepoints.js': { reason: 'CDN-cached seeded data; dates are bounded, so a cache bypass costs one Redis GET on a bounded key set.' },
-  'api/supply-chain/hormuz-tracker.js': { reason: 'CDN-cached seeded data; a cache bypass costs one Redis GET on a fixed key.' },
-  'api/miit-news.js': { reason: 'CDN-cached feed; a cache bypass costs one Redis GET on a fixed key, and MIIT is fetched only when that key is empty.' },
-  'api/product-catalog.js': { reason: 'CDN-cached catalog; a cache bypass costs one Redis GET on product-catalog:v3, and Dodo is called only when that key is empty. DELETE is secret-gated.' },
-  'api/health.js': { reason: 'Uptime monitors poll it, so a limit would page on-call. It serves the cached verdict first; a refresh takes a Redis SET NX lock, so one sweep runs at a time.' },
+  'api/youtube/_embed.js': { reason: 'Returns a local HTML template; the YouTube script loads in the browser.' },
+  'api/_cache-purge.js': { reason: 'Requires the RELAY_SHARED_SECRET bearer before any Redis work.' },
+  'api/internal/_brief-why-matters.ts': { reason: 'Requires the RELAY_SHARED_SECRET bearer before cache or LLM work.' },
+  'api/_seed-contract-probe.ts': { reason: 'Requires x-probe-secret to match RELAY_SHARED_SECRET before any probe runs.' },
+  'api/_seed-health.js': { reason: 'Requires an enterprise operator key, checked locally, before any Redis read.' },
+  'api/_opensky.js': { reason: 'Requires an enterprise operator key, or the local sidecar key on its loopback hop, before the relay call.' },
+  'api/_download.js': { reason: 'CDN-cached release redirect; a cache bypass costs one Redis GET on a fixed key, and GitHub is called only when that key is empty.' },
+  'api/_version.js': { reason: 'CDN-cached release version; a cache bypass costs one Redis GET on a fixed key, and GitHub is called only when that key is empty.' },
+  'api/_gpsjam.js': { reason: 'CDN-cached seeded data; a cache bypass costs one Redis GET on a fixed key.' },
+  'api/_open-data-chokepoints.js': { reason: 'CDN-cached seeded data; dates are bounded, so a cache bypass costs one Redis GET on a bounded key set.' },
+  'api/supply-chain/_hormuz-tracker.js': { reason: 'CDN-cached seeded data; a cache bypass costs one Redis GET on a fixed key.' },
+  'api/_miit-news.js': { reason: 'CDN-cached feed; a cache bypass costs one Redis GET on a fixed key, and MIIT is fetched only when that key is empty.' },
+  'api/_product-catalog.js': { reason: 'CDN-cached catalog; a cache bypass costs one Redis GET on product-catalog:v3, and Dodo is called only when that key is empty. DELETE is secret-gated.' },
+  'api/_health.js': { reason: 'Uptime monitors poll it, so a limit would page on-call. It serves the cached verdict first; a refresh takes a Redis SET NX lock, so one sweep runs at a time.' },
 };
 
 const endpointLimiters = new Map<string, Ratelimit>();
@@ -1450,7 +1450,7 @@ export async function checkScopedRateLimit(scope: string, limit: number, window:
 /**
  * Builds the standard 429 for an availability-first in-handler `checkScopedRateLimit`
  * caller (a top-level edge function that enforces its own budget, e.g.
- * api/skills/fetch-agentskills.ts). Hand-rolling the response drops the IETF
+ * api/skills/_fetch-agentskills.ts). Hand-rolling the response drops the IETF
  * RateLimit-* fields that api/_cors.js exposes cross-origin specifically so
  * agents can self-throttle, which is how the same 429 condition ends up with
  * two different header shapes across sibling routes. Takes the Duration rather

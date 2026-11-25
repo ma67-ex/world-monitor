@@ -197,7 +197,7 @@ describe('a source absence stays visible end to end', () => {
   const MINUTE = 60_000;
 
   it('health reads COVERAGE_PARTIAL even when the published count clears minRecordCount', async () => {
-    const { __testing__ } = await import('../api/health.js');
+    const { __testing__ } = await import('../api/_health.js');
     const { classifyKey, STANDALONE_KEYS, SEED_META, STATUS_COUNTS } = __testing__;
     // 180 reference countries, HK absent: 179 published, above the 174 floor.
     const countryData = new Map(Array.from({ length: 178 }, (_, i) => [`Z${i}`, { contentAsOfChangedAt: now - MINUTE }]));
@@ -226,7 +226,7 @@ describe('a source absence stays visible end to end', () => {
   });
 
   const classifyPortwatch = async (meta) => {
-    const { __testing__ } = await import('../api/health.js');
+    const { __testing__ } = await import('../api/_health.js');
     const { classifyKey, STANDALONE_KEYS, SEED_META } = __testing__;
     return classifyKey('portwatchPortActivity', STANDALONE_KEYS.portwatchPortActivity, { allowOnDemand: true }, {
       containmentEvidenceByName: new Map(),

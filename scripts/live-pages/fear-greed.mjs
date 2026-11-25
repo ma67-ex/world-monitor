@@ -8,7 +8,7 @@ import {
   UnpublishableReading,
 } from './common.mjs';
 
-// The seed runs every 6 hours and health flags it after 12 (api/health.js).
+// The seed runs every 6 hours and health flags it after 12 (api/_health.js).
 const MAX_AGE_MS = 24 * 3_600_000;
 
 const CATEGORY_LABELS = [

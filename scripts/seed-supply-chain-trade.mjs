@@ -789,7 +789,7 @@ export async function fetchTradeFlows() {
     flows,
     //
     // The run counters ride here rather than in seed-meta's `coverage` field.
-    // api/health.js parses that field with the consumer-prices page/retailer
+    // api/_health.js parses that field with the consumer-prices page/retailer
     // schema, so a differently-shaped object is published as an all-zero
     // completedPages/failedPages block — a misleading operator signal, which is
     // the failure class this issue exists to remove. Health gets the number it
@@ -927,7 +927,7 @@ export async function publishTradeFlows({ flows, manifest }) {
     }
   }
   // recordCount is the number of pairs actually IN Redis, which is what
-  // api/health.js compares against its minRecordCount floor. Deliberately no
+  // api/_health.js compares against its minRecordCount floor. Deliberately no
   // `coverage` argument — see the manifest comment in fetchTradeFlows.
   //
   // A run that landed NOTHING must not stamp a fresh timestamp over the last
@@ -1353,7 +1353,7 @@ async function fetchCustomsRevenue() {
 // is rebuilt from the current HTS release every run (the notes are ~5 MB,
 // the heading rows ~3 MB) and published as one catalog plus one coverage
 // shard per HS chapter, versioned by release. See shared/us-hts-chapter99.mjs.
-// 24h, matching maxStaleMin 1440 on usHtsDuties in api/health.js. HTS
+// 24h, matching maxStaleMin 1440 on usHtsDuties in api/_health.js. HTS
 // revisions land every two weeks or so; the 6h cron keeps the key alive.
 export const US_HTS_TTL = 86400;
 const HTS_REST = 'https://hts.usitc.gov/reststop';

@@ -93,11 +93,15 @@ import { createScenarioServiceRoutes as scenarioRoutes } from '../../../../src/g
 import { scenarioHandler } from '../../../../server/worldmonitor/scenario/v1/handler';
 import { createShippingV2ServiceRoutes as shippingV2Routes } from '../../../../src/generated/server/worldmonitor/shipping/v2/service_server';
 import { shippingV2Handler } from '../../../../server/worldmonitor/shipping/v2/handler';
+import feedbackGateway from '../../../feedback/v1/_rpc';
+import orbitalGateway from '../../../orbital/v1/_rpc';
+import safetyGateway from '../../../safety/v1/_rpc';
+import scorecardGateway from '../../../scorecard/v1/_rpc';
 
 type EdgeHandler = (req: Request, ctx?: GatewayCtx) => Promise<Response>;
 
-// Exported (not just module-local) because api/scenario/v1/status.ts,
-// templates.ts, run.ts and api/supply-chain/v1/country-products.ts,
+// Exported (not just module-local) because api/scenario/v1/_status.ts,
+// templates.ts, run.ts and api/supply-chain/v1/_country-products.ts,
 // multi-sector-cost-shock.ts are alias files that used to `import gateway
 // from './[rpc]'` (the file this module replaced) -- they now import
 // REGISTRY.scenario / REGISTRY['supply-chain'] directly instead.
@@ -136,6 +140,10 @@ export const REGISTRY: Record<string, EdgeHandler> = {
   wildfire: createDomainGateway(wildfireRoutes(wildfireHandler, serverOptions)),
   aviation: createDomainGateway(aviationRoutes(aviationHandler, serverOptions)),
   scenario: createDomainGateway(scenarioRoutes(scenarioHandler, serverOptions)),
+  feedback: feedbackGateway,
+  orbital: orbitalGateway,
+  safety: safetyGateway,
+  scorecard: scorecardGateway,
   'v2-shipping': createDomainGateway(shippingV2Routes(shippingV2Handler, serverOptions)),
 };
 
@@ -146,7 +154,7 @@ export default async function handler(req: Request, ctx?: GatewayCtx): Promise<R
   // misc-gateway/[name].ts). For a request that was /api/<domain>/v1/<rpc>
   // before the rewrite, parts[2] is <domain>, not parts[3].
   const parts = url.pathname.split('/');
-  const domain = parts[2] ?? '';
+  const domain = parts[2] === 'v2' ? `v2-${parts[3] ?? ''}` : (parts[2] ?? '');
   const gateway = REGISTRY[domain];
   if (!gateway) {
     return new Response(JSON.stringify({ error: `Unknown domain: ${domain}` }), {

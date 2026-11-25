@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, it } from 'node:test';
-import handler from '../api/oauth/authorize.js';
-import tokenEndpoint from '../api/oauth/token.ts';
+import handler from '../api/oauth/_authorize.js';
+import tokenEndpoint from '../api/oauth/_token.ts';
 import { resolveBearerToContext } from '../api/_oauth-token.js';
 import { sha256Hex } from '../api/_crypto.js';
 import { OAUTH_BIND_COOKIE, hashOAuthBindValue } from '../api/oauth/_browser-binding.js';
@@ -65,8 +65,8 @@ afterEach(() => {
 
 async function consent(apiKey = key, xhr = true) {
   const challenge = Buffer.from(await sha256Hex('a'.repeat(64)), 'hex').toString('base64url');
-  store.set('oauth:nonce:test', JSON.stringify({ client_id: 'client', redirect_uri: 'https://claude.ai/api/mcp/auth_callback', code_challenge: challenge, state: 'state', bind_hash: await hashOAuthBindValue(BIND_VALUE) }));
-  store.set('oauth:client:client', JSON.stringify({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] }));
+  store.set('oauth:nonce:test', JSON.stringify({ client_id: 'client', redirect_uri: 'https://claude.ai/api/mcp/_auth_callback', code_challenge: challenge, state: 'state', bind_hash: await hashOAuthBindValue(BIND_VALUE) }));
+  store.set('oauth:client:client', JSON.stringify({ redirect_uris: ['https://claude.ai/api/mcp/_auth_callback'] }));
   return handler(new Request('https://api.worldmonitor.app/oauth/authorize', {
     method: 'POST', headers: { cookie: BIND_COOKIE_HEADER }, body: new URLSearchParams({ _nonce: 'test', _js: xhr ? '1' : '', api_key: apiKey }),
   }));
@@ -83,7 +83,7 @@ it('consents a dashboard key and resolves its bearer as a metered user', async (
   const exchange = await tokenEndpoint(new Request('https://api.worldmonitor.app/oauth/token', {
     method: 'POST', body: new URLSearchParams({
       grant_type: 'authorization_code', code, code_verifier: 'a'.repeat(64),
-      client_id: 'client', redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+      client_id: 'client', redirect_uri: 'https://claude.ai/api/mcp/_auth_callback',
     }),
   }));
   assert.equal(exchange.status, 200);

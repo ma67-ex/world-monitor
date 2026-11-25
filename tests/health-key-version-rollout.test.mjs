@@ -2,7 +2,7 @@ import { decodeHealthPipeline } from './helpers/health-pipeline-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { handleHealth, __testing__ } from '../api/health.js';
+import { handleHealth, __testing__ } from '../api/_health.js';
 
 const {
   STANDALONE_KEYS,

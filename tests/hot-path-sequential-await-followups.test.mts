@@ -233,7 +233,7 @@ describe('app boot', () => {
 
 describe('request handlers', () => {
   it('chat-analyst resolves the routing policy alongside the context assembly', () => {
-    const source = read('api/chat-analyst.ts');
+    const source = read('api/_chat-analyst.ts');
     assert.doesNotMatch(source, /await assembleAnalystContext\(/, 'context assembly must not be awaited alone');
     assert.doesNotMatch(source, /await getAiRoutingDecisionForUser\(/, 'the routing lookup must not be awaited alone');
     assert.match(

@@ -44,7 +44,7 @@ import {
 export const config = { runtime: 'edge' };
 
 // Iran-events domain sunset (war ended 2026-07). Default OFF: don't ship the
-// domain to the client. Set IRAN_EVENTS_ENABLED=true to restore. See api/health.js.
+// domain to the client. Set IRAN_EVENTS_ENABLED=true to restore. See api/_health.js.
 const IRAN_EVENTS_ENABLED = (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true';
 
 const { cacheKeys: BOOTSTRAP_CACHE_KEYS } = resolveBootstrapRegistry({
@@ -82,7 +82,7 @@ const TIER_CDN_CACHE = {
 };
 // An on-demand key with no entry here inherits the SLOW shield (s-maxage=7200,
 // 2h). Any key published more often than that MUST declare a profile: the CDN
-// would otherwise hand browsers a payload api/health.js already calls
+// would otherwise hand browsers a payload api/_health.js already calls
 // STALE_SEED, and the client stamps it fresh on arrival — a green freshness
 // panel over data nobody re-fetched, with nothing to page on because health
 // reads Redis and never sees the cached copy.

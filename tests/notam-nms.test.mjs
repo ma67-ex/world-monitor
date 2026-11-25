@@ -527,7 +527,7 @@ describe('runSeed wiring', () => {
   });
 
   it('matches the keys and staleness budget /api/health grades', async () => {
-    const { __testing__ } = await import('../api/health.js');
+    const { __testing__ } = await import('../api/_health.js');
     const { SEED_META, ACTIVATION_MARKERS } = __testing__;
     // runSeed writes the canonical meta as seed-meta:<domain>:<resource>.
     assert.equal(SEED_META.notamAirspace.key, `seed-meta:${SEED_DOMAIN}:${SEED_RESOURCE}`);

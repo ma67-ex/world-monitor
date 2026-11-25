@@ -147,7 +147,7 @@ for (const url of ENDPOINTS) {
 }
 
 // The one guard that reads the bytes users actually receive on the public
-// bootstrap tiers. api/bootstrap-auth.test.mjs proves api/bootstrap.js builds
+// bootstrap tiers. api/bootstrap-auth.test.mjs proves api/_bootstrap.js builds
 // this shape; it calls handler() directly, so it is blind to everything the
 // edge does afterwards — the Worker's CORS stamp and, since #7292, a KV path
 // that mints the response at the POP without touching the handler at all.

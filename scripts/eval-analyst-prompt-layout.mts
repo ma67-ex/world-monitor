@@ -86,11 +86,11 @@ const outPath = arg('out');
 const concurrency = Number(arg('concurrency') ?? '4');
 if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('--concurrency must be a positive integer');
 
-// Production parity: api/chat-analyst.ts streams with maxTokens 600.
+// Production parity: api/_chat-analyst.ts streams with maxTokens 600.
 const maxTokens = Number(arg('max-tokens') ?? '600');
 if (!Number.isInteger(maxTokens) || maxTokens < 1) throw new Error('--max-tokens must be a positive integer');
 // OpenRouter's normalized `reasoning` param. Production parity is reasoning
-// off (api/chat-analyst.ts passes enableReasoning: false); the other values
+// off (api/_chat-analyst.ts passes enableReasoning: false); the other values
 // are probes. Measured 2026-10-26 on deepseek/deepseek-v4-flash: max_tokens
 // and effort caps are ignored (the model still spends the whole budget), so
 // off is the only setting that fits 600 tokens.

@@ -1,6 +1,6 @@
 /**
  * The in-app export of the travel risk assessment (#10451, phase 2):
- * POST /api/travel-risk-assessment, wired in api/travel-risk-assessment.ts.
+ * POST /api/travel-risk-assessment, wired in api/_travel-risk-assessment.ts.
  *
  * The draft is the one the MCP tool returns. This route runs the tool's own
  * `_execute`, so the two surfaces cannot drift, and returns it as a file
@@ -19,10 +19,10 @@
  * or a log line. The response is `no-store`.
  */
 
-import { RpcValidationError } from '../../api/mcp/billing-denial';
+import { RpcValidationError } from '../../api/mcp/_billing-denial';
 import type { TravelRiskResult } from '../../api/mcp/registry/_travel-risk-document';
-import { parseTravelRiskArgs } from '../../api/mcp/registry/travel-risk-tool';
-import { McpSourceUnavailableError } from '../../api/mcp/source-unavailable';
+import { parseTravelRiskArgs } from '../../api/mcp/registry/_travel-risk-tool';
+import { McpSourceUnavailableError } from '../../api/mcp/_source-unavailable';
 import { hasTravelRiskAssessment, type TravelRiskEntitlement } from '../../shared/travel-risk-access';
 import { hasCurrentEntitlementCoverage } from './entitlement-coverage';
 import {

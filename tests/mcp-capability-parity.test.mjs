@@ -3,9 +3,9 @@ import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 
 import { BASE_URL } from './helpers/mcp-pro-deps.mjs';
-import { resolveMcpBudget } from '../api/mcp/quota.ts';
-import { MCP_DEFAULT_BURST_PER_MINUTE, MCP_PROTOCOL_BURST_PER_MINUTE, resolveMcpBurstPerMinute } from '../api/mcp/auth.ts';
-import { PANEL_READ_LIMIT } from '../api/mcp/panel-requests.ts';
+import { resolveMcpBudget } from '../api/mcp/_quota.ts';
+import { MCP_DEFAULT_BURST_PER_MINUTE, MCP_PROTOCOL_BURST_PER_MINUTE, resolveMcpBurstPerMinute } from '../api/mcp/_auth.ts';
+import { PANEL_READ_LIMIT } from '../api/mcp/_panel-requests.ts';
 import { PRODUCT_CATALOG } from '../convex/config/productCatalog.ts';
 import { OPERATOR_KEY_DAILY_CEILINGS } from '../server/_shared/high-usage-alarm.ts';
 
@@ -371,7 +371,7 @@ describe('api/mcp.ts — capability parity (advertised AND non-empty)', () => {
       'authentication.resource must be the MCP endpoint the card advertises',
     );
 
-    const prm = (await import('../api/oauth-protected-resource.ts')).default;
+    const prm = (await import('../api/_oauth-protected-resource.ts')).default;
     const emitted = await (
       await prm(
         new Request(`${resource.origin}/.well-known/oauth-protected-resource${resource.pathname}`, {

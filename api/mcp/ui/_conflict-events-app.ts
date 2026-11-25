@@ -17,7 +17,7 @@
 //
 // textContent-only rendering; renderBody stays backtick/`${`/regex-free.
 
-import { buildAppHtml } from './shell';
+import { buildAppHtml } from './_shell';
 import { CONFLICT_MAP_BASE } from './_conflict-map-base';
 
 const STYLES = `

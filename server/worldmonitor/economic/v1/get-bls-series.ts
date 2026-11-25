@@ -2,7 +2,7 @@
  * RPC: getBlsSeries -- reads seeded BLS time series from Railway seed cache.
  * All external BLS API calls happen in scripts/seed-bls-series.mjs on Railway.
  *
- * Reads the canonical `bls:series:v1` envelope — the key api/health.js vouches
+ * Reads the canonical `bls:series:v1` envelope — the key api/_health.js vouches
  * for — and selects the requested series from it. The per-series
  * `bls:series:<id>` keys this used to read were overwritten by their own
  * seed-meta record on every run from 2026-03-23, and health never looked at

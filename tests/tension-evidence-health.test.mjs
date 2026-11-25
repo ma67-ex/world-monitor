@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { __testing__ } from '../api/health.js';
+import { __testing__ } from '../api/_health.js';
 import { TENSION_EVIDENCE_ACTIVATION_KEY, TENSION_EVIDENCE_KEY } from '../scripts/_tension-evidence.mjs';
 
 const NOW = 1_792_929_600_000;

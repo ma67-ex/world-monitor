@@ -14,7 +14,7 @@
 // textContent-only rendering; renderBody stays backtick/`${`/regex-free.
 
 import { CHOKEPOINT_REGISTRY } from '../../../server/_shared/chokepoint-registry';
-import { buildAppHtml } from './shell';
+import { buildAppHtml } from './_shell';
 
 // Canonical reader names ("Strait of Hormuz"), keyed by the ids the transit
 // summaries use. The JSON holds only plain names, so it is safe inside RENDER.

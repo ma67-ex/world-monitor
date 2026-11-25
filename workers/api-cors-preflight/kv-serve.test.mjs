@@ -85,7 +85,7 @@ test('served CORS headers are identical to the origin pass-through the Worker wo
   } finally { restore(); }
 });
 
-// #7308: the served bytes must carry api/bootstrap.js's PUBLIC header shape
+// #7308: the served bytes must carry api/_bootstrap.js's PUBLIC header shape
 // (getPublicBootstrapHeaders: ACAO:*, no Allow-Credentials, no Vary: Origin),
 // not the Worker's credentialed bag. The origin handler reaches that shape only
 // for public auth kinds, and `?tier=<t>&public=1` is exactly one of them; the

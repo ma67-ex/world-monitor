@@ -27,7 +27,7 @@ async function importFreshNotificationChannels() {
   process.env.UPSTASH_REDIS_REST_TOKEN = 'upstash-token';
   // 32 zero-bytes, base64 — encryptSlackWebhook only needs a decodable key.
   process.env.NOTIFICATION_ENCRYPTION_KEY = Buffer.alloc(32).toString('base64');
-  return import(`../api/notification-channels.ts?test=${Date.now()}-${Math.random()}`);
+  return import(`../api/_notification-channels.ts?test=${Date.now()}-${Math.random()}`);
 }
 
 function proShapedEntitlements() {

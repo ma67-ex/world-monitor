@@ -3,6 +3,7 @@ export const config = { runtime: 'edge' };
 // @ts-expect-error -- JS module, no declaration file
 import { getCorsHeaders, isDisallowedOrigin } from '../_cors.js';
 import { readJsonFromUpstash, setCachedData } from '../_upstash-json.js';
+import { MAX_INSTRUCTIONS_LEN } from '../../shared/analysis-framework-limits';
 import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, checkIpScopedEdgeProof, getClientRateLimitKey, scopedTooManyRequestsResponse } from '../../server/_shared/rate-limit';
 
 const ALLOWED_AGENTSKILLS_HOSTS = new Set(['agentskills.io', 'www.agentskills.io', 'api.agentskills.io']);
@@ -16,7 +17,7 @@ const RATE_LIMIT_POLICY = ENDPOINT_RATE_POLICIES[RATE_LIMIT_SCOPE];
 if (!RATE_LIMIT_POLICY) {
   // Module-load failure — better to crash the function cold-start with a loud
   // message than to silently fall back to "no rate limit" if someone
-  // accidentally deletes the registry entry (same guard as api/docs-mcp.ts).
+  // accidentally deletes the registry entry (same guard as api/_docs-mcp.ts).
   throw new Error(
     `[fetch-agentskills] missing ENDPOINT_RATE_POLICIES['${RATE_LIMIT_SCOPE}'] — see server/_shared/rate-limit.ts`,
   );
@@ -50,7 +51,7 @@ export default async function handler(
   // our edge fetch agentskills.io. Every victim is a different IP, so the
   // per-IP budget below cannot bound that aggregate — the Origin gate is what
   // closes it. isDisallowedOrigin passes an absent Origin, so the same-origin
-  // settings importer is unaffected. Matches api/symbol-search.ts and both
+  // settings importer is unaffected. Matches api/_symbol-search.ts and both
   // sibling proxies. (#6412 review)
   if (isDisallowedOrigin(req)) {
     return Response.json({ error: 'Origin not allowed' }, { status: 403 });

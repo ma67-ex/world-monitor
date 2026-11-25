@@ -1,5 +1,5 @@
 import { motion } from 'motion/react';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, Github } from 'lucide-react';
 import { WiredBadge } from '../components/WiredBadge';
 import { currentLanguageBase, t } from '../i18n';
 import { DASHBOARD_PATH } from '../routes';

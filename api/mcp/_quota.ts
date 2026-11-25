@@ -8,7 +8,7 @@ import {
   PRO_DAILY_QUOTA_TTL_SECONDS,
 } from '../../server/_shared/pro-mcp-token';
 import { MCP_QUOTA_RESERVE_SCRIPT as RESERVE_QUOTA_SCRIPT } from '../../shared/mcp-quota-reserve-script.mjs';
-import type { PipelineFn, QuotaRejected, QuotaReserved } from './types';
+import type { PipelineFn, QuotaRejected, QuotaReserved } from './_types';
 
 // ---------------------------------------------------------------------------
 // Daily quota helpers (Pro-only). Reservation runs synchronously on the
@@ -32,7 +32,7 @@ import type { PipelineFn, QuotaRejected, QuotaReserved } from './types';
  * `PRO_DAILY_QUOTA_LIMIT`. That direction is deliberate: an unreadable limit
  * must never buy a caller a HIGHER cap than the plan default.
  *
- * Exported because the settings-UI reader (`api/user/mcp-quota.ts`) must DISPLAY
+ * Exported because the settings-UI reader (`api/user/_mcp-quota.ts`) must DISPLAY
  * exactly the limit this module ENFORCES. A second copy of this normalisation
  * would be the drift the endpoint's whole reason for existing is to prevent.
  */
@@ -136,7 +136,7 @@ export function resolveAccountMcpBudget(account: unknown): McpBudget | null {
  * Resolve which budget a plan's MCP calls charge.
  *
  * Shared by enforcement (`checkMcpEntitlementGate`), the settings display
- * (`api/user/mcp-quota.ts`), and the `account/mcp-allowance` resource so the
+ * (`api/user/_mcp-quota.ts`), and the `account/mcp-allowance` resource so the
  * number a user reads is the number the reservation applies. An unreadable
  * entitlement resolves to the dedicated Pro default, never to a shared budget:
  * a missing limit must never buy a caller a HIGHER cap than the plan default.
@@ -186,7 +186,7 @@ export function isSharedRestCounter(budget: McpBudget | undefined): boolean {
 
 /**
  * The daily counter a budget charges. Exported because the settings reader
- * (`api/user/mcp-quota.ts`) and the `account/mcp-allowance` resource must READ
+ * (`api/user/_mcp-quota.ts`) and the `account/mcp-allowance` resource must READ
  * the counter this module WRITES; a second copy of this choice would be exactly
  * the drift those surfaces exist to prevent.
  *

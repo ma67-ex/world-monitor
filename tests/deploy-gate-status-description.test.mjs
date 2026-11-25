@@ -1686,7 +1686,7 @@ describe('deploy gate commit-status description', () => {
 describe('deploy gate stale-base drift', () => {
   const diverged = (extra) => ({ mergeBase: OLD_BASE, ...extra });
   const mergedPull = { state: 'closed', merged_at: '2026-08-12T12:00:00Z', head: { sha: SHA } };
-  const overlap = diverged({ headFiles: ['api/widget-agent.ts'], mainFiles: ['api/widget-agent.ts'] });
+  const overlap = diverged({ headFiles: ['api/_widget-agent.ts'], mainFiles: ['api/_widget-agent.ts'] });
 
   const openPull = (base) => ({ state: 'open', merged_at: null, head: { sha: SHA, repo: { full_name: 'koala73/worldmonitor' } }, base: { ref: base, repo: { full_name: 'koala73/worldmonitor' } } });
 
@@ -1831,15 +1831,15 @@ describe('deploy gate stale-base drift', () => {
     // intersection, separated, and neither side's exclusive files.
     const result = runGate(conclusionsFor('success'), {
       drift: diverged({
-        headFiles: ['api/widget-agent.ts', 'docs/head-only.md', 'tests/widget-agent-auth.test.mts'],
-        mainFiles: ['api/widget-agent.ts', 'server/gateway.ts', 'tests/widget-agent-auth.test.mts'],
+        headFiles: ['api/_widget-agent.ts', 'docs/head-only.md', 'tests/widget-agent-auth.test.mts'],
+        mainFiles: ['api/_widget-agent.ts', 'server/gateway.ts', 'tests/widget-agent-auth.test.mts'],
       }),
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(result.posted, [{
       state: 'failure',
       description: stamped(
-        'Stale base: main changed 2 file(s) here: api/widget-agent.ts,tests/widget-agent-auth.test.mts',
+        'Stale base: main changed 2 file(s) here: api/_widget-agent.ts,tests/widget-agent-auth.test.mts',
       ),
     }]);
   });
@@ -1848,7 +1848,7 @@ describe('deploy gate stale-base drift', () => {
     const result = runGate(conclusionsFor('success'), {
       drift: diverged({
         headFiles: ['src/services/oref-alerts.ts'],
-        mainFiles: ['api/widget-agent.ts', 'server/gateway.ts'],
+        mainFiles: ['api/_widget-agent.ts', 'server/gateway.ts'],
       }),
     });
     assert.equal(result.status, 0, result.stderr);
@@ -1864,8 +1864,8 @@ describe('deploy gate stale-base drift', () => {
       const result = runGate(conclusionsFor('success'), {
         drift: {
           mergeBase,
-          headFiles: ['api/widget-agent.ts'],
-          mainFiles: ['api/widget-agent.ts'],
+          headFiles: ['api/_widget-agent.ts'],
+          mainFiles: ['api/_widget-agent.ts'],
         },
       });
       assert.equal(result.status, 0, result.stderr);
@@ -1890,7 +1890,7 @@ describe('deploy gate stale-base drift', () => {
 
   it('does not spend a comparison on a head that is already failing', () => {
     const result = runGate({ ...conclusionsFor('success'), unit: 'failure' }, {
-      drift: diverged({ headFiles: ['api/widget-agent.ts'], mainFiles: ['api/widget-agent.ts'] }),
+      drift: diverged({ headFiles: ['api/_widget-agent.ts'], mainFiles: ['api/_widget-agent.ts'] }),
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.posted[0].state, 'failure');
@@ -2027,25 +2027,25 @@ describe('deploy gate stale-base drift over a real repository', () => {
 
   it('names exactly the files both sides touched', () => {
     const result = drift({
-      base: ['api/widget-agent.ts', 'server/gateway.ts', 'docs/x.md'],
-      head: ['api/widget-agent.ts', 'docs/x.md'],
-      main: ['api/widget-agent.ts', 'server/gateway.ts'],
+      base: ['api/_widget-agent.ts', 'server/gateway.ts', 'docs/x.md'],
+      head: ['api/_widget-agent.ts', 'docs/x.md'],
+      main: ['api/_widget-agent.ts', 'server/gateway.ts'],
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, 'api/widget-agent.ts');
+    assert.equal(result.stdout, 'api/_widget-agent.ts');
   });
 
   it('finds the merge base below a depth-1 checkout', () => {
     // The clone holds only main's tip, so its parent, the real merge base,
     // sits behind the shallow boundary.
     const result = drift({
-      base: ['api/widget-agent.ts', 'server/gateway.ts'],
-      head: ['api/widget-agent.ts'],
-      main: ['api/widget-agent.ts', 'server/gateway.ts'],
+      base: ['api/_widget-agent.ts', 'server/gateway.ts'],
+      head: ['api/_widget-agent.ts'],
+      main: ['api/_widget-agent.ts', 'server/gateway.ts'],
       shallow: true,
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, 'api/widget-agent.ts');
+    assert.equal(result.stdout, 'api/_widget-agent.ts');
   });
 
   it('stays silent when the two sides are disjoint', () => {

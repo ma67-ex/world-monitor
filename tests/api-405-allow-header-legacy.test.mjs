@@ -12,12 +12,12 @@ import { describe, it } from 'node:test';
 process.env.UPSTASH_REDIS_REST_URL ||= 'https://example.upstash.io';
 process.env.UPSTASH_REDIS_REST_TOKEN ||= 'test-token';
 
-const { default: productCatalog } = await import('../api/product-catalog.js');
-const { default: cachePurge } = await import('../api/cache-purge.js');
-const { default: correlationRuntimeMode } = await import('../api/correlation-runtime-mode.js');
-const { default: xFeed } = await import('../api/x-feed.js');
-const { default: telegramFeed } = await import('../api/telegram-feed.js');
-const { default: securityReport } = await import('../api/security/report.js');
+const { default: productCatalog } = await import('../api/_product-catalog.js');
+const { default: cachePurge } = await import('../api/_cache-purge.js');
+const { default: correlationRuntimeMode } = await import('../api/_correlation-runtime-mode.js');
+const { default: xFeed } = await import('../api/_x-feed.js');
+const { default: telegramFeed } = await import('../api/_telegram-feed.js');
+const { default: securityReport } = await import('../api/security/_report.js');
 
 const ORIGIN = 'https://worldmonitor.app';
 

@@ -510,7 +510,7 @@ class DataFreshnessTracker {
   private healthStatusIsError(status: string): boolean {
     return status === 'SEED_ERROR' || status === 'REDIS_DOWN' || status === 'REDIS_PARTIAL'
       // Server-crit: a fresh-aged CHINA_UNAVAILABLE must render as an error, not
-      // pass through calculateStatus's age check as 'fresh' (api/health.js crit).
+      // pass through calculateStatus's age check as 'fresh' (api/_health.js crit).
       || status === 'CHINA_UNAVAILABLE';
   }
 

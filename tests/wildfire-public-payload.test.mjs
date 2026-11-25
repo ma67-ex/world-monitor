@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import bootstrap from '../api/bootstrap.js';
+import bootstrap from '../api/_bootstrap.js';
 import { compactWildfireDashboardPayload as edgeCompact } from '../api/_wildfire-dashboard.js';
 import { compactWildfireDashboardPayload as seedCompact, WILDFIRE_CANONICAL_DETECTION_LIMIT } from '../scripts/_wildfire-dashboard.mjs';
 import { mergeWildfireSourcesWithBc, wildfirePublishData } from '../scripts/wildfire/bc-fire-points.mjs';

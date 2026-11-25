@@ -47,6 +47,7 @@ async function operatorKeyIdentity(key: string): Promise<PremiumCallerIdentity> 
 }
 
 export type PremiumCallerIdentity =
+  | { isPremium: true; userId: null; kind: 'enterprise'; quotaExempt: true }
   | { isPremium: true; userId: string; kind: 'internal-mcp'; quotaExempt: true }
   | {
       isPremium: true;
@@ -61,7 +62,7 @@ export type PremiumCallerIdentity =
       /**
        * Present on `desktop-key` only: what the per-account desktop meter
        * (KTD6 / R6) needs — the owner's plan and its sold limits — so a
-       * standalone edge (api/mcp-proxy.ts, api/chat-analyst.ts) can charge
+       * standalone edge (api/_mcp-proxy.ts, api/_chat-analyst.ts) can charge
        * `chargeDesktopKeyBudget` without a second entitlement read. The meter
        * is NOT charged here: gateway-served handlers resolve this identity too
        * and the gateway has already charged them; charging twice would halve
@@ -134,7 +135,7 @@ export type PremiumCallerIdentity =
      * — nothing was presented, or what was presented did not validate — rather
      * than on a verdict about an identified account's plan.
      *
-     * Without it every denial looked the same, so `api/chat-analyst.ts` told a
+     * Without it every denial looked the same, so `api/_chat-analyst.ts` told a
      * signed-out visitor to buy a Pro subscription. The fix for that caller is a
      * session, not a purchase, and the client classifier has carried a
      * `sign_in_required` verdict since #5608 that no 403 on this route could
@@ -531,7 +532,7 @@ async function resolvePremiumCallerIdentityInternal(request: Request): Promise<P
  * "Pro subscription required" 403 — that flattens a backend blip into a
  * misleading upsell for a paying customer. Those callers must use
  * `resolvePremiumCallerIdentity()` and render `identity.billingDenial` via
- * `getBillingVerificationDenial` instead (see api/chat-analyst.ts). Threading
+ * `getBillingVerificationDenial` instead (see api/_chat-analyst.ts). Threading
  * the signal through this boolean would mean changing its return type and every
  * caller, which is why the identity API carries it instead.
  *

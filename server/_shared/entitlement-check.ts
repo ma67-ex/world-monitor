@@ -37,7 +37,7 @@ import { getCachedJson, setCachedJson } from './redis.js';
 // ---------------------------------------------------------------------------
 
 // Single source of truth for the billing-verification status union — imported
-// by api/mcp/types.ts, api/mcp/auth.ts, and api/mcp/billing-denial.ts so the
+// by api/mcp/_types.ts, api/mcp/_auth.ts, and api/mcp/_billing-denial.ts so the
 // four surfaces cannot silently drift when a status is added.
 export type BillingVerificationStatus =
   | 'subscription_lapsed'
@@ -819,7 +819,7 @@ async function _getEntitlementsImpl(
       // property "Convex said yes ⇒ caller sees yes" is local and load-bearing.
       // Without this, an Upstash hiccup would 403 every paying customer on the
       // very call paths this file gates — the same shape PR #3505 fixed for the
-      // Clerk-only-no-Convex outlier in api/widget-agent.ts.
+      // Clerk-only-no-Convex outlier in api/_widget-agent.ts.
       try {
         await setCachedJson(
           `entitlements:${ENV_PREFIX}:${userId}`,
@@ -915,7 +915,7 @@ export function unverifiableEntitlementDenial(
  * row — no Response, no headers, no transport.
  *
  * Extracted from getBillingVerificationDenial (#5622) because three consumers
- * cannot use a `Response`: `api/oauth/authorize-pro.ts` renders HTML,
+ * cannot use a `Response`: `api/oauth/_authorize-pro.ts` renders HTML,
  * `api/internal/mcp-grant-{mint,context}.ts` own an `INSUFFICIENT_TIER`-style
  * vocabulary inside an OAuth handshake, and `server/_shared/premium-check.ts`
  * answers with a boolean/identity. Before this existed each of them flattened
@@ -983,7 +983,7 @@ export function getBillingVerificationDenial(
  *
  * Split out from getBillingVerificationDenial for callers that classified
  * earlier and carry the decision with them — `server/_shared/premium-check.ts`
- * attaches it to the denied identity, and api/chat-analyst.ts renders that.
+ * attaches it to the denied identity, and api/_chat-analyst.ts renders that.
  * Before this existed, that route hand-built `{ verificationUnavailable: true }`
  * to re-enter the classifier, which collapsed all four states into one.
  */

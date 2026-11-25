@@ -158,10 +158,10 @@ export const RESILIENCE_RANKING_CACHE_TTL_SECONDS = 12 * 60 * 60;
 export const RESILIENCE_SCORE_CACHE_PREFIX = 'resilience:score:v29:';
 // appendHistory writes resilience:history:v23: and the trend reader scans the same prefix.
 export const RESILIENCE_HISTORY_KEY_PREFIX = 'resilience:history:v23:';
-// Must match scripts/seed-resilience-scores.mjs and api/health.js. getResilienceRanking writes this key. The seeder and the health probe read it.
+// Must match scripts/seed-resilience-scores.mjs and api/_health.js. getResilienceRanking writes this key. The seeder and the health probe read it.
 export const RESILIENCE_RANKING_CACHE_KEY = 'resilience:ranking:v29';
 export const RESILIENCE_STATIC_INDEX_KEY = 'resilience:static:index:v1';
-// Must match scripts/_resilience-intervals.mjs and api/seed-health.js. The seeder writes these keys and getResilienceScore reads them.
+// Must match scripts/_resilience-intervals.mjs and api/_seed-health.js. The seeder writes these keys and getResilienceScore reads them.
 export const RESILIENCE_INTERVAL_KEY_PREFIX = 'resilience:intervals:v12:';
 export const RESILIENCE_INTERVAL_METHODOLOGY = 'weight-perturbation-sensitivity-v3';
 export const RESILIENCE_STATIC_META_KEY = 'seed-meta:resilience:static';

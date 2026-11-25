@@ -13,7 +13,7 @@ function restoreEnv(): void {
 async function importFreshCreateCheckout() {
   process.env.CONVEX_SITE_URL = 'https://convex.test';
   process.env.CONVEX_TENANT_RELAY_SECRET = 'relay-secret';
-  return import(`../api/create-checkout.ts?test=${Date.now()}-${Math.random()}`);
+  return import(`../api/_create-checkout.ts?test=${Date.now()}-${Math.random()}`);
 }
 
 async function relayedBody(acquisition: unknown): Promise<Record<string, unknown>> {
