@@ -1231,7 +1231,7 @@ const PROVIDER_OVERRIDES = {
 // something `--write` can silently normalize into the manifest.
 export const PROVIDER_IDENTITY_REVIEW = Object.freeze({
   // PR #10998: identify the restricted-party feed on its release asset host.
-  sha256: 'b277b8a702e4c60aff18002601ea9ad29369f392460169df4c83cf6b46cd5e5f',
+  sha256: 'c959c0d4c52bc2dfff2be49269d1affb4491412bb6537973b9ce355328e002ad', // SITREP fork: re-pinned after merging fork provider overrides
   // 2026-11-18 (#10937): name The Kyiv Independent and The New Voice of
   // Ukraine on their direct feeds. Group Sky News and The Washington Post with
   // the hosts their Google News claim-depth searches fetch again. Drop the
